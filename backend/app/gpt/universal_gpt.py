@@ -197,22 +197,44 @@ class UniversalGPT(GPT):
         )
 
     def _do_create(self, messages: list):
-        """单次调用。如果模型拒绝自定义 temperature，就地去掉该参数再试一次
-        （不消耗外层的重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
+        """单次调用（流式）。
+
+        为什么用 stream=True：zen 免费推理模型（space-bunny-free 等）对长提示
+        先输出大段 reasoning_content 再给正式回答，非流式请求在整段生成完毕前
+        一个字节都不返回——超过 Cloudflare ~100s 的源站超时后连接被直接掐断
+        （RemoteDisconnected），且生成时间随提示长度膨胀到数分钟。流式下 SSE
+        响应头立刻到达、token 持续流动，不会被边缘超时误杀。
+        如果模型拒绝自定义 temperature，就地去掉该参数再试一次（不消耗外层
+        重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
         try:
-            return self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-            )
+            return self._stream_create(messages, temperature=self.temperature)
         except Exception as exc:
             if self._is_temperature_unsupported_error(exc):
                 print(f"[universal_gpt] 模型 {self.model} 不支持自定义 temperature，改用默认值重试")
-                return self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                )
+                return self._stream_create(messages, temperature=None)
             raise
+
+    def _stream_create(self, messages: list, temperature):
+        from types import SimpleNamespace
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+            stream=True,
+        )
+        parts: list[str] = []
+        for chunk in stream:
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta
+            text = getattr(delta, "content", None)
+            if text:
+                parts.append(text)
+        content = "".join(parts)
+        # 包装成与非流式响应同形的对象，调用方只读 choices[0].message.content
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+        )
 
     def _chat_completion_create(self, messages: list):
         last_exc = None
