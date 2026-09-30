@@ -3,9 +3,11 @@ import json
 import logging
 import tempfile
 from abc import ABC
+from pathlib import Path
 from typing import Union, Optional, List
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 from app.downloaders.base import Downloader, DownloadQuality, QUALITY_MAP, YDL_RETRY_OPTS
 from app.downloaders.bilibili_dm_patch import apply_bilibili_dm_img_patch
@@ -22,6 +24,50 @@ logger = logging.getLogger(__name__)
 # gateway now requires; without them the API path returns HTTP 412. See
 # app/downloaders/bilibili_dm_patch.py for details.
 apply_bilibili_dm_img_patch()
+
+# B 站 CDN 的 HTTP 416（Requested Range Not Satisfiable）：yt-dlp 带着 .part 断点
+# 续传时，若分片尺寸与服务器当前文件对不上（上次中断留下的旧分片、CDN 换节点后
+# 文件不一致），服务器直接回 416，整个任务失败。yt-dlp 官方确认的触发条件，
+# 见 yt-dlp#8313。对策：删掉该视频的残留分片，关闭续传从头重下一次。
+_YDL_416_RETRIES = 2
+
+
+def _resolve_proxy_opt() -> Optional[str]:
+    """B 站 CDN 是国内节点，系统代理（Clash 等）转发其 CDN 流量时频繁出现连接
+    停滞和断点续传 416（2026-09-30 排查实锤：经 127.0.0.1 本地代理下载可挂起
+    6 分钟零字节，直连 5 秒完成）。默认绕过系统代理直连；确实需要走代理的
+    网络，设置环境变量 BILINOTE_BILI_USE_SYSTEM_PROXY=1 即可恢复原行为。
+    yt-dlp 语义：'' → __noproxy__ 强制直连；None → 自动读环境/系统代理。
+    """
+    if os.getenv("BILINOTE_BILI_USE_SYSTEM_PROXY"):
+        return None
+    return ""
+
+
+def _clear_partial_files(output_dir: str, video_id_hint: str) -> None:
+    for p in Path(output_dir).glob(f"{video_id_hint}*"):
+        if p.suffix in (".part", ".ytdl"):
+            try:
+                p.unlink()
+                logger.info("已删除残留分片: %s", p)
+            except OSError as e:
+                logger.warning("无法删除残留分片 %s: %s", p, e)
+
+
+def _ydl_extract_download(ydl_opts: dict, video_url: str, output_dir: str,
+                          video_id_hint: str) -> dict:
+    """extract_info(download=True)，对 HTTP 416 做有限次自动重试。"""
+    for attempt in range(1, _YDL_416_RETRIES + 1):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(video_url, download=True)
+        except DownloadError as e:
+            if attempt >= _YDL_416_RETRIES or "416" not in str(e):
+                raise
+            logger.warning("下载触发 HTTP 416（第 %d 次），清除分片后从头重试: %s",
+                           attempt, str(e).strip()[:200])
+            _clear_partial_files(output_dir, video_id_hint)
+            ydl_opts = {**ydl_opts, "continuedl": False}
 
 
 class BilibiliDownloader(Downloader, ABC):
@@ -64,6 +110,7 @@ class BilibiliDownloader(Downloader, ABC):
 
         ydl_opts = {
             **YDL_RETRY_OPTS,
+            'proxy': _resolve_proxy_opt(),
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output_path,
             'http_headers': {'Referer': 'https://www.bilibili.com'},
@@ -80,13 +127,13 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            video_id = info.get("id")
-            title = info.get("title")
-            duration = info.get("duration", 0)
-            cover_url = info.get("thumbnail")
-            audio_path = os.path.join(output_dir, f"{video_id}.mp3")
+        video_id_hint = extract_video_id(video_url, "bilibili")
+        info = _ydl_extract_download(ydl_opts, video_url, output_dir, video_id_hint)
+        video_id = info.get("id")
+        title = info.get("title")
+        duration = info.get("duration", 0)
+        cover_url = info.get("thumbnail")
+        audio_path = os.path.join(output_dir, f"{video_id}.mp3")
 
         return AudioDownloadResult(
             file_path=audio_path,
@@ -124,6 +171,7 @@ class BilibiliDownloader(Downloader, ABC):
 
         ydl_opts = {
             **YDL_RETRY_OPTS,
+            'proxy': _resolve_proxy_opt(),
             'format': 'bv*[ext=mp4]/bestvideo+bestaudio/best',
             'outtmpl': output_path,
             'http_headers': {'Referer': 'https://www.bilibili.com'},
@@ -134,10 +182,9 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
-            video_id = info.get("id")
-            video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        info = _ydl_extract_download(ydl_opts, video_url, output_dir, video_id)
+        video_id = info.get("id")
+        video_path = os.path.join(output_dir, f"{video_id}.mp4")
 
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"视频文件未找到: {video_path}")
@@ -186,6 +233,7 @@ class BilibiliDownloader(Downloader, ABC):
 
         ydl_opts = {
             **YDL_RETRY_OPTS,
+            'proxy': _resolve_proxy_opt(),
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': langs,
