@@ -7,7 +7,7 @@ class ConcurrentTaskExecutor:
     """使用线程池并发执行任务，替代原来的串行锁。"""
 
     def __init__(self, max_workers: int | None = None):
-        self._max_workers = max_workers or int(os.getenv("TASK_MAX_WORKERS", "3"))
+        self._max_workers = max_workers or int(os.getenv("TASK_MAX_WORKERS", "1"))
         self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
 
     def run(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
