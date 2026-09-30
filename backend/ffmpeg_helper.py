@@ -42,8 +42,19 @@ def check_ffmpeg_exists() -> bool:
     """
     ffmpeg_bin_path = os.getenv("FFMPEG_BIN_PATH")
     logger.info(f"FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
+
+    def _prepend_path_once(path_dir: str) -> None:
+        normalized = os.path.normcase(os.path.normpath(path_dir))
+        entries = os.environ.get("PATH", "").split(os.pathsep)
+        if any(
+            entry and os.path.normcase(os.path.normpath(entry)) == normalized
+            for entry in entries
+        ):
+            return
+        os.environ["PATH"] = path_dir + os.pathsep + os.environ.get("PATH", "")
+
     if ffmpeg_bin_path and os.path.isdir(ffmpeg_bin_path):
-        os.environ["PATH"] = ffmpeg_bin_path + os.pathsep + os.environ.get("PATH", "")
+        _prepend_path_once(ffmpeg_bin_path)
         logger.info(f"使用FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
     else:
         # 遍历系统PATH寻找ffmpeg.exe
@@ -52,7 +63,7 @@ def check_ffmpeg_exists() -> bool:
         for path_dir in path_dirs:
             ffmpeg_exe_path = os.path.join(path_dir, "ffmpeg.exe")
             if os.path.isfile(ffmpeg_exe_path):
-                os.environ["PATH"] = path_dir + os.pathsep + system_path
+                _prepend_path_once(path_dir)
                 logger.info(f"在系统PATH中找到ffmpeg: {path_dir}")
                 break
     try:
