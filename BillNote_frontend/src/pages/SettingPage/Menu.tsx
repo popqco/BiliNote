@@ -6,11 +6,18 @@ import {
   Activity,
   Palette,
   AlarmClock,
+  Settings2,
 } from 'lucide-react'
 import MenuBar, { IMenuProps } from '@/pages/SettingPage/components/menuBar.tsx'
 
 const Menu = () => {
   const menuList: IMenuProps[] = [
+    {
+      id: 'general',
+      name: '通用',
+      icon: <Settings2 />,
+      path: '/settings/general',
+    },
     {
       id: 'model',
       name: 'AI 模型设置',

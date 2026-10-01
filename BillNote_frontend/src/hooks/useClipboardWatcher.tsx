@@ -2,23 +2,42 @@ import { useEffect, useRef } from 'react'
 import toast from 'react-hot-toast'
 import { get_video_meta } from '@/services/note.ts'
 import { useTaskStore } from '@/store/taskStore'
+import { useSystemStore } from '@/store/configStore'
 
 /**
- * 剪贴板视频链接识别：在应用回到前台（focus / visibilitychange）时读一次剪贴板，
- * 命中支持的视频链接 → 解析标题封面 → 右下角弹窗提示「是否为该视频生成笔记」。
+ * 剪贴板视频链接识别：命中支持的视频链接 → 解析标题封面 → 右下角弹窗
+ * 「是否为该视频生成笔记」。
+ *
+ * 两档工作模式（设置 → 通用 里切换，zustand persist 持久化）：
+ * 1. 默认（轮询关）：只在窗口回到前台（focus / visibilitychange）时读一次，
+ *    零后台开销、零打扰；
+ * 2. 轮询开：每 N 秒经 Rust 侧读一次系统剪贴板（Tauri clipboard-manager，
+ *    不需要窗口焦点，后台也能读），复制链接后即使不切回窗口也能捕获；
+ *    若此时窗口不可见，候选先攒着、等回到前台再一次性弹窗（不打扰其它应用）。
+ *
+ * 为什么只能轮询、没有"中断"：
+ * 操作系统根本不提供剪贴板变更通知（Windows 只有 AddClipboardFormatListener
+ * 这种窗口消息，且 WebView 拿不到；macOS/Linux 同理），官方
+ * tauri-plugin-clipboard-manager 也只有 readText/writeText，没有变更事件。
+ * 第三方 tauri-plugin-clipboard 的 listenText 本质也是 Rust 起后台线程定时
+ * GetClipboardSequenceNumber 轮询——只是把轮询藏进了 Rust 侧。所以"中断式"
+ * 在这条路上不存在，自己按需轮询是最直接、最少依赖的方案。
+ *
+ * 开销实测结论（见 commit message）：单次 readText 是一次 IPC + 一次 WinAPI
+ * 调用（空剪贴板约 1ms 量级）；3 秒间隔下 CPU/内存占用可忽略，
+ * 失败时还会指数退避（3s→6s→12s→…→上限 60s），读成功一次即复位。
  *
  * 约束（用户决策 + 平台限制）：
- * - 只在 focus/visible 时读，不轮询：WebView 里 navigator.clipboard.readText()
- *   需要「用户手势/焦点」上下文，后台定时读会被浏览器拒绝，还耗电；
  * - 同一个链接只提示一次（内存 Set + sessionStorage 双记，避免 StrictMode
  *   双跑 effect 导致一次粘贴弹两次）；
  * - 已经在生成历史里的视频不再提示（查 extractVideoKey + 后端 video_id 双通道）；
- * - 读不到剪贴板（无权限/非 Tauri 焦点丢失）一律静默，不打扰；
+ * - 读不到剪贴板（插件未注册/纯 Web 端）一律静默，不打扰；
  * - 点「生成笔记」只是把链接填进表单（setClipboardCandidate），不自动提交——
  *   模型/风格/截图开关仍由用户确认，避免误触扣费。
  */
 
 const SEEN_KEY = 'bilinote-clipboard-seen'
+const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 function loadSeen(): Set<string> {
   try {
@@ -71,10 +90,31 @@ function alreadyHasVideo(url: string): boolean {
   })
 }
 
+export interface ClipboardCandidate {
+  url: string
+  platform: string
+  title?: string
+  cover_url?: string
+}
+
+/**
+ * 读剪贴板文本，双通道：
+ * 1. Tauri 优先：经 Rust 读系统剪贴板，不需要窗口焦点——后台轮询就靠它；
+ * 2. 回退 Web API：navigator.clipboard.readText() 需要焦点，无焦点直接返回 null
+ *    （纯 Web 端 / 插件未注册时的兜底）。
+ * 任何失败都返回 null，上层静默跳过。
+ */
 async function readClipboardText(): Promise<string | null> {
+  if (isTauri) {
+    try {
+      const { readText } = await import('@tauri-apps/plugin-clipboard-manager')
+      const text = await readText()
+      if (text) return text
+    } catch { /* 插件未就绪就往下走 Web 通道 */ }
+  }
   try {
     if (!navigator.clipboard?.readText) return null
-    // Tauri WebView2：document.hasFocus() 为 false 时读剪贴板会被拒，提前返回
+    // WebView2：document.hasFocus() 为 false 时读剪贴板会被拒，提前返回
     if (typeof document !== 'undefined' && !document.hasFocus()) return null
     const text = await navigator.clipboard.readText()
     return text || null
@@ -83,31 +123,37 @@ async function readClipboardText(): Promise<string | null> {
   }
 }
 
-export const useClipboardWatcher = (onCandidate: (info: {
-  url: string
-  platform: string
-  title?: string
-  cover_url?: string
-}) => void) => {
+export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => void) => {
+  // 轮询开关/间隔走全局 store（设置页可改），订阅后切开关即时生效
+  const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
+  const pollIntervalSec = useSystemStore(s => s.clipboardPollIntervalSec)
   const seenRef = useRef<Set<string>>(loadSeen())
   const checkingRef = useRef(false)
+  // 窗口不可见时命中的候选先攒在这里，回到前台再弹（攒多个就只弹最后一个）
+  const pendingRef = useRef<ClipboardCandidate | null>(null)
+  // 连续读取失败次数（指数退避用，成功一次即清零）
+  const failStreakRef = useRef(0)
   const cbRef = useRef(onCandidate)
   cbRef.current = onCandidate
 
   useEffect(() => {
-    const check = async () => {
-      if (checkingRef.current || document.hidden) return
+    let disposed = false
+
+    /** 读一次剪贴板 → 命中新链接则解析标题封面。deferHidden=true 时窗口不可见
+     *  只攒候选不弹窗（由回到前台的 flush 统一弹）。返回 true 表示读成功。 */
+    const check = async (deferHidden = false): Promise<boolean> => {
+      if (checkingRef.current || disposed) return true
       checkingRef.current = true
       try {
         const text = await readClipboardText()
-        if (!text) return
+        if (!text) return true
         const found = extractVideoUrl(text)
-        if (!found) return
+        if (!found) return true
         const seenKey = found.url
-        if (seenRef.current.has(seenKey)) return
+        if (seenRef.current.has(seenKey)) return true
         seenRef.current.add(seenKey)
         saveSeen(seenRef.current)
-        if (alreadyHasVideo(found.url)) return
+        if (alreadyHasVideo(found.url)) return true
 
         // 解析标题/封面（不下载，秒级；失败则用裸链接提示，不阻塞）
         let title: string | undefined
@@ -119,25 +165,62 @@ export const useClipboardWatcher = (onCandidate: (info: {
             cover_url = meta.cover_url
           }
         } catch { /* 解析失败就用裸链接提示 */ }
+        if (disposed) return true
 
-        cbRef.current({ url: found.url, platform: found.platform, title, cover_url })
+        const candidate = { url: found.url, platform: found.platform, title, cover_url }
+        if (deferHidden && document.hidden) {
+          // 后台命中的先攒着：切回前台时 flush 再弹，避免打扰其它应用
+          pendingRef.current = candidate
+        } else {
+          cbRef.current(candidate)
+        }
+        return true
+      } catch {
+        return false
       } finally {
         checkingRef.current = false
       }
     }
 
-    const onFocus = () => { void check() }
-    const onVisible = () => { if (!document.hidden) void check() }
+    /** 把后台攒着的候选弹出来（回到前台时调用） */
+    const flushPending = () => {
+      if (pendingRef.current && !document.hidden) {
+        cbRef.current(pendingRef.current)
+        pendingRef.current = null
+      }
+    }
+
+    const onFocus = () => { flushPending(); void check() }
+    const onVisible = () => { if (!document.hidden) { flushPending(); void check() } }
     window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVisible)
     // 挂载后延迟首查：等后端就绪与首屏渲染完成，避免启动期弹通知
-    const timer = setTimeout(check, 4000)
+    const timer = setTimeout(() => void check(), 4000)
+
+    // 轮询档：setTimeout 链（不用 setInterval），失败时指数退避
+    // 3s→6s→12s→…→上限 60s，成功一次即复位——剪贴板读失败通常是瞬时的，
+    // 退避只是避免某个坏状态下空转打扰。
+    let pollTimer: number | undefined
+    if (pollEnabled) {
+      const baseMs = Math.min(Math.max(pollIntervalSec, 1), 60) * 1000
+      const tick = async () => {
+        if (disposed) return
+        const ok = await check(true)
+        failStreakRef.current = ok ? 0 : failStreakRef.current + 1
+        const backoff = Math.min(2 ** failStreakRef.current, 20)
+        pollTimer = window.setTimeout(tick, Math.min(baseMs * backoff, 60000))
+      }
+      pollTimer = window.setTimeout(tick, baseMs)
+    }
+
     return () => {
+      disposed = true
       window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVisible)
       clearTimeout(timer)
+      if (pollTimer !== undefined) clearTimeout(pollTimer)
     }
-  }, [])
+  }, [pollEnabled, pollIntervalSec])
 }
 
 // 独立 toast 弹窗（右下角，含封面+标题+「生成笔记/忽略」按钮）

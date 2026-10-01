@@ -32,7 +32,9 @@ const DownloaderForm = lazy(() => import('@/components/Form/DownloaderForm/Form.
 const TranscriberPage = lazy(() => import('@/pages/SettingPage/transcriber.tsx'))
 const AppearancePage = lazy(() => import('@/pages/SettingPage/appearance.tsx'))
 const AutomationPage = lazy(() => import('@/pages/SettingPage/automation.tsx'))
+const GeneralPage = lazy(() => import('@/pages/SettingPage/general.tsx'))
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'))
+const GlobalClipboardWatcher = lazy(() => import('@/components/GlobalClipboardWatcher.tsx'))
 
 function App() {
   useTaskPolling(3000) // 每 3 秒轮询一次
@@ -72,6 +74,8 @@ function App() {
       <BackendHealthIndicator />
       <Router>
         <Suspense fallback={<div className="flex h-screen items-center justify-center">加载中…</div>}>
+          {/* 全局剪贴板监听：首页/设置页都存活，轮询不因切页中断 */}
+          <GlobalClipboardWatcher />
           <Routes>
             <Route path="/onboarding" element={<Onboarding />} />
             <Route path="/" element={<OnboardingGuard><Index /></OnboardingGuard>}>
@@ -88,6 +92,7 @@ function App() {
                 <Route path="transcriber" element={<TranscriberPage />} />
                 <Route path="appearance" element={<AppearancePage />} />
                 <Route path="automation" element={<AutomationPage />} />
+                <Route path="general" element={<GeneralPage />} />
                 <Route path="monitor" element={<Monitor />}></Route>
                 <Route path="about" element={<AboutPage />}></Route>
                 <Route path="*" element={<NotFoundPage />} />

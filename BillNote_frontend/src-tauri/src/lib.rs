@@ -23,6 +23,10 @@ struct SidecarHandle(Mutex<Option<CommandChild>>);
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // 剪贴板后台读取：navigator.clipboard.readText() 需要焦点/手势，
+        // 后台轮询会被 WebView 拒绝；经 Rust 侧读系统剪贴板则无此限制。
+        // 只申请读权限（allow-read-text），不碰写权限。
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
