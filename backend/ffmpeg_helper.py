@@ -40,21 +40,16 @@ _load_dotenv_from_multiple_paths()
 
 # /sys_health 由前端健康指示器每 5 秒轮询一次，每次都全量探测会以
 # 「3 行日志 × 17280 次/天」的速度把 app.log 刷爆（曾涨到 16MB 并盖住真实错误）。
-# 探测结果短时缓存：60 秒内直接复用，用户新装了 ffmpeg 也能在一分钟内自愈。
+# 两道闸：探测结果缓存 60 秒；细节日志只在「探测结论有变化」时打。
 _FFMPEG_CACHE_TTL_SECONDS = 60.0
-_ffmpeg_cache = {"ts": 0.0, "ok": False}
+_ffmpeg_cache = {"ts": 0.0, "ok": False, "detail": None}
 
 
-def check_ffmpeg_exists(use_cache: bool = True) -> bool:
-    """
-    检查 ffmpeg 是否可用。优先使用 FFMPEG_BIN_PATH 环境变量指定的路径。
-    """
-    now = time.time()
-    if use_cache and now - _ffmpeg_cache["ts"] < _FFMPEG_CACHE_TTL_SECONDS:
-        return _ffmpeg_cache["ok"]
-
+def _probe_ffmpeg() -> tuple:
+    """做一次真实探测，返回 (是否可用, 要写的日志行列表)。"""
+    msgs = []
     ffmpeg_bin_path = os.getenv("FFMPEG_BIN_PATH")
-    logger.info(f"FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
+    msgs.append(f"FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
 
     def _prepend_path_once(path_dir: str) -> None:
         normalized = os.path.normcase(os.path.normpath(path_dir))
@@ -68,7 +63,7 @@ def check_ffmpeg_exists(use_cache: bool = True) -> bool:
 
     if ffmpeg_bin_path and os.path.isdir(ffmpeg_bin_path):
         _prepend_path_once(ffmpeg_bin_path)
-        logger.info(f"使用FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
+        msgs.append(f"使用FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
     else:
         # 遍历系统PATH寻找ffmpeg.exe
         system_path = os.environ.get("PATH", "")
@@ -77,17 +72,32 @@ def check_ffmpeg_exists(use_cache: bool = True) -> bool:
             ffmpeg_exe_path = os.path.join(path_dir, "ffmpeg.exe")
             if os.path.isfile(ffmpeg_exe_path):
                 _prepend_path_once(path_dir)
-                logger.info(f"在系统PATH中找到ffmpeg: {path_dir}")
+                msgs.append(f"在系统PATH中找到ffmpeg: {path_dir}")
                 break
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        logger.info("ffmpeg 已安装")
-        _ffmpeg_cache.update(ts=time.time(), ok=True)
-        return True
+        msgs.append("ffmpeg 已安装")
+        return True, msgs
     except (FileNotFoundError, OSError, subprocess.CalledProcessError):
-        logger.info("ffmpeg 未安装")
-        _ffmpeg_cache.update(ts=time.time(), ok=False)
-        return False
+        msgs.append("ffmpeg 未安装")
+        return False, msgs
+
+
+def check_ffmpeg_exists(use_cache: bool = True) -> bool:
+    """
+    检查 ffmpeg 是否可用。优先使用 FFMPEG_BIN_PATH 环境变量指定的路径。
+    """
+    now = time.time()
+    if use_cache and now - _ffmpeg_cache["ts"] < _FFMPEG_CACHE_TTL_SECONDS:
+        return _ffmpeg_cache["ok"]
+
+    ok, msgs = _probe_ffmpeg()
+    if msgs != _ffmpeg_cache["detail"]:
+        for line in msgs:
+            logger.info(line)
+        _ffmpeg_cache["detail"] = msgs
+    _ffmpeg_cache.update(ts=now, ok=ok)
+    return ok
 
 
 def ensure_ffmpeg_or_raise():

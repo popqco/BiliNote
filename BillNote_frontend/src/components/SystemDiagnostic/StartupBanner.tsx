@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 // 桌面端启动诊断横幅。监听 Tauri 侧 emit 的 backend-warning / backend-error / backend-terminated。
 // 只在 Tauri 环境生效；纯 web 环境（无 window.__TAURI_INTERNALS__）下静默不挂载。
@@ -45,6 +45,13 @@ function describeWarning(payload: DiagnosticPayload): { title: string; detail: s
 
 const StartupBanner = () => {
   const [banner, setBanner] = useState<BannerState | null>(null)
+  // Rust 侧只按「路径含空格/非 ASCII」做预检，措辞是「可能**导致**后端启动失败」。
+  // 后端一旦确认就绪，这个前提就不成立（在 D:\Program Files\... 实测一直能起），
+  // 再挂个"可能失败"的横幅只会让人莫名其妙。记下就绪状态，晚到的这类警告直接丢弃。
+  const backendReadyRef = useRef(false)
+  // 被"后端已就绪"压下去的路径形状警告留一份：万一后端最终起不来，
+  // 这条提示才真正有意义，届时要能重新拿出来。
+  const shapeWarningRef = useRef<BannerState | null>(null)
 
   useEffect(() => {
     if (!isTauri) return
@@ -55,13 +62,27 @@ const StartupBanner = () => {
       const { listen } = await import('@tauri-apps/api/event')
 
       const offWarning = await listen<DiagnosticPayload>('backend-warning', event => {
-        const { title, detail } = describeWarning(event.payload || {})
+        const payload = event.payload || {}
+        // 「安装目录不可写」是实打实的问题，后端起来了也照报；路径形状类警告则免了。
+        const onlyShape = payload.parent_writable !== false
+        const { title, detail } = describeWarning(payload)
+        const state: BannerState = { severity: 'warning', title, detail, payload, dismissible: true }
+        if (onlyShape) {
+          shapeWarningRef.current = state
+          if (backendReadyRef.current) return
+        }
+        setBanner(state)
+      })
+
+      // 后端真的没起来（超时）→ 此时路径形状警告才是有用的线索，重新展示
+      const offStartupTimeout = await listen<string>('backend-startup-timeout', event => {
+        const pending = shapeWarningRef.current
+        if (!pending) return
         setBanner({
-          severity: 'warning',
-          title,
-          detail,
-          payload: event.payload,
-          dismissible: true,
+          severity: 'error',
+          title: '后端启动超时',
+          detail: `${event.payload || '后端未在预期时间内就绪。'}\n\n${pending.detail}`,
+          dismissible: false,
         })
       })
 
@@ -80,11 +101,17 @@ const StartupBanner = () => {
         setBanner(b => (b?.severity === 'error' ? null : b))
       })
       const offReady = await listen('backend-ready', () => {
-        setBanner(b => (b?.severity === 'error' ? null : b))
+        backendReadyRef.current = true
+        setBanner(b => {
+          if (!b) return b
+          if (b.severity === 'error') return null
+          if (b.severity === 'warning' && b.payload?.parent_writable !== false) return null
+          return b
+        })
       })
 
       // backend-error 是 sidecar stderr，量大噪音多，这里不直接展示，留给 P2 的日志面板。
-      unlisteners = [offWarning, offTerminated, offRestarted, offReady]
+      unlisteners = [offWarning, offTerminated, offRestarted, offReady, offStartupTimeout]
     })()
 
     return () => {
