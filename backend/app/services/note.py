@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -35,6 +36,7 @@ from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link
 from app.utils.logger import get_logger
+from app.utils.path_helper import get_app_dir
 from app.utils.screenshot_marker import extract_screenshot_timestamps
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
@@ -267,6 +269,9 @@ class NoteGenerator:
             logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
             self._update_status(task_id, TaskStatus.FAILED, message=self._format_error(exc))
             return None
+        finally:
+            # 清理任务专属的帧/拼图临时目录（并发隔离方案的配套清理）
+            self._cleanup_task_scratch(task_id)
 
     @staticmethod
     def delete_note(video_id: str, platform: str) -> int:
@@ -418,6 +423,30 @@ class NoteGenerator:
         logger.error(f"任务异常 (task_id={task_id})", exc_info=True)
         self._update_status(task_id, TaskStatus.FAILED, message=self._format_error(exc))
 
+    @staticmethod
+    def _task_scratch_dirs(task_id: Optional[str]) -> Tuple[str, str]:
+        """当前任务的帧/拼图临时目录（按 task_id 隔离）。
+
+        并发下必须隔离：VideoReader.run() 会清空并重写 frame_*/grid_* 文件，两个
+        任务用共享目录会互删文件、抢占句柄（2026-10-01 任务 4c0b2121 的
+        WinError 32 根因）。图片最终以 base64 进请求，目录只作临时区。
+        """
+        key = task_id or "shared"
+        return (
+            os.path.join(get_app_dir("output_frames"), key),
+            os.path.join(get_app_dir("grid_output"), key),
+        )
+
+    def _cleanup_task_scratch(self, task_id: Optional[str]) -> None:
+        """任务结束后清理专属帧/拼图目录（best-effort）。"""
+        if not task_id:
+            return
+        for base in ("output_frames", "grid_output"):
+            try:
+                shutil.rmtree(os.path.join(get_app_dir(base), task_id), ignore_errors=True)
+            except Exception:
+                pass
+
     def _adapt_frame_budget(
         self,
         video_path: Path,
@@ -531,6 +560,7 @@ class NoteGenerator:
                         self.video_path = Path(vp)
                         self._last_frame_interval = frame_interval
                         self._last_grid_size = list(grid_size)
+                        frame_dir, grid_dir = self._task_scratch_dirs(task_id)
                         self.video_img_urls = VideoReader(
                             video_path=vp,
                             grid_size=tuple(grid_size),
@@ -538,6 +568,8 @@ class NoteGenerator:
                             unit_width=960,
                             unit_height=540,
                             save_quality=80,
+                            frame_dir=frame_dir,
+                            grid_dir=grid_dir,
                         ).run()
                     else:
                         logger.warning(f"视频文件不在本地（{vp}），视频理解降级为纯文本总结")
@@ -587,6 +619,7 @@ class NoteGenerator:
                     )
                     self._last_frame_interval = frame_interval
                     self._last_grid_size = list(grid_size)
+                    frame_dir, grid_dir = self._task_scratch_dirs(task_id)
                     self.video_img_urls = VideoReader(
                         video_path=str(self.video_path),
                         grid_size=tuple(grid_size),
@@ -594,6 +627,8 @@ class NoteGenerator:
                         unit_width=960,
                         unit_height=540,
                         save_quality=80,
+                        frame_dir=frame_dir,
+                        grid_dir=grid_dir,
                     ).run()
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
@@ -767,7 +802,7 @@ class NoteGenerator:
         last_exc: Optional[Exception] = None
         for idx, (strategy, imgs, shot) in enumerate(attempts):
             if strategy == "thinned":
-                imgs = self._rebuild_video_grids()
+                imgs = self._rebuild_video_grids(task_id)
                 if not imgs:
                     logger.warning("减帧重建失败（无可用视频文件），跳过该级")
                     continue
@@ -792,7 +827,7 @@ class NoteGenerator:
             raise last_exc
         raise RuntimeError("总结失败：所有降级策略均未成功")
 
-    def _rebuild_video_grids(self) -> List[str]:
+    def _rebuild_video_grids(self, task_id: Optional[str] = None) -> List[str]:
         """降级第 2 级：用「间隔×3、拼图至少 2×2」重建缩略图网格（请求体积约 1/3）。"""
         try:
             if not self.video_path or not Path(self.video_path).exists():
@@ -803,6 +838,7 @@ class NoteGenerator:
                 grid = [2, 2]
             thinned_interval = max(1, base_interval * 3)
             logger.info(f"减帧重建：interval {base_interval}->{thinned_interval}, grid={grid}")
+            frame_dir, grid_dir = self._task_scratch_dirs(task_id)
             return VideoReader(
                 video_path=str(self.video_path),
                 grid_size=tuple(grid),
@@ -810,6 +846,8 @@ class NoteGenerator:
                 unit_width=960,
                 unit_height=540,
                 save_quality=80,
+                frame_dir=frame_dir,
+                grid_dir=grid_dir,
             ).run()
         except Exception as e:
             logger.warning(f"减帧重建失败: {e}")
