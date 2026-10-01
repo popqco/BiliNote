@@ -16,7 +16,8 @@ export const useTasksSync = (interval = 30000) => {
     let stopped = false
 
     const run = async () => {
-      const data = await get_recent_tasks(120)
+      // 拦截器已解包，直接是 { tasks: [...] }
+      const data: any = await get_recent_tasks(120)
       const list = data?.tasks
       if (stopped || !Array.isArray(list)) return
       const fresh = (bt: any) => (bt.updated_at || 0) * 1000 > Date.now() - DAY_MS
@@ -30,7 +31,7 @@ export const useTasksSync = (interval = 30000) => {
             useTaskStore.getState().addBackendTask(bt)
           } else if (bt.status === 'SUCCESS' && bt.has_result) {
             try {
-              const res = await get_task_status(bt.task_id)
+              const res: any = await get_task_status(bt.task_id)
               if (res?.result) useTaskStore.getState().addBackendTask(bt, res.result)
             } catch (e) {
               console.warn('同步后端成功任务失败:', bt.task_id, e)
@@ -38,7 +39,7 @@ export const useTasksSync = (interval = 30000) => {
           }
         } else if (bt.status === 'SUCCESS' && local.status !== 'SUCCESS' && bt.has_result) {
           try {
-            const res = await get_task_status(bt.task_id)
+            const res: any = await get_task_status(bt.task_id)
             if (res?.result) {
               const { markdown, transcript, audio_meta } = res.result
               useTaskStore.getState().updateTaskContent(bt.task_id, {

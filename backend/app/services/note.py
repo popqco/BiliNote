@@ -34,6 +34,7 @@ from app.services.task_serial_executor import transcribe_semaphore
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link
+from app.utils.logger import get_logger
 from app.utils.screenshot_marker import extract_screenshot_timestamps
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
@@ -56,9 +57,10 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
 # 图片基础 URL（用于生成 Markdown 中的图片链接，需前端静态目录对应）
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 
-# 日志配置
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+# 日志配置：必须用统一 get_logger（会挂 logs/app.log 的文件 handler）。
+# 裸 logging.getLogger 没有 handler，记录会全部丢失——2026-10-01 排查总结阶段
+# 「日志消失」时确认的根因。
+logger = get_logger(__name__)
 
 # 视频理解帧预算（见 _adapt_frame_budget）：超过时自动拉大间隔/加大拼图
 FRAME_BUDGET = 600   # 抽帧总数上限

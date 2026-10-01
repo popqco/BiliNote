@@ -32,7 +32,8 @@ export const useTaskPolling = (interval = 3000) => {
 
       for (const task of pendingTasks) {
         try {
-          const res = await get_task_status(task.id)
+          // 注意：axios 拦截器已解包，返回的是后端 data 字段（any 标注以匹配运行时形态）
+          const res: any = await get_task_status(task.id)
           netErrRef.current[task.id] = 0
           const { status } = res
 

@@ -16,7 +16,10 @@ from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
 from typing import List
 
-logger = logging.getLogger(__name__)
+from app.utils.logger import get_logger
+
+# 统一 get_logger，保证记录进 logs/app.log（裸 logging.getLogger 无 handler 会丢日志）
+logger = get_logger(__name__)
 
 
 class EmptyCompletionError(RuntimeError):
