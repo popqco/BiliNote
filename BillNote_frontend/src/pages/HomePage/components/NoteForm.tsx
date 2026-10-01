@@ -261,6 +261,29 @@ const NoteForm = () => {
     // message.success('已提交任务')
     try {
       const data = await generateNote(payload)
+
+      // 稍后再看「列表页」链接：后端批量建任务，这里逐条补进生成历史
+      if (data && (data as any).batch && Array.isArray((data as any).created)) {
+        const created = (data as any).created as Array<{ task_id: string; video_id: string; title?: string }>
+        toast.success(`已识别稍后再看列表，创建 ${created.length} 个任务`)
+        created.forEach(c => {
+          addPendingTask(c.task_id, 'bilibili', {
+            ...payload,
+            platform: 'bilibili',
+            video_url: `https://www.bilibili.com/video/${c.video_id}`,
+          })
+          if (c.title) {
+            useTaskStore.getState().mergeTaskAudioMeta(c.task_id, {
+              title: c.title,
+              video_id: c.video_id,
+              platform: 'bilibili',
+            } as any)
+          }
+        })
+        if (created.length) setCurrentTask(created[created.length - 1].task_id)
+        return
+      }
+
       addPendingTask(data.task_id, values.platform, payload)
       // 提交成功后立刻异步取标题/封面（不下载、秒级返回）：
       // 卡片不再等到任务完成/失败后才有内容可辨识

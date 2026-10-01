@@ -148,6 +148,45 @@ def update_proxy_config(data: ProxyConfigRequest):
     })
 
 
+# ---- 自动化：稍后再看定期检查 + 通知（见 docs/adr/0004）----
+
+class AutomationConfigRequest(BaseModel):
+    config: dict
+
+
+@router.get("/automation_config")
+def get_automation_config():
+    from app.services.automation_config_manager import AutomationConfigManager
+    return R.success(data=AutomationConfigManager().get_config())
+
+
+@router.post("/automation_config")
+def update_automation_config(data: AutomationConfigRequest):
+    from app.services.automation_config_manager import AutomationConfigManager
+    cfg = AutomationConfigManager().update_config(data.config or {})
+    return R.success(data=cfg, msg="已保存")
+
+
+@router.post("/automation/test_notify")
+def test_notify():
+    """向已启用的通知渠道各发一条测试消息，逐渠道返回结果。"""
+    from app.services.notifier import send_test
+    return R.success(data={"results": send_test()})
+
+
+@router.post("/automation/run_now")
+def run_now():
+    """手动触发一轮检查（后台执行，完成后自动发汇总通知）。"""
+    import threading
+    from app.services.automation_scheduler import AutomationScheduler
+
+    def _run():
+        AutomationScheduler().run_round_once_safe()
+
+    threading.Thread(target=_run, name="automation-run-now", daemon=True).start()
+    return R.success(msg="检查轮已触发（后台执行，完成后发送汇总通知）")
+
+
 # ---- Whisper 模型下载状态 & 下载触发 ----
 # 下载状态（downloading / done / failed + 失败原因）统一交给 model_download_state 维护，
 # 「触发下载」与「查询状态」共享同一份进程内内存态。失败原因会随状态接口透传给前端，

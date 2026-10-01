@@ -72,11 +72,15 @@ class VideoRequest(BaseModel):
         if parsed.scheme in ("http", "https"):
             # 是网络链接，继续用原有平台校验
             if not is_supported_video_url(url):
+                from app.services.watchlater import is_watchlater_list_url
+                if is_watchlater_list_url(url):
+                    # 稍后再看「列表页」链接：走批量导入（generate_note 内处理）
+                    return v
                 if "/list/" in url:
-                    # 列表页链接（稍后再看/收藏夹）里没有单个视频的 bvid，无法直接生成
+                    # 其它列表页链接（如收藏夹）暂不支持
                     raise NoteError(
                         code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
-                        message="这是列表页链接：请点开单个视频后复制其链接提交（整个列表的批量导入将在「自动化」里提供）",
+                        message="暂不支持该列表页链接：目前支持「稍后再看」列表页，或单个视频链接",
                     )
                 raise NoteError(code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
                                 message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message)
@@ -217,6 +221,46 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                         "downloading": readiness["downloading"],
                     },
                 )
+
+        # 稍后再看「列表页」链接：批量导入（拉列表 → 去重 → 逐条建任务）
+        from app.services.watchlater import is_watchlater_list_url, fetch_watchlater
+        if is_watchlater_list_url(str(data.video_url)):
+            try:
+                items = fetch_watchlater(max_items=50)
+            except Exception as e:
+                return R.error(msg=f"获取稍后再看列表失败：{e}", code=400)
+            created = []
+            for it in items:
+                bv = it.get("bvid")
+                if not bv:
+                    continue
+                if find_active_task_by_video(bv):
+                    continue
+                tid = str(uuid.uuid4())
+                NoteGenerator()._update_status(
+                    tid,
+                    TaskStatus.PENDING,
+                    extra={
+                        "video_id": bv,
+                        "platform": "bilibili",
+                        "origin": "manual",
+                        "video_url": it["video_url"],
+                        "audio_meta": {
+                            "title": it.get("title"),
+                            "cover_url": it.get("cover_url"),
+                            "video_id": bv,
+                            "duration": it.get("duration"),
+                            "platform": "bilibili",
+                        },
+                    },
+                )
+                background_tasks.add_task(
+                    run_note_task, tid, it["video_url"], "bilibili", data.quality, data.link,
+                    data.screenshot, data.model_name, data.provider_id, data.format, data.style,
+                    data.extras, data.video_understanding, data.video_interval, data.grid_size, bv,
+                )
+                created.append({"task_id": tid, "video_id": bv, "title": it.get("title")})
+            return R.success({"batch": True, "created": created, "count": len(created)})
 
         video_id = extract_video_id(data.video_url, data.platform)
         if (

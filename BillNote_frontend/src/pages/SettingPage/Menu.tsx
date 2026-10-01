@@ -5,6 +5,7 @@ import {
   Info,
   Activity,
   Palette,
+  AlarmClock,
 } from 'lucide-react'
 import MenuBar, { IMenuProps } from '@/pages/SettingPage/components/menuBar.tsx'
 
@@ -27,6 +28,12 @@ const Menu = () => {
       name: '外观',
       icon: <Palette />,
       path: '/settings/appearance',
+    },
+    {
+      id: 'automation',
+      name: '自动化',
+      icon: <AlarmClock />,
+      path: '/settings/automation',
     },
     {
       id: 'download',

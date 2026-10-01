@@ -68,6 +68,11 @@ async def lifespan(app: FastAPI):
             logger.info(f"           已应用全局代理到环境变量: {_proxy}")
 
         logger.info("[startup 5/5] 启动完成，等待请求")
+
+        # 自动化调度线程：稍后再看定期检查 + 汇总通知（enabled=false 时空转，
+        # 见 docs/adr/0004；Windows 计划任务入口 automation_cli.py 与其文件锁互斥）
+        from app.services.automation_scheduler import AutomationScheduler
+        AutomationScheduler().start()
     except Exception:
         logger.exception("[startup FAILED] 后端启动期异常，详见堆栈；容器会退出并由 restart 策略决定是否重试")
         raise
