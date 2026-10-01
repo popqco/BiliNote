@@ -1,3 +1,4 @@
+import json
 import os
 import platform
 from pathlib import Path
@@ -176,7 +177,10 @@ def test_notify():
 
 @router.post("/automation/run_now")
 def run_now():
-    """手动触发一轮检查（后台执行，完成后自动发汇总通知）。"""
+    """手动触发一轮检查（后台执行，完成后自动发汇总通知）。
+
+    结果不在这里返回：前端触发后轮询 /automation/status 看真实进度与失败原因。
+    """
     import threading
     from app.services.automation_scheduler import AutomationScheduler
 
@@ -185,6 +189,37 @@ def run_now():
 
     threading.Thread(target=_run, name="automation-run-now", daemon=True).start()
     return R.success(msg="检查轮已触发（后台执行，完成后发送汇总通知）")
+
+
+@router.get("/automation/status")
+def automation_status():
+    """自动化当前状态：是否在跑 / 阶段 / 上一轮的提交与跳过明细 / 失败原因。"""
+    from app.services.automation_scheduler import STATE_FILE
+
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    return R.success(data=state)
+
+
+@router.get("/automation/check_login")
+def automation_check_login():
+    """快速校验 B 站 Cookie（拉一次稍后再看），供「运行一轮」前置检查与「测试连接」用。"""
+    from app.services.watchlater import fetch_watchlater
+
+    try:
+        items = fetch_watchlater(ps=20, max_items=100)
+    except Exception as e:
+        return R.error(msg=str(e), code=400, data={"ok": False})
+    return R.success(
+        data={
+            "ok": True,
+            "count": len(items),
+            "items": [{"bvid": i.get("bvid"), "title": i.get("title")} for i in items[:10]],
+        },
+        msg=f"登录有效，稍后再看共 {len(items)} 个视频",
+    )
 
 
 # ---- Whisper 模型下载状态 & 下载触发 ----

@@ -20,6 +20,8 @@ import {
   save_automation_config,
   test_notify,
   run_automation_now,
+  get_automation_status,
+  check_automation_login,
 } from '@/services/automation.ts'
 
 /** 不可变地写入深层字段 */
@@ -54,12 +56,26 @@ const Row = ({ label, children }: any) => (
 const Automation = () => {
   const [cfg, setCfg] = useState<any>(null)
   const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<any>(null)
   const { loadEnabledModels, modelList } = useModelStore()
 
   useEffect(() => {
     loadEnabledModels()
     get_automation_config().then(c => setCfg(c)).catch(() => {})
+    refreshStatus()
   }, [])
+
+  const refreshStatus = () => get_automation_status().then(s => setStatus(s)).catch(() => {})
+
+  // 一轮可能跑几分钟（下载+转写+生成）：跑的过程中让面板自己刷新，
+  // 用户能看到阶段/提交数变化，而不是盯着一个静止的「进行中」。
+  useEffect(() => {
+    if (!status?.running) return
+    const t = window.setInterval(() => {
+      get_automation_status().then(setStatus).catch(() => {})
+    }, 5000)
+    return () => window.clearInterval(t)
+  }, [status?.running])
 
   if (!cfg) {
     return (
@@ -98,13 +114,40 @@ const Automation = () => {
     }
   }
 
+  /**
+   * 「立即运行一轮」：先校验 Cookie（失败当场给出原因，不再"点了没反应"），
+   * 触发后轮询 /automation/status，把本轮提交/跳过明细或失败原因回显出来。
+   */
   const onRunNow = async () => {
     setBusy(true)
+    let poll: number | undefined
     try {
+      const login: any = await check_automation_login()
+      const n = Number(login?.count ?? 0)
+      if (n === 0) {
+        toast('「稍后再看」当前是空的，本轮不会有新任务', { icon: 'ℹ️', duration: 6000 })
+      } else {
+        toast.success(`登录有效，「稍后再看」共 ${n} 个视频，开始检查…`)
+      }
       await run_automation_now()
-      toast.success('已触发一轮检查（后台执行，完成后发送汇总通知）')
-    } catch (e) {
-      console.error(e)
+
+      poll = window.setInterval(async () => {
+        const st: any = await get_automation_status().catch(() => null)
+        setStatus(st)
+        if (!st) return
+        if (st.last_error) {
+          toast.error(st.last_error, { duration: 8000 })
+          clearInterval(poll)
+        } else if (st.progress?.submitted) {
+          const sub = st.progress.submitted.length
+          const skip = (st.progress.skipped || []).length
+          toast.success(`本轮已提交 ${sub} 个任务，跳过 ${skip} 个（详见下方最近一轮）`, { duration: 6000 })
+          clearInterval(poll)
+        }
+      }, 2000)
+      window.setTimeout(() => poll && clearInterval(poll), 30000)
+    } catch (e: any) {
+      toast.error(e?.msg || '触发失败，请稍后再试', { duration: 8000 })
     } finally {
       setBusy(false)
     }
@@ -133,6 +176,39 @@ const Automation = () => {
           </Button>
         </div>
       </div>
+
+      {/* 最近一轮：点了「立即运行一轮」却看不到任何动静是最难查的问题，
+          这里直接把后端的阶段/提交/跳过/失败原因摊开显示 */}
+      {status && (status.running || status.last_result || status.last_error || status.progress) && (
+        <div className="border-border bg-muted/40 mt-4 rounded-lg border p-4 text-sm">
+          <div className="flex items-center gap-2 font-medium">
+            {status.running ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : status.last_error ? (
+              <span className="text-red-500">✕</span>
+            ) : (
+              <span className="text-green-500">✓</span>
+            )}
+            最近一轮：{status.phase || (status.running ? '进行中' : '未知')}
+            {status.last_round_at && <span className="text-muted-foreground font-normal">（{status.last_round_at.replace('T', ' ').slice(0, 19)}）</span>}
+          </div>
+          {status.last_error && <div className="text-red-500 mt-2">失败原因：{status.last_error}</div>}
+          {status.progress && (
+            <div className="text-muted-foreground mt-2 flex flex-col gap-1">
+              <div>
+                稍后再看 {status.progress.total_in_list} 个 · 提交 {status.progress.submitted?.length ?? 0} 个 · 跳过{' '}
+                {status.progress.skipped?.length ?? 0} 个
+              </div>
+              {(status.progress.submitted || []).map((s: any) => (
+                <div key={s.task_id} className="truncate">▸ 已提交：{s.title}（{s.bvid}）</div>
+              ))}
+              {(status.progress.skipped || []).map((s: any) => (
+                <div key={s.bvid} className="truncate">▸ 跳过 {s.bvid}：{s.reason}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <Section title="基础设置" desc="检查轮只在 BiliNote 运行时由应用内调度执行；配置 Windows 计划任务后关掉应用也能跑（automation_cli.py）。">
         <Row label="启用自动化">

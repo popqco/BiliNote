@@ -19,3 +19,13 @@ export const test_notify = async () => {
 export const run_automation_now = async () => {
   return await request.post('/automation/run_now', {})
 }
+
+/** 当前状态：是否在跑 / 阶段 / 本轮提交与跳过明细 / 失败原因 */
+export const get_automation_status = async () => {
+  return await request.get('/automation/status')
+}
+
+/** 校验 B 站 Cookie（拉一次稍后再看）。失败时 reject，err.msg 即失败原因 */
+export const check_automation_login = async () => {
+  return await request.get('/automation/check_login', { suppressToast: true })
+}

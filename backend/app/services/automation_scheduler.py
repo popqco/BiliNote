@@ -110,6 +110,13 @@ class AutomationScheduler:
         except Exception as e:
             logger.warning(f"写入自动化状态失败: {e}")
 
+    def _update_state(self, **kw) -> None:
+        """合并式写状态：进度/结果落进 automation_state.json，
+        前端「运行一轮」后可回读真实结果（失败原因不再只留在后台日志里）。"""
+        state = self._load_state()
+        state.update(kw)
+        self._save_state(state)
+
     def _loop(self) -> None:
         # 启动补查：等系统就绪后，如果距上次检查已超过半个周期就跑一轮
         self._stop.wait(60)
@@ -136,14 +143,19 @@ class AutomationScheduler:
         if not self._round_lock.acquire():
             return {"skipped": "另一个入口的检查轮正在运行（文件锁被占用）"}
         self._running_round = True
+        self._update_state(running=True, phase="拉取稍后再看")
         try:
-            return self.run_round_once(cfg)
+            result = self.run_round_once(cfg)
         except Exception as e:
             logger.error(f"检查轮失败: {e}", exc_info=True)
+            self._update_state(running=False, phase="失败", last_error=str(e))
             return {"error": str(e)}
         finally:
             self._running_round = False
             self._round_lock.release()
+        if isinstance(result, dict) and result.get("error"):
+            self._update_state(running=False, phase="失败", last_error=result["error"])
+        return result
 
     def run_round_once(self, cfg: Optional[dict] = None) -> Dict:
         cfg = cfg or AutomationConfigManager().get_config()
@@ -188,8 +200,21 @@ class AutomationScheduler:
             submitted.append({"task_id": task_id, "bvid": bv, "title": it.get("title"), "status": "PENDING"})
             logger.info(f"[自动] 已提交任务 {task_id[:8]} ← {it.get('title')} ({bv})")
 
+        # 提交阶段先落一次进度：长轮里「已提交谁」不用等整轮结束就能看到
+        self._update_state(
+            phase="生成笔记",
+            progress={"total_in_list": len(items), "submitted": submitted, "skipped": skipped},
+        )
+
         result = self._wait_and_summarize(submitted, skipped, started)
-        self._save_state({"last_round_ts": time.time(), "last_round_at": started.isoformat()})
+        self._update_state(
+            running=False,
+            phase="完成",
+            last_error=None,
+            last_result=result,
+            last_round_ts=time.time(),
+            last_round_at=started.isoformat(),
+        )
         logger.info(f"=== 自动化检查轮结束：提交 {len(submitted)}，跳过 {len(skipped)} ===")
         return result
 

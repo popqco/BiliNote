@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import time
 from dotenv import load_dotenv
 
 from app.utils.logger import get_logger
@@ -36,10 +37,22 @@ def _load_dotenv_from_multiple_paths():
 
 
 _load_dotenv_from_multiple_paths()
-def check_ffmpeg_exists() -> bool:
+
+# /sys_health 由前端健康指示器每 5 秒轮询一次，每次都全量探测会以
+# 「3 行日志 × 17280 次/天」的速度把 app.log 刷爆（曾涨到 16MB 并盖住真实错误）。
+# 探测结果短时缓存：60 秒内直接复用，用户新装了 ffmpeg 也能在一分钟内自愈。
+_FFMPEG_CACHE_TTL_SECONDS = 60.0
+_ffmpeg_cache = {"ts": 0.0, "ok": False}
+
+
+def check_ffmpeg_exists(use_cache: bool = True) -> bool:
     """
     检查 ffmpeg 是否可用。优先使用 FFMPEG_BIN_PATH 环境变量指定的路径。
     """
+    now = time.time()
+    if use_cache and now - _ffmpeg_cache["ts"] < _FFMPEG_CACHE_TTL_SECONDS:
+        return _ffmpeg_cache["ok"]
+
     ffmpeg_bin_path = os.getenv("FFMPEG_BIN_PATH")
     logger.info(f"FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
 
@@ -69,9 +82,11 @@ def check_ffmpeg_exists() -> bool:
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         logger.info("ffmpeg 已安装")
+        _ffmpeg_cache.update(ts=time.time(), ok=True)
         return True
     except (FileNotFoundError, OSError, subprocess.CalledProcessError):
         logger.info("ffmpeg 未安装")
+        _ffmpeg_cache.update(ts=time.time(), ok=False)
         return False
 
 

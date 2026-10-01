@@ -555,7 +555,10 @@ const NoteForm = () => {
               )}
             />
 
-            <div className="grid grid-cols-2 gap-4">
+            {/* 左栏可以被拖到 ~300px：定宽两列网格会让「拼图尺寸（列 × 行）」
+                这一格放不下（标签撑到 152px），第二个输入框被视口裁掉 11px。
+                改成按可用宽度自动换行，窄了就竖排。 */}
+            <div className="flex flex-wrap gap-4 [&>*]:min-w-[160px] [&>*]:flex-1">
               {/* 采样间隔 */}
               <FormField
                 control={form.control}
