@@ -110,6 +110,11 @@ jobs:
           find "$BUNDLE_DIR" -name "*.msi" -exec cp {} release-artifacts/ \; 2>/dev/null || true
           find "$BUNDLE_DIR/nsis" -name "*.exe" -exec cp {} release-artifacts/ \; 2>/dev/null || true
 
+          # 裸可执行文件：供「只替换安装目录里的 app.exe」的增量升级使用
+          # （保留用户自装的 sidecar/_internal/config，不做全量安装）
+          find "BillNote_frontend/src-tauri/target/release" -maxdepth 1 -name "BiliNote.exe" -exec cp {} release-artifacts/ \; 2>/dev/null || true
+          find "BillNote_frontend/src-tauri/target/release" -maxdepth 1 -name "BiliNote" -type f -exec cp {} release-artifacts/ \; 2>/dev/null || true
+
           echo "=== Collected artifacts ==="
           ls -lh release-artifacts/
 

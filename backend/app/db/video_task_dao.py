@@ -2,18 +2,29 @@ from app.db.models.video_tasks import VideoTask
 from app.db.engine import get_db
 from app.utils.logger import get_logger
 
+from sqlalchemy.exc import IntegrityError
+
 logger = get_logger(__name__)
 
 
-# 插入任务
+# 插入任务（幂等：UI 重试复用同一 task_id，重复插入不再抛 UNIQUE 异常）
 def insert_video_task(video_id: str, platform: str, task_id: str):
     db = next(get_db())
     try:
+        existing = db.query(VideoTask).filter_by(task_id=task_id).first()
+        if existing:
+            logger.info(f"Video task already exists, skip insert. task_id: {task_id}")
+            return existing.task_id
         task = VideoTask(video_id=video_id, platform=platform, task_id=task_id)
         db.add(task)
         db.commit()
         db.refresh(task)
         logger.info(f"Video task inserted successfully. video_id: {video_id}, platform: {platform}, task_id: {task_id}")
+        return task.task_id
+    except IntegrityError:
+        db.rollback()
+        logger.info(f"Video task insert duplicated (race), ignored. task_id: {task_id}")
+        return task_id
     except Exception as e:
         logger.error(f"Failed to insert video task: {e}")
     finally:

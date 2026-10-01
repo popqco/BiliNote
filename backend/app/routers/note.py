@@ -14,8 +14,9 @@ from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
-from app.services.note import NoteGenerator, logger
-from app.services.task_serial_executor import task_serial_executor
+from app.services.note import NoteGenerator, logger, find_active_task_by_video, list_recent_tasks
+from app.services.task_serial_executor import task_serial_executor, video_task_locks
+from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id, normalize_video_url
 from app.validators.video_url_validator import is_supported_video_url
@@ -71,6 +72,12 @@ class VideoRequest(BaseModel):
         if parsed.scheme in ("http", "https"):
             # 是网络链接，继续用原有平台校验
             if not is_supported_video_url(url):
+                if "/list/" in url:
+                    # 列表页链接（稍后再看/收藏夹）里没有单个视频的 bvid，无法直接生成
+                    raise NoteError(
+                        code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
+                        message="这是列表页链接：请点开单个视频后复制其链接提交（整个列表的批量导入将在「自动化」里提供）",
+                    )
                 raise NoteError(code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
                                 message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message)
 
@@ -124,7 +131,7 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
+                  video_interval=0, grid_size=[], video_id: str = None
                   ):
 
     if not model_name or not provider_id:
@@ -149,7 +156,10 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
-    note = task_serial_executor.run(_execute_note_task)
+    # 同一视频互斥：防止同视频双任务并发下载/生成触发文件锁冲突（WinError 32）。
+    # 不同视频互不阻塞，两个 worker 可让「转写（GPU）」与「总结（网络）」阶段重叠（ADR-0001）。
+    with video_task_locks.get(video_id or task_id):
+        note = task_serial_executor.run(_execute_note_task, task_id=task_id)
     logger.info(f"Note generated: {task_id}")
     if not note or not note.markdown:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
@@ -209,24 +219,42 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                 )
 
         video_id = extract_video_id(data.video_url, data.platform)
-        # if not video_id:
-        #     raise HTTPException(status_code=400, detail="无法提取视频 ID")
-        # existing = get_task_by_video(video_id, data.platform)
-        # if existing:
-        #     return R.error(
-        #         msg='笔记已生成，请勿重复发起',
-        #
-        #     )
+        if (
+            not video_id
+            and data.platform in ("bilibili", "youtube", "douyin")
+            and str(data.video_url).startswith("http")
+        ):
+            return R.error(msg="无法从链接中提取视频 ID，请确认粘贴的是单个视频链接", code=400)
+
         if data.task_id:
             # 如果传了task_id，说明是重试！
             task_id = data.task_id
             logger.info(f"重试模式，复用已有 task_id={task_id}")
         else:
+            # 提交去重：同一视频已有未完成任务时不再重复建任务（防重复下载与队列膨胀）
+            if video_id:
+                active = find_active_task_by_video(video_id)
+                if active:
+                    logger.info(f"重复提交拦截: video_id={video_id} 已有未完成任务 {active['task_id']}")
+                    return R.error(
+                        msg=f"该视频已在队列/生成中（当前状态：{active['status']}），无需重复提交",
+                        code=400,
+                        data={"duplicated": True, "existing_task_id": active["task_id"], "video_id": video_id},
+                    )
             # 正常新建任务
             task_id = str(uuid.uuid4())
 
-        # 统一先写入 PENDING，表示已进入队列等待串行执行
-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
+        # 统一先写入 PENDING（含 video_id/origin，供排队展示、去重与自动化任务同步）
+        NoteGenerator()._update_status(
+            task_id,
+            TaskStatus.PENDING,
+            extra={
+                "video_id": video_id,
+                "platform": data.platform,
+                "origin": "manual",
+                "video_url": str(data.video_url),
+            },
+        )
 
         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
         if data.prefetched_transcript:
@@ -237,7 +265,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+                                  data.extras, data.video_understanding, data.video_interval, data.grid_size,
+                                  video_id)
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -255,6 +284,7 @@ def get_task_status(task_id: str):
 
         status = status_content.get("status")
         message = status_content.get("message", "")
+        audio_meta = status_content.get("audio_meta")
 
         if status == TaskStatus.SUCCESS.value:
             # 成功状态的话，继续读取最终笔记内容
@@ -278,12 +308,19 @@ def get_task_status(task_id: str):
         if status == TaskStatus.FAILED.value:
             return R.error(message or "任务失败", code=500)
 
-        # 处理中状态
-        return R.success({
+        # 处理中状态：附带早期元信息（标题/封面）与排队位次
+        resp = {
             "status": status,
             "message": message,
-            "task_id": task_id
-        })
+            "task_id": task_id,
+        }
+        if audio_meta:
+            resp["audio_meta"] = audio_meta
+        if status == TaskStatus.PENDING.value:
+            pos = task_serial_executor.queue_position(task_id)
+            if pos:
+                resp["queue_position"] = pos
+        return R.success(resp)
 
     # 没有状态文件，但有结果
     if os.path.exists(result_path):
@@ -301,6 +338,31 @@ def get_task_status(task_id: str):
         "message": "任务排队中",
         "task_id": task_id
     })
+
+
+@router.get("/video_meta")
+def get_video_meta(url: str, platform: str = "bilibili"):
+    """快速返回视频标题/封面/时长（不下载），供前端在任务排队期间就展示卡片。
+
+    失败也返回 success（title 为 null），前端静默忽略即可——元信息拿不到
+    不能影响任何主流程。
+    """
+    try:
+        meta = fetch_video_meta(url, platform)
+    except Exception as e:
+        logger.warning(f"video_meta 查询失败: {e}")
+        meta = None
+    return R.success(meta or {"title": None})
+
+
+@router.get("/tasks/recent")
+def get_recent_tasks(limit: int = 80):
+    """后端最近任务列表（扫描状态文件），供前端历史增量同步与自动化任务可见性。"""
+    try:
+        limit = max(1, min(int(limit), 300))
+    except Exception:
+        limit = 80
+    return R.success({"tasks": list_recent_tasks(limit=limit)})
 
 
 @router.get("/image_proxy")

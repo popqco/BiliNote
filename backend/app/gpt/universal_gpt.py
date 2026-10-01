@@ -1,6 +1,7 @@
 from app.gpt.base import GPT
 from app.gpt.prompt_builder import generate_base_prompt
 from app.models.gpt_model import GPTSource
+import logging
 import os
 import hashlib
 import json
@@ -14,6 +15,16 @@ from app.gpt.request_chunker import RequestChunker
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
 from typing import List
+
+logger = logging.getLogger(__name__)
+
+
+class EmptyCompletionError(RuntimeError):
+    """上游完成请求但返回了空内容（推理预算被吃光 / 边缘节点截断等）。
+
+    单独定型以便限次重试后快速失败，交给上层的降级阶梯换更小的请求
+    （见 docs/adr/0003），而不是当成网络错误重试到天荒地老。
+    """
 
 
 class UniversalGPT(GPT):
@@ -178,6 +189,8 @@ class UniversalGPT(GPT):
             "apiconnectionerror",
             "connection error",
             "service unavailable",
+            # openai SDK 对不可解析的响应体抛的通用文案（多为边缘节点/代理抽风），值得重试
+            "unknown error",
         )
         if any(token in raw for token in retryable_tokens):
             return True
@@ -223,14 +236,22 @@ class UniversalGPT(GPT):
             stream=True,
         )
         parts: list[str] = []
+        finish_reason = None
         for chunk in stream:
             if not getattr(chunk, "choices", None):
                 continue
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            if getattr(choice, "finish_reason", None):
+                finish_reason = choice.finish_reason
+            delta = choice.delta
             text = getattr(delta, "content", None)
             if text:
                 parts.append(text)
         content = "".join(parts)
+        if not content.strip():
+            raise EmptyCompletionError(
+                f"上游返回空内容 (model={self.model}, finish_reason={finish_reason})"
+            )
         # 包装成与非流式响应同形的对象，调用方只读 choices[0].message.content
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
@@ -241,11 +262,24 @@ class UniversalGPT(GPT):
         for attempt in range(self._max_retry_attempts):
             try:
                 return self._do_create(messages)
+            except EmptyCompletionError as exc:
+                # 空响应只小额度重试（最多 2 次）：偶发抖动值得再试一次，
+                # 但更可能是请求太大把上游打崩——快速失败让降级阶梯换更小的请求
+                last_exc = exc
+                limit = min(2, self._max_retry_attempts)
+                if attempt >= limit - 1:
+                    raise
+                logger.warning(f"[universal_gpt] {exc}，重试 ({attempt + 1}/{limit})")
+                time.sleep(self._retry_base_backoff * (2 ** attempt))
             except Exception as exc:
                 last_exc = exc
                 if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):
                     raise
                 sleep_seconds = self._retry_base_backoff * (2 ** attempt)
+                logger.warning(
+                    f"[universal_gpt] 调用失败（{type(exc).__name__}: {str(exc)[:200]}），"
+                    f"{sleep_seconds:.1f}s 后重试 ({attempt + 1}/{self._max_retry_attempts})"
+                )
                 time.sleep(sleep_seconds)
 
         if last_exc is not None:
