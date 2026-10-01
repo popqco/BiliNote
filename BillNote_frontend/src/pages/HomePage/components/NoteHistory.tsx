@@ -1,5 +1,4 @@
 import { useTaskStore } from '@/store/taskStore'
-import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { Badge } from '@/components/ui/badge.tsx'
 import { cn } from '@/lib/utils.ts'
 import { Trash } from 'lucide-react'

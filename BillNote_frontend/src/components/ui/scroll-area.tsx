@@ -6,8 +6,13 @@ import { cn } from '@/lib/utils'
 function ScrollArea({
   className,
   children,
+  viewportRef,
   ...props
-}: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
+}: React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
+  // 可选：拿到真正滚动的 Viewport 元素（如切换笔记时回顶）。
+  // 不传则行为与之前完全一致。
+  viewportRef?: React.Ref<HTMLDivElement>
+}) {
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
@@ -16,6 +21,7 @@ function ScrollArea({
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
+        ref={viewportRef}
         // [&>div]:!block 覆盖 Radix 内部包裹层的 display:table —— table 会被
         // 最宽的子元素撑开，笔记里 1920px 的原片截图会把整列内容撑到 1920px 宽，
         // 正文按这个宽度排版后被视口裁掉右半边（用户实拍：文字整段看不见）。

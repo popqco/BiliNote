@@ -1,6 +1,41 @@
 import re
 
 
+def normalize_math_delimiters(markdown: str | None) -> str | None:
+    """
+    把 AI 写出的各类 LaTeX 定界符统一成 remark-math 唯一能识别的两种：
+    行内 `\\(...\\)` → `$...$`，块级 `\\[...\\]` → `$$...$$`。
+
+    背景：prompt 之前只写「以 LaTeX 呈现」，模型习惯性输出 \\(...\\) / \\[...\\]；
+    而前端 remark-math@5 只认 `$` / `$$`，其它写法会被 rehype-katex 直接跳过，
+    以整段原文显示在笔记里（2026-10-01 用户实拍：LTspice 笔记公式全是原文）。
+
+    只做定界符替换，不碰公式本体：
+    - 先处理块级 `\\[ ... \\]`（多行，DOTALL），再处理行内 `\\( ... \\)`；
+    - 已经是 `$` / `$$` 的不动；
+    - markdown 为 None 时原样返回（与本文件其它函数约定一致）。
+    """
+    if markdown is None:
+        return None
+    if not markdown:
+        return markdown
+
+    # 块级：\[ ... \] → $$...$$。用非贪婪匹配，跨行（DOTALL）。
+    normalized = re.sub(
+        r"\\\[(.+?)\\\]",
+        lambda m: f"$${m.group(1)}$$",
+        markdown,
+        flags=re.DOTALL,
+    )
+    # 行内：\( ... \) → $...$。同行内单行公式，不跨行，避免吞掉后面的正文。
+    normalized = re.sub(
+        r"\\\((.+?)\\\)",
+        lambda m: f"${m.group(1)}$",
+        normalized,
+    )
+    return normalized
+
+
 def prepend_source_link(markdown: str | None, source_url: str) -> str | None:
     """
     在笔记开头添加来源链接；若首个非空行已包含来源链接，则更新该行并避免重复。

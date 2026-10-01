@@ -36,7 +36,7 @@ from app.services.task_serial_executor import transcribe_semaphore
 from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
-from app.utils.note_helper import replace_content_markers, prepend_source_link
+from app.utils.note_helper import replace_content_markers, prepend_source_link, normalize_math_delimiters
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 from app.utils.screenshot_marker import extract_screenshot_timestamps
@@ -248,7 +248,12 @@ class NoteGenerator:
                 grid_size=grid_size,
             )
 
-            # 4. 截图 & 链接替换
+            # 4. 后处理：公式定界符归一化（无条件执行，不受格式开关影响）+
+            # 截图 & 链接替换（按格式开关执行）
+            try:
+                markdown = normalize_math_delimiters(markdown)
+            except Exception as e:
+                logger.warning(f"公式归一化失败，跳过该步骤：{e}")
             if _format:
                 markdown = self._post_process_markdown(
                     markdown=markdown,

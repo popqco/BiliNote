@@ -18,6 +18,7 @@ import rehypeSlug from 'rehype-slug'
 import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
+import { normalizeMathDelimiters } from '@/lib/utils'
 import { useTaskStore } from '@/store/taskStore'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
@@ -287,7 +288,9 @@ function createMarkdownComponents(baseURL: string) {
       )
     },
     table: ({ children, ...props }: any) => (
-      <div className="my-6 w-full overflow-y-auto">
+      // 宽表格只允许横向滚动：之前写的是 overflow-y-auto（纵向），滚轮滚到宽表格上时
+      // 会被这层内嵌视口吃掉、正文反而滚不动，体感也是「滚动条互相干扰」的一种。
+      <div className="my-6 w-full overflow-x-auto">
         <table className="w-full border-collapse text-sm" {...props}>
           {children}
         </table>
@@ -333,6 +336,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   const svgRef = useRef<SVGSVGElement>(null)
+  // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
+  // （见下面的回顶 effect）。
+  const readerViewportRef = useRef<HTMLDivElement>(null)
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
@@ -368,6 +374,14 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       setSelectedContent(currentVer.content)
     }
   }, [currentVerId, currentTask?.id])
+  // 切换笔记/版本时把阅读区拉回顶部：
+  // ScrollArea 的 Viewport 是常驻复用的（Radix 结构），切笔记只换里面的 markdown，
+  // 滚动位置会原样保留——长文切短文直接停在半山腰，用户还得手动拉回去。
+  // 这里在内容 id 变化后把 viewport 拉回顶部；目录锚点跳转不受影响
+  // （那是点击事件里单独做的 scrollIntoView）。
+  useEffect(() => {
+    readerViewportRef.current?.scrollTo({ top: 0 })
+  }, [currentTask?.id, currentVerId])
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
@@ -506,7 +520,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               ) : (
               <>
-              <ScrollArea className="min-w-0 flex-1">
+              <ScrollArea viewportRef={readerViewportRef} className="min-w-0 flex-1">
                 <div className="px-2">
                   <VideoBanner
                     audioMeta={currentTask?.audioMeta}
@@ -519,7 +533,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                     rehypePlugins={rehypePlugins}
                     components={markdownComponents}
                   >
-                    {selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, '')}
+                    {/* 历史笔记存在 IndexedDB 里是 \(...\) / \[...\] 旧写法，
+                        渲染时归一化成 remark-math 能识别的 $ / $$ 即可显示，
+                        不用做数据迁移（新笔记后端入库时已归一化） */}
+                    {normalizeMathDelimiters(
+                      selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''),
+                    )}
                   </ReactMarkdown>
                 </div>
               </ScrollArea>
