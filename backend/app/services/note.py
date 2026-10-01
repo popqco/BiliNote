@@ -33,6 +33,7 @@ from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.constant import SUPPORT_PLATFORM_MAP
 from app.services.provider import ProviderService
 from app.services.task_serial_executor import transcribe_semaphore
+from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link
@@ -185,10 +186,12 @@ class NoteGenerator:
                     logger.warning(f"获取平台字幕失败: {e}，将下载音频后转写")
                     transcript = None
 
-            # 2. 下载音频/视频
-            # 有字幕时只提取元信息，不下载音视频文件（除非需要截图/视频理解）
+            # 2. 下载音轨/视频
+            # 音轨只为「本地 whisper 转写」服务：已有平台字幕时 mp3 没有下游消费者，
+            # 再下一整条音轨纯属浪费（2h53m 的视频 = 多传 ~170MB），而且凭空多一次
+            # 失败机会——2026-10-01 就是这步撞上 CDN SSL 断流，把一条字幕/视频都齐了的
+            # 任务判死。视频帧要不要下与字幕无关，由截图/视频理解开关决定。
             has_transcript = transcript is not None
-            need_full_download = not has_transcript or screenshot or video_understanding
             audio_meta = self._download_media(
                 downloader=downloader,
                 video_url=video_url,
@@ -201,7 +204,7 @@ class NoteGenerator:
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
-                skip_download=not need_full_download,
+                skip_audio=has_transcript,
                 task_id=task_id,
             )
 
@@ -515,12 +518,12 @@ class NoteGenerator:
         video_understanding: bool,
         video_interval: int,
         grid_size: List[int],
-        skip_download: bool = False,
+        skip_audio: bool = False,
         task_id: Optional[str] = None,
     ) -> AudioDownloadResult | None:
         """
-        1. 检查音频缓存；若不存在，则根据需要下载音频或视频（若需截图/可视化）。
-        2. 如果需要视频，则先下载视频并生成缩略图集，再下载音频。
+        1. 检查音频缓存；若不存在，则按需下载视频（截图/视频理解）与音轨（本地转写）。
+        2. 如果需要视频，则先下载视频并生成缩略图集，再（按需）下载音频。
         3. 返回 AudioDownloadResult
 
         :param downloader: Downloader 实例
@@ -534,12 +537,14 @@ class NoteGenerator:
         :param video_understanding: 是否需要生成缩略图
         :param video_interval: 视频截帧间隔
         :param grid_size: 缩略图网格尺寸
+        :param skip_audio: 转写已由平台字幕提供时置 True——只取元信息，不下载音轨
         :return: AudioDownloadResult 对象
         """
         task_id = task_id or audio_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
 
         frame_interval = video_interval if video_interval and video_interval > 0 else 6
+        need_video = bool(screenshot or video_understanding)
 
         # 已有缓存，尝试加载
         if audio_cache_file.exists():
@@ -579,31 +584,14 @@ class NoteGenerator:
                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
 
         # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
-        if skip_download:
+        if skip_audio and not need_video:
             logger.info("已有字幕，仅提取视频元信息（不下载音视频）")
-            try:
-                audio = downloader.download(
-                    video_url=video_url,
-                    quality=quality,
-                    output_dir=output_path,
-                    need_video=False,
-                    skip_download=True,
-                )
-                audio_cache_file.write_text(
-                    json.dumps(asdict(audio), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                logger.info(f"元信息提取完成 ({audio_cache_file})")
-                return audio
-            except Exception as exc:
-                logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
+            return self._fetch_meta_only(downloader, video_url, quality, output_path,
+                                         platform, audio_cache_file)
 
-        # 判断是否需要下载视频
-        need_video = screenshot or video_understanding
+        # 判断是否需要下载视频（截图 / 视频理解）
         if screenshot and not grid_size:
             grid_size = [2, 2]
-
-        frame_interval = video_interval if video_interval and video_interval > 0 else 6
         if need_video:
             try:
                 logger.info("开始下载视频")
@@ -638,6 +626,20 @@ class NoteGenerator:
                 self._handle_exception(task_id, exc)
                 raise
 
+        # 有平台字幕：视频帧（如果开了截图/视频理解）已经拿到，音轨没有任何用途，
+        # 这里只补一次元信息就走，不再把整条音轨重下一遍。
+        if skip_audio:
+            audio = self._fetch_meta_only(
+                downloader, video_url, quality, output_path, platform, audio_cache_file
+            )
+            # 记下本地视频路径：重试命中缓存时能直接复用这份 mp4 抽帧，不必重下
+            if self.video_path and Path(self.video_path).exists():
+                audio.video_path = str(self.video_path)
+                audio_cache_file.write_text(
+                    json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            return audio
+
         # 下载音频
         try:
             logger.info("开始下载音频")
@@ -647,6 +649,8 @@ class NoteGenerator:
                 output_dir=output_path,
                 need_video=need_video,
             )
+            if self.video_path and Path(self.video_path).exists():
+                audio.video_path = str(self.video_path)
             audio_cache_file.write_text(json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"音频下载并缓存成功 ({audio_cache_file})")
             return audio
@@ -654,6 +658,57 @@ class NoteGenerator:
             logger.error(f"音频下载失败：{exc}")
             self._handle_exception(task_id, exc)
             raise
+
+    def _fetch_meta_only(
+        self,
+        downloader: Downloader,
+        video_url: Union[str, HttpUrl],
+        quality: DownloadQuality,
+        output_path: Optional[str],
+        platform: str,
+        audio_cache_file: Path,
+    ) -> AudioDownloadResult:
+        """只取元信息（标题/封面/时长），不落任何媒体文件。
+
+        元信息拿不到不该拖垮整个任务：转写和视频帧都已在手，标题缺了顶多卡片难看，
+        所以这里逐级降级到 video_meta 的轻量接口，最后才用占位值。
+        """
+        audio: Optional[AudioDownloadResult] = None
+        try:
+            audio = downloader.download(
+                video_url=video_url,
+                quality=quality,
+                output_dir=output_path,
+                need_video=False,
+                skip_download=True,
+            )
+        except Exception as exc:
+            logger.warning(f"元信息提取失败，改用轻量接口兜底：{exc}")
+        if audio is None or not audio.title:
+            meta = fetch_video_meta(str(video_url), platform) or {}
+            if meta.get("title"):
+                audio = AudioDownloadResult(
+                    file_path=None,
+                    title=meta.get("title"),
+                    duration=meta.get("duration") or 0,
+                    cover_url=meta.get("cover_url"),
+                    platform=platform,
+                    video_id=meta.get("video_id"),
+                    raw_info={},
+                    video_path=None,
+                )
+                logger.info(f"轻量接口取到元信息：{audio.title}")
+        if audio is None:
+            logger.warning("元信息全部获取失败，用占位元信息继续（标题/封面将缺失）")
+            audio = AudioDownloadResult(
+                file_path=None, title=None, duration=0, cover_url=None,
+                platform=platform, video_id=None, raw_info={}, video_path=None,
+            )
+        audio_cache_file.write_text(
+            json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info(f"元信息提取完成 ({audio_cache_file})")
+        return audio
 
 
     def _get_transcript(
@@ -731,6 +786,11 @@ class NoteGenerator:
         """
         task_id = task_id or transcript_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
+
+        # 有平台字幕时不会下载音轨，转写这条路走不到；真走到了说明字幕也丢了，
+        # 与其把 None 丢给 whisper 换一个看不懂的报错，不如直接说清楚。
+        if not audio_file:
+            raise RuntimeError("没有可用的音频文件（平台无字幕且本次未下载音轨），请重试")
 
         # 已有缓存，尝试加载
         if transcript_cache_file.exists():

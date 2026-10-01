@@ -35,6 +35,42 @@ ROUND_POLL_SECONDS = 60         # 轮内任务状态轮询间隔
 ROUND_MAX_WAIT_SECONDS = 6 * 3600  # 单轮最长等待
 
 
+def _pid_alive(pid: int) -> bool:
+    """判断进程是否还在（用于识别「持有锁的进程已经死了」）。
+
+    只靠时间过期是不够的：锁的过期阈值是 6 小时，应用崩溃/被强杀后残留的锁会让
+    「立即运行一轮」在 6 小时内静默失效（2026-10-01 实测：杀掉正在跑一轮的应用后，
+    再点运行一轮，接口回「已触发」但日志里连「检查轮开始」都没有）。
+    """
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        ERROR_ACCESS_DENIED = 5
+        STILL_ACTIVE = 259
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            # 打不开句柄：权限不足说明进程还在（只是不归我们管），否则就是没了
+            return k32.GetLastError() == ERROR_ACCESS_DENIED
+        try:
+            code = ctypes.c_ulong()
+            if k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return code.value == STILL_ACTIVE
+            return False
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class _RoundLock:
     """进程间互斥的简单文件锁（O_EXCL 创建，带过期清理）。"""
 
@@ -43,9 +79,15 @@ class _RoundLock:
         self.stale_seconds = stale_seconds
         self.acquired = False
 
+    def _holder(self) -> Optional[int]:
+        try:
+            return int(json.loads(self.path.read_text(encoding="utf-8")).get("pid") or 0)
+        except Exception:
+            return None
+
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
+        for _ in range(3):
             try:
                 fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -57,14 +99,18 @@ class _RoundLock:
                     age = time.time() - self.path.stat().st_mtime
                 except OSError:
                     age = 0
-                if age > self.stale_seconds:
+                holder = self._holder()
+                if holder is not None and not _pid_alive(holder):
+                    logger.warning(f"清理残留的自动化锁（持有进程 {holder} 已退出）")
+                elif age > self.stale_seconds:
                     logger.warning(f"清理过期的自动化锁（age={int(age)}s）")
-                    try:
-                        self.path.unlink()
-                    except OSError:
-                        pass
-                    continue
-                return False
+                else:
+                    return False
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
+                continue
         return False
 
     def release(self) -> None:
@@ -88,9 +134,24 @@ class AutomationScheduler:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._heal_stale_state()
         self._thread = threading.Thread(target=self._loop, name="automation-scheduler", daemon=True)
         self._thread.start()
         logger.info("自动化调度线程已启动（enabled 由 config/automation.json 控制）")
+
+    def _heal_stale_state(self) -> None:
+        """新进程里不可能有「正在跑」的轮次，把上次崩溃留下的 running=true 抹掉。
+
+        否则界面会一直显示「运行中」，用户点「立即运行一轮」也看不出为什么没反应
+        （状态文件里的 running 由上一轮负责收尾，进程被杀就再没人收尾了）。
+        """
+        try:
+            state = self._load_state()
+            if state.get("running"):
+                logger.warning("上次的检查轮未正常收尾（进程重启），已把状态重置为空闲")
+                self._update_state(running=False, phase="空闲（上次运行被中断）")
+        except Exception as e:
+            logger.warning(f"重置自动化状态失败：{e}")
 
     def stop(self) -> None:
         self._stop.set()
@@ -139,8 +200,11 @@ class AutomationScheduler:
     def run_round_once_safe(self, cfg: Optional[dict] = None) -> Dict:
         """带异常兜底的入口（HTTP 路由 / CLI / 线程共用）。"""
         if self._running_round:
+            # 说明白为什么没跑：不然界面只会看到「已触发」而进度纹丝不动
+            self._update_state(last_error="本进程已有一轮在运行，本次触发被忽略")
             return {"skipped": "当前进程已有检查轮在运行"}
         if not self._round_lock.acquire():
+            self._update_state(last_error="另一个入口（应用内调度或计划任务）正在跑一轮，本次触发被忽略")
             return {"skipped": "另一个入口的检查轮正在运行（文件锁被占用）"}
         self._running_round = True
         self._update_state(running=True, phase="拉取稍后再看")

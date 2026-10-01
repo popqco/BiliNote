@@ -18,11 +18,12 @@ deliberately mirror yt-dlp's own usage of the same fields for the
 place upstream currently sends them.
 """
 import base64
-import logging
 import random
 import string
 
-logger = logging.getLogger(__name__)
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def build_dm_img_params() -> dict:

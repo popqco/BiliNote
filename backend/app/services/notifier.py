@@ -45,17 +45,30 @@ def send_wxpusher(app_token: str, uids: str, title: str, content_md: str) -> Tup
 def send_email(cfg: dict, subject: str, body: str) -> Tuple[bool, str]:
     if not cfg.get("host") or not cfg.get("username") or not cfg.get("password") or not cfg.get("to"):
         return False, "SMTP 未配置（需要服务器/账号/授权码/收件人）"
+    host = str(cfg["host"]).strip()
+    port = int(cfg.get("port") or 465)
+    username = cfg["username"]
+    to_list = [t.strip() for t in str(cfg["to"]).replace(";", ",").split(",") if t.strip()]
     try:
         msg = MIMEText(body, "plain", "utf-8")
         msg["Subject"] = Header(subject, "utf-8")
-        msg["From"] = cfg["username"]
+        msg["From"] = username
         msg["To"] = cfg["to"]
-        to_list = [t.strip() for t in str(cfg["to"]).replace(";", ",").split(",") if t.strip()]
-        with smtplib.SMTP_SSL(
-            cfg["host"], int(cfg.get("port") or 465), context=ssl.create_default_context(), timeout=25
-        ) as server:
-            server.login(cfg["username"], cfg["password"])
-            server.sendmail(cfg["username"], to_list, msg.as_string())
+        ctx = ssl.create_default_context()
+        # 465 是隐式 SSL；587/25 是明文连接 + STARTTLS。原先只走 SMTP_SSL，
+        # 于是 Gmail / Outlook / 企业邮箱这类 587 的配置一律连接失败——
+        # 而设置页允许填任意端口，用户只会看到一句语焉不详的异常。
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, context=ctx, timeout=25) as server:
+                server.login(username, cfg["password"])
+                server.sendmail(username, to_list, msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=25) as server:
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.ehlo()
+                server.login(username, cfg["password"])
+                server.sendmail(username, to_list, msg.as_string())
         return True, "ok"
     except Exception as e:
         return False, f"邮件发送异常：{e}"

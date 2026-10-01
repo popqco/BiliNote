@@ -9,10 +9,25 @@ class ChunkPayload:
 
 
 class RequestChunker:
-    def __init__(self, message_builder: Callable, max_bytes: int, size_estimator: Optional[Callable] = None):
+    def __init__(self, message_builder: Callable, max_bytes: int, size_estimator: Optional[Callable] = None,
+                 max_images_per_chunk: Optional[int] = None):
+        """
+        :param max_images_per_chunk: 单个请求最多带几张图。只按字节数分块是不够的：
+            图片的**token**开销与字节数不成正比，一张 1568px 拼图约 800~1500 tokens，
+            长视频攒出上百张时，即使字节数没超限，上游也会因上下文过大而拒/断
+            （2026-10-01 实测 2h53m 视频 64 张拼图，免费网关连续 APIConnectionError）。
+            超出的图会顺延到新的分块，覆盖率不变，只是拆成多次请求。
+        """
         self.message_builder = message_builder
         self.max_bytes = max_bytes
         self.size_estimator = size_estimator
+        self.max_images_per_chunk = max_images_per_chunk
+
+    def _images_full(self, chunk: ChunkPayload) -> bool:
+        return (
+            self.max_images_per_chunk is not None
+            and len(chunk.image_urls) >= self.max_images_per_chunk
+        )
 
     def estimate(self, messages) -> int:
         if self.size_estimator:
@@ -101,6 +116,8 @@ class RequestChunker:
             for image in image_urls:
                 appended = False
                 for chunk in chunks[-1:]:
+                    if self._images_full(chunk):
+                        continue
                     candidate_images = chunk.image_urls + [image]
                     if self._messages_size(chunk.segments, candidate_images, **kwargs) <= self.max_bytes:
                         chunk.image_urls = candidate_images
@@ -123,6 +140,8 @@ class RequestChunker:
 
             for chunk_idx in range(preferred_idx, len(chunks)):
                 chunk = chunks[chunk_idx]
+                if self._images_full(chunk):
+                    continue
                 candidate_images = chunk.image_urls + [image]
                 if self._messages_size(chunk.segments, candidate_images, **kwargs) <= self.max_bytes:
                     chunk.image_urls = candidate_images

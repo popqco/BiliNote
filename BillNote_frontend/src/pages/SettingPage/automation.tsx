@@ -41,9 +41,12 @@ const Section = ({ title, desc, children }: any) => (
   </div>
 )
 
-const Row = ({ label, children }: any) => (
+const Row = ({ label, desc, children }: any) => (
   <div className="flex items-center justify-between gap-4">
-    <div className="text-sm">{label}</div>
+    <div className="text-sm">
+      {label}
+      {desc && <div className="text-muted-foreground text-xs">{desc}</div>}
+    </div>
     <div className="flex items-center gap-2">{children}</div>
   </div>
 )
@@ -330,8 +333,8 @@ const Automation = () => {
         </div>
       </Section>
 
-      <Section title="通知渠道" desc="每轮检查结束后发送一条汇总；两个渠道可独立启用、独立失败。">
-        <Row label="微信推送（WxPusher）">
+      <Section title="通知渠道" desc="每轮检查结束后发送一条汇总；两个渠道可独立启用、独立失败。填完点「发送测试通知」即可验证，收不到会直接显示原因。">
+        <Row label="微信推送（WxPusher）" desc="免费，微信里直接收推送，推荐">
           <Checkbox checked={!!wx.enabled} onCheckedChange={v => upd(['notify', 'wxpusher', 'enabled'], !!v)} />
         </Row>
         <div className="grid grid-cols-2 gap-3">
@@ -346,12 +349,12 @@ const Automation = () => {
             onChange={e => upd(['notify', 'wxpusher', 'uids'], e.target.value)}
           />
         </div>
-        <Row label="邮箱（SMTP）">
+        <Row label="邮箱（SMTP）" desc="需要邮箱服务商给的「授权码」，不是登录密码">
           <Checkbox checked={!!smtp.enabled} onCheckedChange={v => upd(['notify', 'smtp', 'enabled'], !!v)} />
         </Row>
         <div className="grid grid-cols-2 gap-3">
           <Input placeholder="SMTP 服务器（如 smtp.qq.com）" value={smtp.host} onChange={e => upd(['notify', 'smtp', 'host'], e.target.value)} />
-          <Input placeholder="端口（SSL 465）" value={smtp.port} onChange={e => upd(['notify', 'smtp', 'port'], Number(e.target.value) || 465)} />
+          <Input placeholder="端口（465 = SSL，587 = STARTTLS）" value={smtp.port} onChange={e => upd(['notify', 'smtp', 'port'], Number(e.target.value) || 465)} />
           <Input placeholder="邮箱账号" value={smtp.username} onChange={e => upd(['notify', 'smtp', 'username'], e.target.value)} />
           <Input
             placeholder="SMTP 授权码（不是登录密码）"
@@ -372,6 +375,7 @@ const Automation = () => {
         <AlertDescription>
           <strong>提示：</strong>自动化读取你的 B 站 Cookie 获取「稍后再看」列表；Cookie 失效时会停止并在日志中提示，
           请到「下载配置」更新。Windows 计划任务模式需要手动注册一次（见仓库 automation_cli.py 顶部说明）。
+          WxPusher / 邮箱的逐步配置教程见仓库 <code className="rounded bg-muted px-1">docs/automation.md</code> 与 README。
         </AlertDescription>
       </Alert>
     </div>

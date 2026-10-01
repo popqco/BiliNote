@@ -208,8 +208,11 @@ export default function Transcriber() {
 
   const currentModels = selectedType === 'mlx-whisper' ? mlxModelStatuses : modelStatuses
 
+  // 外层 <main> 是 h-screen + overflow-hidden：这一层自己不带滚动条的话，
+  // 「自定义模型」整张卡片会被永久裁在视口外（连滚动都滚不到），
+  // 与其它设置页（automation/appearance）保持一致，由页面根节点承担滚动。
   return (
-    <div className="space-y-6 p-6">
+    <div className="h-full space-y-6 overflow-auto p-6">
       <div>
         <h2 className="text-2xl font-semibold">音频转写配置</h2>
         <p className="mt-1 text-sm text-muted-foreground">

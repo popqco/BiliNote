@@ -52,8 +52,11 @@ function AlertDescription({ className, ...props }: React.ComponentProps<'div'>) 
   return (
     <div
       data-slot="alert-description"
+      // 这里原本是 grid + gap-1：grid 会把每个子元素（连纯文本节点也算）各占一行，
+      // 于是「<strong>提示：</strong>后面一句话」这种写法被拆成两行，含 <code> 的
+      // 说明更是每个片段一行。改成块级流式排版，文字按容器宽度自然折行。
       className={cn(
-        'text-muted-foreground col-start-2 grid justify-items-start gap-1 text-sm [&_p]:leading-relaxed',
+        'text-muted-foreground col-start-2 text-sm [&_p]:leading-relaxed',
         className
       )}
       {...props}

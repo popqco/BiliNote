@@ -11,6 +11,15 @@ from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 
 logger = get_logger(__name__)
+
+# 拼图长边上限。视觉模型收到大图后都会先缩到 ~1.5K 长边再切块计费，拼一张
+# 2880×1620（3×3 × 960×540）意味着 3/4 的像素是白传的：实测单张 700KB，
+# 一条 2h53m 的视频 64 张 = 45MB（base64 后 60MB），一次总结请求就此变成
+# 上游难以承受的巨型请求（2026-10-01 实测：免费网关连续 APIConnectionError）。
+# 压到 1568px 后单张 ~215KB，同样的 64 张只需 13MB，模型看到的细节没有可感差异。
+MAX_GRID_LONG_SIDE = 1568
+
+
 class VideoReader:
     def __init__(self,
                  video_path: str,
@@ -113,23 +122,31 @@ class VideoReader:
 
     def concat_images(self, image_paths: list[str], name: str) -> str:
         os.makedirs(self.grid_dir, exist_ok=True)
-        font = ImageFont.truetype(self.font_path, 48) if os.path.exists(self.font_path) else ImageFont.load_default()
+
+        cols, rows = self.grid_size
+        unit_w, unit_h = self.unit_width, self.unit_height
+        long_side = max(unit_w * cols, unit_h * rows)
+        if long_side > MAX_GRID_LONG_SIDE:
+            # 按比例缩格子，整张拼图跟着变小；时间戳字号同步缩放，别盖住画面
+            k = MAX_GRID_LONG_SIDE / long_side
+            unit_w, unit_h = max(1, int(unit_w * k)), max(1, int(unit_h * k))
+        font_size = max(10, int(48 * unit_w / self.unit_width))
+        font = ImageFont.truetype(self.font_path, font_size) if os.path.exists(self.font_path) else ImageFont.load_default()
         images = []
 
         for path in image_paths:
-            img = Image.open(path).convert("RGB").resize((self.unit_width, self.unit_height), Image.Resampling.LANCZOS)
+            img = Image.open(path).convert("RGB").resize((unit_w, unit_h), Image.Resampling.LANCZOS)
             timestamp = re.search(r"frame_(\d{2})_(\d{2})\.jpg", os.path.basename(path))
             time_text = f"{timestamp.group(1)}:{timestamp.group(2)}" if timestamp else ""
             draw = ImageDraw.Draw(img)
             draw.text((10, 10), time_text, fill="yellow", font=font, stroke_width=1, stroke_fill="black")
             images.append(img)
 
-        cols, rows = self.grid_size
-        grid_img = Image.new("RGB", (self.unit_width * cols, self.unit_height * rows), (255, 255, 255))
+        grid_img = Image.new("RGB", (unit_w * cols, unit_h * rows), (255, 255, 255))
 
         for i, img in enumerate(images):
-            x = (i % cols) * self.unit_width
-            y = (i // cols) * self.unit_height
+            x = (i % cols) * unit_w
+            y = (i // cols) * unit_h
             grid_img.paste(img, (x, y))
 
         save_path = os.path.join(self.grid_dir, f"{name}.jpg")

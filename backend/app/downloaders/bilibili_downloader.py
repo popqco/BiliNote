@@ -1,6 +1,5 @@
 import os
 import json
-import logging
 import tempfile
 import time
 from abc import ABC
@@ -15,11 +14,15 @@ from app.downloaders.bilibili_dm_patch import apply_bilibili_dm_img_patch
 from app.downloaders.bilibili_subtitle import BilibiliSubtitleFetcher
 from app.models.notes_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
+from app.utils.logger import get_logger
 from app.utils.path_helper import get_data_dir
 from app.utils.url_parser import extract_video_id
 from app.services.cookie_manager import CookieConfigManager
 
-logger = logging.getLogger(__name__)
+# 必须走 get_logger：裸 logging.getLogger(__name__) 只传到 root，而 root 没挂文件
+# handler，于是下载过程里的重试/降级警告全都进不了 logs/app.log——2026-10-01 排查
+# 「音频下载 SSL EOF」时只能看到一句最终异常，重试了几次、每次错在哪都查不到。
+logger = get_logger(__name__)
 
 # Inject the dm_img_* / web_location risk-control params Bilibili's wbi/playurl
 # gateway now requires; without them the API path returns HTTP 412. See
@@ -117,7 +120,8 @@ class BilibiliDownloader(Downloader, ABC):
         video_url: str,
         output_dir: Union[str, None] = None,
         quality: DownloadQuality = "fast",
-        need_video:Optional[bool]=False
+        need_video:Optional[bool]=False,
+        skip_download: bool = False,
     ) -> AudioDownloadResult:
         if output_dir is None:
             output_dir = get_data_dir()
@@ -133,16 +137,24 @@ class BilibiliDownloader(Downloader, ABC):
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output_path,
             'http_headers': {'Referer': 'https://www.bilibili.com'},
-            'postprocessors': [
+            'noplaylist': True,
+            'quiet': False,
+        }
+        if skip_download:
+            # 只取元信息：转写已由平台字幕提供，音轨没有任何下游消费者
+            # （见 note._download_media 的 skip_audio 说明）。
+            ydl_opts['skip_download'] = True
+            ydl_opts['quiet'] = True
+            # 与 youtube_downloader 同理：不下媒体就不该因格式解析失败而报错
+            ydl_opts['ignore_no_formats_error'] = True
+        else:
+            ydl_opts['postprocessors'] = [
                 {
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': '64',
                 }
-            ],
-            'noplaylist': True,
-            'quiet': False,
-        }
+            ]
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
@@ -152,7 +164,7 @@ class BilibiliDownloader(Downloader, ABC):
         title = info.get("title")
         duration = info.get("duration", 0)
         cover_url = info.get("thumbnail")
-        audio_path = os.path.join(output_dir, f"{video_id}.mp3")
+        audio_path = None if skip_download else os.path.join(output_dir, f"{video_id}.mp3")
 
         return AudioDownloadResult(
             file_path=audio_path,

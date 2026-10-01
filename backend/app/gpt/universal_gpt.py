@@ -48,6 +48,11 @@ class UniversalGPT(GPT):
         self.screenshot = False
         self.link = False
         self.max_request_bytes = int(os.getenv("OPENAI_MAX_REQUEST_BYTES", str(45 * 1024 * 1024)))
+        # 单请求图片数上限。实测（2026-10-01，opencode.ai/zen + space-bunny-free）：
+        # 21 张 1568px 拼图 / 6.7MB → 正常返回；64 张 2880px 拼图 / 60MB → 连续
+        # APIConnectionError / 空内容。图片 token 开销与字节数不成正比，只卡字节
+        # 不够，再卡一道张数（见 RequestChunker.max_images_per_chunk）。
+        self.max_images_per_request = int(os.getenv("OPENAI_MAX_IMAGES_PER_REQUEST", "20") or 20)
         self.checkpoint_dir = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         # 初始化时缓存重试配置，避免每次请求重复读取环境变量
@@ -128,6 +133,7 @@ class UniversalGPT(GPT):
             "model": self.model,
             "temperature": self.temperature,
             "max_request_bytes": self.max_request_bytes,
+            "max_images_per_request": self.max_images_per_request,
             "title": source.title,
             "tags": source.tags,
             "format": source._format,
@@ -251,17 +257,17 @@ class UniversalGPT(GPT):
         parts: list[str] = []
         finish_reason = None
         # 两道闸，单位秒，可用环境变量覆盖：
-        #   OPENAI_STREAM_STALL_SECONDS    多久没收到正文就判定上游假死（默认 120）
+        #   OPENAI_STREAM_STALL_SECONDS    多久没收到任何增量就判定上游假死（默认 120）
         #   OPENAI_STREAM_DEADLINE_SECONDS 单次调用总时长上限（默认 900）
         stall_limit = float(os.getenv("OPENAI_STREAM_STALL_SECONDS", "120") or 120)
         total_limit = float(os.getenv("OPENAI_STREAM_DEADLINE_SECONDS", "900") or 900)
         started_at = time.monotonic()
-        last_content_at = started_at
+        last_activity_at = started_at
         for chunk in stream:
             now = time.monotonic()
-            if now - last_content_at > stall_limit:
+            if now - last_activity_at > stall_limit:
                 raise CompletionStalled(
-                    f"上游 {stall_limit:.0f}s 没有返回正文（静默超时，model={self.model}）"
+                    f"上游 {stall_limit:.0f}s 没有任何增量（静默超时，model={self.model}）"
                 )
             if now - started_at > total_limit:
                 raise CompletionStalled(
@@ -276,7 +282,12 @@ class UniversalGPT(GPT):
             text = getattr(delta, "content", None)
             if text:
                 parts.append(text)
-                last_content_at = now
+            # 任何一段增量都算「上游还活着」，包括推理模型先吐的 reasoning_content。
+            # 只认 content 会把「正在思考」误判成假死：space-bunny-free 这类模型在长
+            # 提示上先流几分钟推理才给正文，2h53m 视频的 full 策略就是这样被 120s
+            # 闸门掐掉的（2026-10-01 实测，日志里只留下一句 CompletionStalled）。
+            if text or getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None):
+                last_activity_at = now
         content = "".join(parts)
         if not content.strip():
             raise EmptyCompletionError(
@@ -366,7 +377,12 @@ class UniversalGPT(GPT):
         def message_builder(segments, image_urls, **kwargs):
             return self.create_messages(segments, video_img_urls=image_urls, **kwargs)
 
-        chunker = RequestChunker(message_builder, self.max_request_bytes, self._estimate_messages_bytes)
+        chunker = RequestChunker(
+            message_builder,
+            self.max_request_bytes,
+            self._estimate_messages_bytes,
+            max_images_per_chunk=self.max_images_per_request,
+        )
 
         try:
             chunks = chunker.chunk(
