@@ -7,25 +7,25 @@ html, body, #root {
   overflow: hidden;
 }
 
-/* 修改滚动条轨道颜色 */
+/* 滚动条：用半透明中性色，亮/暗两套主题下都自然 */
 ::-webkit-scrollbar {
   width: 8px; /* 控制滚动条的宽度 */
 }
 
 /* 修改滚动条的轨道颜色 */
 ::-webkit-scrollbar-track {
-  background-color: #f1f1f1; /* 轨道的背景颜色 */
+  background-color: transparent;
 }
 
 /* 修改滚动条的滑块颜色 */
 ::-webkit-scrollbar-thumb {
-  background-color: #888; /* 滑块的颜色 */
+  background-color: oklch(0.7 0 0 / 45%);
   border-radius: 4px; /* 圆角 */
 }
 
 /* 当鼠标悬停时，修改滑块颜色 */
 ::-webkit-scrollbar-thumb:hover {
-  background-color: #555; /* 悬停时的颜色 */
+  background-color: oklch(0.6 0 0 / 70%);
 }
 
 :root {
@@ -72,7 +72,8 @@ html, body, #root {
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
   --primary: #3c77fb;
-  --primary-light: #e0eeff;
+  /* 暗色下的选中态底色：半透明主色，替代亮色的浅蓝 */
+  --primary-light: rgba(60, 119, 251, 0.18);
   --primary-foreground: oklch(0.205 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
@@ -81,7 +82,8 @@ html, body, #root {
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: #e6f7ff;
+  /* 修复上游笔误：暗色下边框原本是接近白色的 #e6f7ff，会明显刺眼 */
+  --border: oklch(1 0 0 / 12%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
   --chart-1: oklch(0.488 0.243 264.376);
@@ -145,4 +147,55 @@ html, body, #root {
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Markdown 正文暗色适配：项目只引入 github-markdown-light.css，
+   这里用暗色覆盖补足（.dark 作用域下生效，跟随 next-themes 切换） */
+.dark .markdown-body {
+  color: var(--foreground);
+  background-color: transparent;
+}
+.dark .markdown-body h1,
+.dark .markdown-body h2,
+.dark .markdown-body h3,
+.dark .markdown-body h4,
+.dark .markdown-body h5,
+.dark .markdown-body h6 {
+  color: var(--foreground);
+  border-bottom-color: var(--border);
+}
+.dark .markdown-body a {
+  color: #7aa7ff;
+}
+.dark .markdown-body code,
+.dark .markdown-body tt {
+  background-color: oklch(0.3 0 0);
+  color: var(--foreground);
+}
+.dark .markdown-body pre {
+  background-color: oklch(0.23 0 0);
+}
+.dark .markdown-body pre code {
+  background-color: transparent;
+}
+.dark .markdown-body table tr {
+  background-color: transparent;
+  border-top-color: var(--border);
+}
+.dark .markdown-body table tr:nth-child(2n) {
+  background-color: oklch(0.25 0 0);
+}
+.dark .markdown-body table th,
+.dark .markdown-body table td {
+  border-color: var(--border);
+}
+.dark .markdown-body blockquote {
+  color: var(--muted-foreground);
+  border-left-color: var(--border);
+}
+.dark .markdown-body hr {
+  background-color: var(--border);
+}
+.dark .markdown-body img {
+  background-color: transparent;
 }

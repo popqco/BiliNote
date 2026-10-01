@@ -22,14 +22,14 @@ const SettingLayout = ({ Menu }: ISettingLayoutProps) => {
     >
       <div className="flex flex-1">
         {/* 左侧部分：Header + 表单 */}
-        <aside className="flex w-[300px] flex-col border-r border-neutral-200 bg-white">
+        <aside className="border-border bg-card flex w-[300px] flex-col border-r">
           {/* Header */}
           <header className="flex h-16 items-center justify-between px-6">
             <div className="flex items-center gap-2">
               <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-2xl">
                 <img src={logo} alt="logo" className="h-full w-full object-contain" />
               </div>
-              <div className="text-2xl font-bold text-gray-800">BiliNote</div>
+              <div className="text-foreground text-2xl font-bold">BiliNote</div>
             </div>
             <div>
               <TooltipProvider>

@@ -2,6 +2,7 @@ import './App.css'
 import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, HashRouter, Navigate, Routes, Route } from 'react-router-dom'
 import { useTaskPolling } from '@/hooks/useTaskPolling.ts'
+import { useTasksSync } from '@/hooks/useTasksSync.ts'
 import { useCheckBackend } from '@/hooks/useCheckBackend.ts'
 import { systemCheck } from '@/services/system.ts'
 import BackendInitDialog from '@/components/BackendInitDialog'
@@ -29,10 +30,12 @@ const Monitor = lazy(() => import('@/pages/SettingPage/Monitor.tsx'))
 const Downloader = lazy(() => import('@/pages/SettingPage/Downloader.tsx'))
 const DownloaderForm = lazy(() => import('@/components/Form/DownloaderForm/Form.tsx'))
 const TranscriberPage = lazy(() => import('@/pages/SettingPage/transcriber.tsx'))
+const AppearancePage = lazy(() => import('@/pages/SettingPage/appearance.tsx'))
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'))
 
 function App() {
   useTaskPolling(3000) // 每 3 秒轮询一次
+  useTasksSync(30000) // 每 30 秒与后端任务列表增量同步（自动化任务 / 重启恢复）
   const { loading, initialized, failed, lastError, retry } = useCheckBackend()
 
   // 在后端初始化完成后执行系统检查
@@ -82,6 +85,7 @@ function App() {
                   <Route path=":id" element={<DownloaderForm />} />
                 </Route>
                 <Route path="transcriber" element={<TranscriberPage />} />
+                <Route path="appearance" element={<AppearancePage />} />
                 <Route path="monitor" element={<Monitor />}></Route>
                 <Route path="about" element={<AboutPage />}></Route>
                 <Route path="*" element={<NotFoundPage />} />

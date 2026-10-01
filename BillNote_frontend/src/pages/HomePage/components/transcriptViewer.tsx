@@ -49,7 +49,7 @@ const TranscriptViewer = () => {
   }
 
   return (
-      <div className="transcript-viewer flex h-full w-full flex-col  rounded-md border bg-white p-4 shadow-sm">
+      <div className="transcript-viewer flex h-full w-full flex-col  rounded-md border bg-card p-4 shadow-sm">
         <h2 className="mb-4 text-lg font-medium">转写结果</h2>
         {!task?.transcript?.segments?.length ? (
             <div className="flex h-full items-center justify-center text-muted-foreground">暂无转写内容</div>
@@ -69,14 +69,14 @@ const TranscriptViewer = () => {
                         key={index}
                         ref={(el) => (segmentRefs.current[index] = el)}
                         className={cn(
-                            "group grid grid-cols-[80px_1fr] gap-2 rounded-md p-2 transition-colors hover:bg-slate-50",
-                            activeSegment === index && "bg-slate-100",
+                            "group grid grid-cols-[80px_1fr] gap-2 rounded-md p-2 transition-colors hover:bg-accent",
+                            activeSegment === index && "bg-accent",
                         )}
                         onClick={() => handleSegmentClick(index)}
                     >
-                      <div className="flex items-center gap-1 text-xs text-slate-500">
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
                         <button
-                            className="invisible rounded-full p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 group-hover:visible"
+                            className="invisible rounded-full p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground group-hover:visible"
                             onClick={(e) => {
                               e.stopPropagation()
                               // Add play functionality here
@@ -87,9 +87,9 @@ const TranscriptViewer = () => {
                         <span>{formatTime(segment.start)}</span>
                       </div>
 
-                      <div className="text-sm leading-relaxed text-slate-700">
+                      <div className="text-sm leading-relaxed text-foreground">
                         {segment.speaker && (
-                            <span className="mr-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-700">
+                            <span className="mr-2 rounded bg-secondary px-1.5 py-0.5 text-xs font-medium text-foreground">
                       {segment.speaker}
                     </span>
                         )}
@@ -105,7 +105,7 @@ const TranscriptViewer = () => {
 
 
         {task?.transcript?.segments?.length > 0 && (
-            <div className="mt-4 flex justify-between border-t pt-3 text-xs text-slate-500">
+            <div className="mt-4 flex justify-between border-t pt-3 text-xs text-muted-foreground">
               <span>共 {task.transcript.segments.length} 条片段</span>
               <span>总时长: {formatTime(task.transcript.segments[task.transcript.segments.length - 1]?.end || 0)}</span>
             </div>

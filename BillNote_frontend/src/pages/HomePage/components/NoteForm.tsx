@@ -14,7 +14,7 @@ import { z } from 'zod'
 
 import { Info, Loader2, Plus } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
-import { generateNote } from '@/services/note.ts'
+import { generateNote, get_video_meta } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
@@ -44,6 +44,13 @@ import toast from 'react-hot-toast'
 /* -------------------- 校验 Schema -------------------- */
 /** 用户粘贴的链接常缺协议头（如 bilibili.com/...），无任何 scheme 时自动补 https:// */
 const withScheme = (url: string) => (/^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`)
+
+/** 提取视频身份（BV 号优先），用于本地重复提交检测 */
+const extractVideoKey = (url?: string) => {
+  const m = String(url || '').match(/BV[0-9A-Za-z]{10}/)
+  if (m) return m[0]
+  return String(url || '').trim().replace(/\/+$/, '')
+}
 
 const formSchema = z
   .object({
@@ -96,7 +103,7 @@ const SectionHeader = ({ title, tip }: { title: string; tip?: string }) => (
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Info className="hover:text-primary h-4 w-4 cursor-pointer text-neutral-400" />
+            <Info className="hover:text-primary h-4 w-4 cursor-pointer text-muted-foreground" />
           </TooltipTrigger>
           <TooltipContent className="text-xs">{tip}</TooltipContent>
         </Tooltip>
@@ -234,11 +241,42 @@ const NoteForm = () => {
       return
     }
 
+    // 本地重复提交检测：同一视频已有未完成任务时，选中已有卡片而不是打新任务
+    const key = extractVideoKey(payload.video_url)
+    if (key) {
+      const dup = useTaskStore
+        .getState()
+        .tasks.find(
+          t =>
+            !['SUCCESS', 'FAILED', 'FAILD'].includes(t.status) &&
+            extractVideoKey((t.formData as any)?.video_url) === key,
+        )
+      if (dup) {
+        toast.error('该视频已在队列/生成中，已为你选中对应任务')
+        setCurrentTask(dup.id)
+        return
+      }
+    }
+
     // message.success('已提交任务')
     try {
       const data = await generateNote(payload)
       addPendingTask(data.task_id, values.platform, payload)
+      // 提交成功后立刻异步取标题/封面（不下载、秒级返回）：
+      // 卡片不再等到任务完成/失败后才有内容可辨识
+      if (values.platform !== 'local' && payload.video_url) {
+        get_video_meta(payload.video_url, values.platform).then(meta => {
+          if (meta && meta.title) {
+            useTaskStore.getState().mergeTaskAudioMeta(data.task_id, meta)
+          }
+        })
+      }
     } catch (e: any) {
+      // 后端去重拦截：选中已存在的任务卡
+      if (e?.data?.duplicated && e?.data?.existing_task_id) {
+        setCurrentTask(e.data.existing_task_id)
+        return
+      }
       // 就绪门禁：本地转写模型还没下载好。后端返回 reason='transcriber_model_not_ready'，
       // 引导用户去「设置 → 音频转写配置」下载，而不是留一个静默失败的任务。
       if (e?.data?.reason === 'transcriber_model_not_ready') {
@@ -359,7 +397,7 @@ const NoteForm = () => {
                 {platform === 'local' && (
                   <>
                     <div
-                      className="hover:border-primary mt-2 flex h-40 cursor-pointer items-center justify-center rounded-md border-2 border-dashed border-gray-300 transition-colors"
+                      className="hover:border-primary mt-2 flex h-40 cursor-pointer items-center justify-center rounded-md border-2 border-dashed border-border transition-colors"
                       onDragOver={e => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -385,9 +423,9 @@ const NoteForm = () => {
                       ) : uploadSuccess ? (
                         <p className="text-center text-sm text-green-500">上传成功！</p>
                       ) : (
-                        <p className="text-center text-sm text-gray-500">
+                        <p className="text-center text-sm text-muted-foreground">
                           拖拽文件到这里上传 <br />
-                          <span className="text-xs text-gray-400">或点击选择文件</span>
+                          <span className="text-xs text-muted-foreground">或点击选择文件</span>
                         </p>
                       )}
                     </div>

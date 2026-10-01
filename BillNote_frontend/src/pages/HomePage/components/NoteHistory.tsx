@@ -21,6 +21,20 @@ interface NoteHistoryProps {
   selectedId: string | null
 }
 
+/** 状态徽章：区分排队/解析/下载/转写/总结/完成/失败（而不是笼统的「等待中」） */
+const STATUS_META: Record<string, { label: string; cls: string }> = {
+  SUCCESS: { label: '已完成', cls: 'bg-primary' },
+  FAILED: { label: '失败', cls: 'bg-red-500' },
+  FAILD: { label: '失败', cls: 'bg-red-500' },
+  PENDING: { label: '排队中', cls: 'bg-amber-500' },
+  PARSING: { label: '解析中', cls: 'bg-sky-500' },
+  DOWNLOADING: { label: '下载中', cls: 'bg-sky-500' },
+  TRANSCRIBING: { label: '转写中', cls: 'bg-sky-500' },
+  SUMMARIZING: { label: '总结中', cls: 'bg-violet-500' },
+  SAVING: { label: '保存中', cls: 'bg-sky-500' },
+  RUNNING: { label: '生成中', cls: 'bg-sky-500' },
+}
+
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const tasks = useTaskStore(state => state.tasks)
   const removeTask = useTaskStore(state => state.removeTask)
@@ -50,13 +64,13 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
             <input
                 type="text"
                 placeholder="搜索笔记标题..."
-                className="w-full rounded border border-neutral-300 px-3 py-1 text-sm outline-none focus:border-primary"
+                className="border-border bg-background focus:border-primary w-full rounded border px-3 py-1 text-sm outline-none"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
             />
           </div>
-          <div className="rounded-md border border-neutral-200 bg-neutral-50 py-6 text-center">
-            <p className="text-sm text-neutral-500">暂无记录</p>
+          <div className="border-border bg-muted/40 rounded-md border py-6 text-center">
+            <p className="text-muted-foreground text-sm">暂无记录</p>
           </div>
         </>
 
@@ -70,19 +84,25 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
         <input
             type="text"
             placeholder="搜索笔记标题..."
-            className="w-full rounded border border-neutral-300 px-3 py-1 text-sm outline-none focus:border-primary"
+            className="border-border bg-background focus:border-primary w-full rounded border px-3 py-1 text-sm outline-none"
             value={search}
             onChange={e => setSearch(e.target.value)}
         />
       </div>
       <div className="flex flex-col gap-2 overflow-hidden">
-        {filteredTasks.map(task => (
+        {filteredTasks.map(task => {
+          const meta = STATUS_META[task.status] || { label: '等待中', cls: 'bg-neutral-400' }
+          const statusLabel =
+            task.status === 'PENDING' && task.queuePosition
+              ? `${meta.label} · 第${task.queuePosition}位`
+              : meta.label
+          return (
           <div
             key={task.id}
             onClick={() => onSelect(task.id)}
             className={cn(
-              'flex cursor-pointer flex-col rounded-md border border-neutral-200 p-3',
-              selectedId === task.id && 'border-primary bg-primary-light'
+              'border-border flex cursor-pointer flex-col rounded-md border p-3',
+              selectedId === task.id && 'border-primary bg-primary-light dark:bg-primary/15'
             )}
           >
             <div
@@ -127,21 +147,19 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
               </div>
             </div>
             <div className={'mt-2 flex items-center justify-between text-[10px]'}>
-              <div className="shrink-0">
-                {task.status === 'SUCCESS' && (
-                  <div className={'bg-primary w-10 rounded p-0.5 text-center text-white'}>
-                    已完成
+              <div className="flex shrink-0 items-center gap-1">
+                <div
+                  className={cn(
+                    'min-w-10 rounded p-0.5 px-1.5 text-center whitespace-nowrap text-white',
+                    meta.cls,
+                  )}
+                >
+                  {statusLabel}
+                </div>
+                {task.origin === 'auto' && (
+                  <div className="rounded border border-orange-300 bg-orange-50 p-0.5 px-1 whitespace-nowrap text-orange-500 dark:border-orange-500/40 dark:bg-orange-500/15 dark:text-orange-300">
+                    自动
                   </div>
-                )}
-                {task.status !== 'SUCCESS' && task.status !== 'FAILED' ? (
-                  <div className={'w-10 rounded bg-green-500 p-0.5 text-center text-white'}>
-                    等待中
-                  </div>
-                ) : (
-                  <></>
-                )}
-                {task.status === 'FAILED' && (
-                  <div className={'w-10 rounded bg-red-500 p-0.5 text-center text-white'}>失败</div>
                 )}
               </div>
 
@@ -168,16 +186,18 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
                   </Tooltip>
                 </TooltipProvider>
               </div>
-              {/*<div className="shrink-0">*/}
-              {/*  {task.status === 'SUCCESS' && <Badge variant="default">已完成</Badge>}*/}
-              {/*  {task.status !== 'SUCCESS' && task.status === 'FAILED' && (*/}
-              {/*    <Badge variant="outline">等待中</Badge>*/}
-              {/*  )}*/}
-              {/*  {task.status === 'FAILED' && <Badge variant="destructive">失败</Badge>}*/}
-              {/*</div>*/}
             </div>
+            {(task.status === 'FAILED' || task.status === 'FAILD') && task.message && (
+              <div
+                className="text-muted-foreground mt-1 line-clamp-2 w-full text-[10px]"
+                title={task.message}
+              >
+                {task.message}
+              </div>
+            )}
           </div>
-        ))}
+          )
+        })}
       </div>
     </>
   )

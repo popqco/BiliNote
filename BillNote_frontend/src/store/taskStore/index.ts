@@ -6,7 +6,17 @@ import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 
 
-export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
+export type TaskStatus =
+  | 'PENDING'
+  | 'PARSING'
+  | 'DOWNLOADING'
+  | 'TRANSCRIBING'
+  | 'SUMMARIZING'
+  | 'SAVING'
+  | 'RUNNING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'FAILD'
 
 export interface AudioMeta {
   cover_url: string
@@ -44,6 +54,12 @@ export interface Task {
   transcript: Transcript
   status: TaskStatus
   audioMeta: AudioMeta
+  /** 进行中提示 / 失败原因（后端 status 文件的 message） */
+  message?: string
+  /** 排队位次：PENDING 时由后端返回，展示「排队中 · 第 N 位」 */
+  queuePosition?: number
+  /** 任务来源：manual=界面提交，auto=自动化检查轮创建 */
+  origin?: string
   createdAt: string
   formData: {
     video_url: string
@@ -59,8 +75,12 @@ export interface Task {
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
-  addPendingTask: (taskId: string, platform: string) => void
+  addPendingTask: (taskId: string, platform: string, formData: any) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
+  /** 局部合并 audioMeta（早期标题/封面 / 轮询到的元信息），不覆盖已有字段 */
+  mergeTaskAudioMeta: (id: string, meta: Partial<AudioMeta>) => void
+  /** 把后端发现的任务（如自动化任务）补进本地列表 */
+  addBackendTask: (bt: any, result?: any) => void
   removeTask: (id: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
@@ -154,6 +174,46 @@ export const useTaskStore = create<TaskStore>()(
           })),
 
 
+      mergeTaskAudioMeta: (id, meta) =>
+        set(state => ({
+          tasks: state.tasks.map(task =>
+            task.id === id ? { ...task, audioMeta: { ...task.audioMeta, ...meta } } : task
+          ),
+        })),
+
+      addBackendTask: (bt: any, result?: any) =>
+        set(state => {
+          if (state.tasks.some(t => t.id === bt.task_id)) return state
+          const task: Task = {
+            id: bt.task_id,
+            status: bt.status,
+            message: bt.message || undefined,
+            origin: bt.origin || 'manual',
+            markdown: result?.markdown || '',
+            transcript: result?.transcript || { full_text: '', language: '', raw: null, segments: [] },
+            audioMeta: result?.audio_meta || {
+              cover_url: bt.cover_url || '',
+              duration: bt.duration || 0,
+              file_path: '',
+              platform: bt.platform || '',
+              raw_info: null,
+              title: bt.title || '',
+              video_id: bt.video_id || '',
+            },
+            createdAt: new Date().toISOString(),
+            formData: {
+              video_url: bt.video_url || '',
+              platform: bt.platform || '',
+              quality: 'medium',
+              model_name: '',
+              provider_id: '',
+              link: undefined,
+              screenshot: undefined,
+            },
+          }
+          return { tasks: [task, ...state.tasks] }
+        }),
+
       getCurrentTask: () => {
         const currentTaskId = get().currentTaskId
         return get().tasks.find(task => task.id === currentTaskId) || null
@@ -175,6 +235,11 @@ export const useTaskStore = create<TaskStore>()(
             task_id: id,
           })
         } catch (e: any) {
+          // 后端去重拦截：该视频已有未完成任务，选中已存在的那张卡
+          if (e?.data?.duplicated && e?.data?.existing_task_id) {
+            set({ currentTaskId: e.data.existing_task_id })
+            return
+          }
           // 就绪门禁：转写模型未下载好。不要把任务标成 PENDING（会一直转），
           // 给提示让用户先去下载。
           if (e?.data?.reason === 'transcriber_model_not_ready') {

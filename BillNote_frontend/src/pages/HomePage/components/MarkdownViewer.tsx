@@ -417,12 +417,16 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-neutral-500">
+      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-muted-foreground">
         <StepBar steps={steps} currentStep={taskStatus} />
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
           <p className="text-lg font-bold">正在生成笔记，请稍候…</p>
-          <p className="mt-2 text-xs text-neutral-500">这可能需要几秒钟时间，取决于视频长度</p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {currentTask?.queuePosition
+              ? `排队中 · 前面还有 ${Math.max(0, currentTask.queuePosition - 1)} 个任务`
+              : currentTask?.message || '这可能需要几分钟时间，取决于视频长度'}
+          </p>
         </div>
       </div>
     )
@@ -430,11 +434,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'idle') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-neutral-500">
+      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-muted-foreground">
         <Idle />
         <div className="text-center">
           <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
-          <p className="mt-2 text-xs text-neutral-500">支持哔哩哔哩、YouTube 、抖音等视频平台</p>
+          <p className="mt-2 text-xs text-muted-foreground">支持哔哩哔哩、YouTube 、抖音等视频平台</p>
         </div>
       </div>
     )
@@ -446,7 +450,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         <Error />
         <div className="text-center">
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
-          <p className="mt-2 mb-2 text-xs text-red-400">请检查后台或稍后再试</p>
+          <p className="mt-2 mb-2 max-w-xl text-center text-xs break-all text-red-400">
+            {currentTask?.message || '请检查后台或稍后再试'}
+          </p>
 
           <Button onClick={() => retryTask(currentTask.id)} size="lg">
             重试
@@ -478,7 +484,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       />
 
       {viewMode === 'map' ? (
-        <div className="flex w-full flex-1 overflow-hidden bg-white">
+        <div className="flex w-full flex-1 overflow-hidden bg-card">
           <div className={'w-full'}>
             <MarkmapEditor
               value={selectedContent}
@@ -489,7 +495,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 overflow-hidden bg-white py-2">
+        <div className="flex flex-1 overflow-hidden bg-card py-2">
           {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
             <>
               {showChat === 'full' && currentTask ? (
@@ -536,7 +542,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                   <ArrowRight className="text-primary h-8 w-8" />
                 </div>
                 <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
-                <p className="text-xs text-neutral-500">支持哔哩哔哩、YouTube等视频网站</p>
+                <p className="text-xs text-muted-foreground">支持哔哩哔哩、YouTube等视频网站</p>
               </div>
             </div>
           )}

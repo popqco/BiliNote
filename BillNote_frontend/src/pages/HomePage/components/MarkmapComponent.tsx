@@ -554,26 +554,26 @@ export default function MarkmapEditor({
   // }
 
   return (
-    <div className="relative flex h-full flex-col bg-white">
+    <div className="relative flex h-full flex-col bg-card">
       {/* 全屏/退出全屏 按钮 */}
       <div className="absolute top-2 right-2 z-20 flex space-x-2">
         <button
           onClick={exportXMind}
-          className="rounded p-1 hover:bg-gray-200"
+          className="rounded p-1 hover:bg-accent"
           title="导出XMind格式"
         >
           🧠
         </button>
         <button
           onClick={exportSvg}
-          className="rounded p-1 hover:bg-gray-200"
+          className="rounded p-1 hover:bg-accent"
           title="导出SVG矢量图（可无限放大）"
         >
           📐
         </button>
         <button
           onClick={exportPng}
-          className="rounded p-1 hover:bg-gray-200"
+          className="rounded p-1 hover:bg-accent"
           title="导出PNG图片"
           disabled={pngAction !== 'idle'}
         >
@@ -581,7 +581,7 @@ export default function MarkmapEditor({
         </button>
         <button
           onClick={copyPng}
-          className="rounded p-1 hover:bg-gray-200"
+          className="rounded p-1 hover:bg-accent"
           title="复制PNG图片"
           disabled={pngAction !== 'idle'}
         >
@@ -589,7 +589,7 @@ export default function MarkmapEditor({
         </button>
         <button
           onClick={exportHtml}
-          className="rounded p-1 hover:bg-gray-200"
+          className="rounded p-1 hover:bg-accent"
           title="导出HTML（可交互）"
         >
           💾
@@ -597,19 +597,19 @@ export default function MarkmapEditor({
         {isFullscreen ? (
           <button
             onClick={exitFullscreen}
-            className="rounded p-1 hover:bg-gray-200"
+            className="rounded p-1 hover:bg-accent"
             title="退出全屏"
           >
             🗗
           </button>
         ) : (
-          <button onClick={enterFullscreen} className="rounded p-1 hover:bg-gray-200" title="全屏">
+          <button onClick={enterFullscreen} className="rounded p-1 hover:bg-accent" title="全屏">
             🗖
           </button>
         )}
       </div>
       {pngMessage && (
-        <div className="absolute top-11 right-2 z-20 rounded bg-white/95 px-2 py-1 text-xs text-gray-600 shadow">
+        <div className="absolute top-11 right-2 z-20 rounded bg-card/95 px-2 py-1 text-xs text-muted-foreground shadow">
           {pngMessage}
         </div>
       )}

@@ -5,6 +5,19 @@
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BiliNote - 强大的AI视频笔记神器</title>
+    <script>
+      // 防白闪：React 挂载前按持久化的主题偏好给 <html> 预先加 dark 类
+      ;(function () {
+        try {
+          var raw = localStorage.getItem('bilinote-theme') || ''
+          var t = raw.replace(/"/g, '')
+          var dark =
+            t === 'dark' ||
+            ((!t || t === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (e) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

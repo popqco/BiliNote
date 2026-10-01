@@ -4,6 +4,7 @@ import {
   HardDriveDownload,
   Info,
   Activity,
+  Palette,
 } from 'lucide-react'
 import MenuBar, { IMenuProps } from '@/pages/SettingPage/components/menuBar.tsx'
 
@@ -20,6 +21,12 @@ const Menu = () => {
       name: '音频转写配置',
       icon: <Captions />,
       path: '/settings/transcriber',
+    },
+    {
+      id: 'appearance',
+      name: '外观',
+      icon: <Palette />,
+      path: '/settings/appearance',
     },
     {
       id: 'download',
@@ -57,7 +64,7 @@ const Menu = () => {
     <div className="flex h-full flex-col">
       <div className={'flex w-full flex-col gap-2'}>
         <div className="text-2xl font-medium">设置</div>
-        <div className="text-sm font-light text-gray-800">全局配置与模型设置</div>
+        <div className="text-muted-foreground text-sm font-light">全局配置与模型设置</div>
       </div>
       <div className="mt-6 flex-1">
         {menuList &&
