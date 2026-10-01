@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import tempfile
+import time
 from abc import ABC
 from pathlib import Path
 from typing import Union, Optional, List
@@ -25,11 +26,22 @@ logger = logging.getLogger(__name__)
 # app/downloaders/bilibili_dm_patch.py for details.
 apply_bilibili_dm_img_patch()
 
-# B 站 CDN 的 HTTP 416（Requested Range Not Satisfiable）：yt-dlp 带着 .part 断点
-# 续传时，若分片尺寸与服务器当前文件对不上（上次中断留下的旧分片、CDN 换节点后
-# 文件不一致），服务器直接回 416，整个任务失败。yt-dlp 官方确认的触发条件，
-# 见 yt-dlp#8313。对策：删掉该视频的残留分片，关闭续传从头重下一次。
-_YDL_416_RETRIES = 2
+# 暂时性下载错误的自动重试（2026-10-01 实战补充）：
+# - HTTP 416（分片与 CDN 不一致，yt-dlp#8313）：清分片 + 关续传从头下；
+# - SSL EOF / 连接重置 / 读超时等 CDN 抖动：直接重试（保留分片续传）。
+# 仍失败则原样抛出——错误原因会经 _format_error 落到任务状态（不再有静默失败）。
+_YDL_TRANSIENT_RETRIES = 3
+_TRANSIENT_DL_MARKERS = (
+    "416",
+    "ssl",
+    "unexpected_eof",
+    "eof occurred",
+    "connection reset",
+    "connection aborted",
+    "read timed out",
+    "timed out",
+    "temporarily unavailable",
+)
 
 
 def _resolve_proxy_opt() -> Optional[str]:
@@ -56,18 +68,25 @@ def _clear_partial_files(output_dir: str, video_id_hint: str) -> None:
 
 def _ydl_extract_download(ydl_opts: dict, video_url: str, output_dir: str,
                           video_id_hint: str) -> dict:
-    """extract_info(download=True)，对 HTTP 416 做有限次自动重试。"""
-    for attempt in range(1, _YDL_416_RETRIES + 1):
+    """extract_info(download=True)，对暂时性网络错误（含 HTTP 416）做有限次自动重试。"""
+    for attempt in range(1, _YDL_TRANSIENT_RETRIES + 1):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(video_url, download=True)
         except DownloadError as e:
-            if attempt >= _YDL_416_RETRIES or "416" not in str(e):
+            msg = str(e)
+            transient = any(m in msg.lower() for m in _TRANSIENT_DL_MARKERS)
+            if attempt >= _YDL_TRANSIENT_RETRIES or not transient:
                 raise
-            logger.warning("下载触发 HTTP 416（第 %d 次），清除分片后从头重试: %s",
-                           attempt, str(e).strip()[:200])
-            _clear_partial_files(output_dir, video_id_hint)
-            ydl_opts = {**ydl_opts, "continuedl": False}
+            if "416" in msg:
+                logger.warning("下载触发 HTTP 416（第 %d 次），清除分片后从头重试: %s",
+                               attempt, msg.strip()[:200])
+                _clear_partial_files(output_dir, video_id_hint)
+                ydl_opts = {**ydl_opts, "continuedl": False}
+            else:
+                logger.warning("下载遇暂时性网络错误（第 %d 次），重试: %s",
+                               attempt, msg.strip()[:200])
+            time.sleep(2 * attempt)
 
 
 class BilibiliDownloader(Downloader, ABC):
