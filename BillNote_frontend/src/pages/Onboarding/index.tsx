@@ -248,9 +248,9 @@ const Onboarding = () => {
             <h2 className="font-semibold">第 1 步 · 后端连通性</h2>
             <p className="text-sm text-muted-foreground">桌面端会自动启动 Python 后端进程。检查连通中…</p>
             {pinging && <div className="text-sm text-muted-foreground">检测中…</div>}
-            {backendOk === true && <div className="rounded bg-green-50 p-2 text-sm text-green-700">✓ 后端已就绪</div>}
+            {backendOk === true && <div className="rounded bg-green-50 p-2 text-sm text-green-700 dark:bg-green-500/10 dark:text-green-300">✓ 后端已就绪</div>}
             {backendOk === false && (
-              <div className="rounded bg-red-50 p-2 text-sm text-red-700">
+              <div className="rounded bg-red-50 p-2 text-sm text-red-700 dark:bg-red-500/10 dark:text-red-300">
                 ✗ 暂时连不上后端。可能正在初始化（首次启动会下载依赖），等 1-2 分钟再试。
                 右下角的「后端」状态点会持续监控。
               </div>
@@ -294,7 +294,7 @@ const Onboarding = () => {
             </label>
             {error && <div className="text-xs text-red-600">{error}</div>}
             <div className="flex gap-2 justify-between">
-              <button className="text-sm text-muted-foreground hover:text-gray-800" onClick={prev}>上一步</button>
+              <button className="text-sm text-muted-foreground hover:text-foreground" onClick={prev}>上一步</button>
               <button className="px-4 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50" disabled={savingProvider} onClick={saveProvider}>
                 {savingProvider ? '保存中…' : '保存并下一步'}
               </button>
@@ -313,7 +313,7 @@ const Onboarding = () => {
                 { value: 'kuaishou', title: '快手（在线，免登）', desc: '与必剪类似，备选。' },
                 { value: 'fast-whisper', title: 'Faster Whisper（本地）', desc: '完全离线但首次需下载 ~75MB（tiny）至 ~3GB（large-v3）的模型。CPU 慢。' },
               ].map(opt => (
-                <label key={opt.value} className={`flex gap-3 p-3 rounded border cursor-pointer ${transcriberType === opt.value ? 'border-blue-600 bg-blue-50' : 'border-gray-200 hover:border-border'}`}>
+                <label key={opt.value} className={`flex gap-3 p-3 rounded border cursor-pointer ${transcriberType === opt.value ? 'border-blue-600 bg-blue-50 dark:bg-blue-500/15' : 'border-border hover:border-border'}`}>
                   <input type="radio" name="transcriber" value={opt.value} checked={transcriberType === opt.value} onChange={e => setTranscriberType(e.target.value)} />
                   <div>
                     <div className="text-sm font-medium">{opt.title}</div>
@@ -324,7 +324,7 @@ const Onboarding = () => {
             </div>
             {error && <div className="text-xs text-red-600">{error}</div>}
             <div className="flex gap-2 justify-between">
-              <button className="text-sm text-muted-foreground hover:text-gray-800" onClick={prev}>上一步</button>
+              <button className="text-sm text-muted-foreground hover:text-foreground" onClick={prev}>上一步</button>
               <button className="px-4 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50" disabled={savingTranscriber} onClick={saveTranscriber}>
                 {savingTranscriber ? '保存中…' : '保存并下一步'}
               </button>
@@ -340,11 +340,11 @@ const Onboarding = () => {
               <br />
               YouTube 一般不需要 cookie。先跳过也没问题，到时再去配。
             </p>
-            <div className="rounded bg-gray-50 p-3 text-xs text-muted-foreground">
+            <div className="rounded bg-muted p-3 text-xs text-muted-foreground">
               提示：插件版（<a className="text-blue-600 underline" href="https://github.com/JefferyHcool/BiliNote/tree/develop/BillNote_extension" target="_blank" rel="noreferrer">BillNote_extension</a>）支持一键 cookie 同步；桌面版需手动复制。
             </div>
             <div className="flex gap-2 justify-between">
-              <button className="text-sm text-muted-foreground hover:text-gray-800" onClick={prev}>上一步</button>
+              <button className="text-sm text-muted-foreground hover:text-foreground" onClick={prev}>上一步</button>
               <button className="px-4 py-1.5 text-sm rounded bg-blue-600 text-white hover:bg-blue-700" onClick={finish}>
                 完成，进入 BiliNote
               </button>

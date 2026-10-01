@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import shutil
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -1011,3 +1012,173 @@ def list_recent_tasks(limit: int = 80) -> List[dict]:
         if len(items) >= limit:
             break
     return items
+
+
+# ---------------- 运行中任务登记表（进程内） ----------------
+# 作用有两个：
+#   1) 拦截「同一个任务在跑的时候又被点一次重新生成」——否则第二次提交会把
+#      正在跑的任务状态文件改写成 PENDING，前端就一直显示「排队中」直到前一次
+#      真正跑完（2026-10-01 实测复现）。
+#   2) 删除任务时判断是否正在生成，正在跑的不允许删（否则状态文件会被下一次
+#      _update_status 重新写回来）。
+# 只对本进程可见：进程重启后的残留任务由 reap_interrupted_tasks() 收敛。
+
+_active_tasks: dict[str, str] = {}          # task_id -> video_id
+_active_tasks_lock = threading.Lock()
+
+
+def mark_task_active(task_id: str, video_id: Optional[str] = None) -> None:
+    if not task_id:
+        return
+    with _active_tasks_lock:
+        _active_tasks[task_id] = video_id or ""
+
+
+def mark_task_done(task_id: str) -> None:
+    if not task_id:
+        return
+    with _active_tasks_lock:
+        _active_tasks.pop(task_id, None)
+
+
+def is_task_active(task_id: str) -> bool:
+    with _active_tasks_lock:
+        return task_id in _active_tasks
+
+
+def active_task_for_video(video_id: str) -> Optional[str]:
+    """同视频是否已有任务在本进程排队/执行中（跨进程靠状态文件兜底）。"""
+    if not video_id:
+        return None
+    with _active_tasks_lock:
+        for tid, vid in _active_tasks.items():
+            if vid and vid == video_id:
+                return tid
+    return None
+
+
+# ---------------- 任务删除 / 中断收敛 ----------------
+
+_TASK_ARTIFACT_SUFFIXES = (
+    ".status.json",
+    ".json",
+    "_audio.json",
+    "_transcript.json",
+    "_markdown.md",
+    "_markdown.status.json",
+    "_markdown.gpt.checkpoint.json",
+)
+
+
+def _read_status_file(path: Path) -> Optional[dict]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def find_task_ids_by_video(video_id: str, platform: Optional[str] = None) -> List[str]:
+    """按 video_id 找任务（老前端只传 video_id 时用）。"""
+    if not video_id:
+        return []
+    found: List[str] = []
+    for f in NOTE_OUTPUT_DIR.glob("*.status.json"):
+        stem = f.name[: -len(".status.json")]
+        if "_" in stem:
+            continue
+        data = _read_status_file(f) or {}
+        if data.get("video_id") != video_id:
+            continue
+        if platform and data.get("platform") and data.get("platform") != platform:
+            continue
+        found.append(stem)
+    return found
+
+
+def purge_task(task_id: str) -> dict:
+    """真正删除一个任务：状态文件 + 缓存 + 导出结果 + 向量索引。
+
+    只删 {task_id} 前缀的文件——同一视频的多份笔记各有独立 task_id，互不牵连。
+    数据库里的 video→task 记录仅在「该视频已无任何任务文件」时才清，避免误伤
+    同一视频的另一份笔记。
+    """
+    if not task_id:
+        return {"deleted": 0, "files": []}
+
+    # 先读状态（要等文件删完就来不及了）：video_id / platform 用于后面判断
+    # 是否连数据库记录一起清。
+    status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
+    data = _read_status_file(status_file) if status_file.exists() else None
+
+    deleted_files: List[str] = []
+    for suffix in _TASK_ARTIFACT_SUFFIXES:
+        path = NOTE_OUTPUT_DIR / f"{task_id}{suffix}"
+        if path.exists():
+            try:
+                path.unlink()
+                deleted_files.append(path.name)
+            except OSError as e:
+                logger.warning(f"删除任务文件失败 {path}: {e}")
+
+    # 向量索引：留着会让「AI 问答」继续检索到已删除的笔记
+    try:
+        from app.services.vector_store import VectorStoreManager
+        VectorStoreManager().delete_index(task_id)
+    except Exception as e:
+        logger.warning(f"删除向量索引失败 (task_id={task_id}): {e}")
+
+    # 数据库记录：只有该视频再没有任何任务文件时才清（否则会连带其他笔记的归属）
+    if data:
+        video_id, platform = data.get("video_id"), data.get("platform")
+        if video_id and not find_task_ids_by_video(video_id, platform):
+            try:
+                delete_task_by_video(video_id=video_id, platform=platform or "bilibili")
+                logger.info(f"已清理数据库任务记录 (video_id={video_id})")
+            except Exception as e:
+                logger.warning(f"清理数据库任务记录失败 (video_id={video_id}): {e}")
+
+    logger.info(f"任务已删除 (task_id={task_id})，清理文件 {len(deleted_files)} 个")
+    return {"deleted": len(deleted_files), "files": deleted_files}
+
+
+def reap_interrupted_tasks(process_started_at: float) -> int:
+    """把上一个进程遗留的「非终态」任务标记为失败。
+
+    后端崩溃 / 蓝屏 / 强杀会留下永远停在 PENDING、SUMMARIZING 的状态文件，
+    前端就永远显示「排队中、第 N 位」——本进程既没有它的队列记录，也不可能
+    再把它跑完。启动时统一收敛成 FAILED 并写明原因，比留个假排队诚实。
+    只收敛「本进程启动前就存在」且「超过 30 秒没被写过」的文件，避免误伤
+    刚提交/正在执行的任务。
+    """
+    if not NOTE_OUTPUT_DIR.exists():
+        return 0
+    reaped = 0
+    cutoff = process_started_at - 30
+    for f in NOTE_OUTPUT_DIR.glob("*.status.json"):
+        stem = f.name[: -len(".status.json")]
+        if "_" in stem:
+            continue
+        try:
+            if f.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        data = _read_status_file(f)
+        if not data:
+            continue
+        status = data.get("status")
+        if not status or status in TERMINAL_STATUSES:
+            continue
+        if is_task_active(stem):
+            continue
+        data["status"] = TaskStatus.FAILED.value
+        data["message"] = "后端在任务执行中重启（或异常退出），任务已中断；请重新生成这份笔记"
+        try:
+            tmp = f.with_suffix(".status.json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(f)
+            reaped += 1
+            logger.warning(f"收敛中断任务：{stem}（原状态 {status}）→ FAILED")
+        except OSError as e:
+            logger.warning(f"写入状态文件失败 {f}: {e}")
+    return reaped

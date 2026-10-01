@@ -108,7 +108,7 @@ function createMarkdownComponents(baseURL: string) {
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100"
+              className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:bg-blue-500/15 dark:text-blue-300 dark:hover:bg-blue-500/25"
               {...props}
             >
               <Play className="h-3.5 w-3.5" />
@@ -186,11 +186,13 @@ function createMarkdownComponents(baseURL: string) {
       props.src = src
 
       return (
-        <div className="my-8 flex justify-center">
+        <div className="my-8 flex w-full justify-center">
           <Zoom>
             <img
               {...props}
-              className="max-w-full cursor-zoom-in rounded-lg object-cover shadow-md transition-all hover:shadow-lg"
+              // w-full + max-w-full：图片永远不超过正文列宽（笔记里嵌 1920×1080
+              // 原片截图，缺任一个都会把整篇内容撑宽、右侧被裁）
+              className="h-auto w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-md transition-all hover:shadow-lg"
               style={{ maxHeight: '500px' }}
             />
           </Zoom>
@@ -541,7 +543,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 <div className="bg-primary-light mb-4 flex h-16 w-16 items-center justify-center rounded-full">
                   <ArrowRight className="text-primary h-8 w-8" />
                 </div>
-                <p className="mb-2 text-neutral-600">输入视频链接并点击"生成笔记"按钮</p>
+                <p className="mb-2 text-muted-foreground">输入视频链接并点击"生成笔记"按钮</p>
                 <p className="text-xs text-muted-foreground">支持哔哩哔哩、YouTube等视频网站</p>
               </div>
             </div>

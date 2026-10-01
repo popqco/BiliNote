@@ -277,12 +277,30 @@ export const useTaskStore = create<TaskStore>()(
           currentTaskId: state.currentTaskId === id ? null : state.currentTaskId,
         }))
 
-        // 调用后端删除接口（如果找到了任务）
+        // 调后端真删。之前这里有两个坑：platform 取的是 task.platform
+        // （老任务的这个字段是 undefined，axios 会把它整个丢掉 → 后端 422 →
+        // 「服务器错误，请稍后再试」+「删除任务失败」两条红条），而且后端当时
+        // 只是空实现，卡片删掉 30 秒后又被 /tasks/recent 同步回来。
         if (task) {
-          await delete_task({
-            video_id: task.audioMeta.video_id,
-            platform: task.platform,
-          })
+          try {
+            await delete_task({
+              task_id: task.id,
+              video_id: task.audioMeta?.video_id,
+              platform:
+                task.audioMeta?.platform || (task as any).platform || task.formData?.platform || 'bilibili',
+            })
+            toast.success('已删除该笔记')
+          } catch (e: any) {
+            // 删除失败（例如任务还在生成中）：把卡片放回去，别让用户以为删干净了
+            set(state =>
+              state.tasks.some(t => t.id === task.id)
+                ? state
+                : { ...state, tasks: [task, ...state.tasks] },
+            )
+            const msg = e?.msg || e?.detail || '删除失败'
+            toast.error(typeof msg === 'string' ? msg : '删除失败')
+            console.error('❌ 删除任务失败:', e)
+          }
         }
       },
 

@@ -149,6 +149,16 @@ html, body, #root {
   }
 }
 
+/* Markdown 正文：长链接 / 超长英文串不许把整列撑宽（否则右侧文字会被挤出视口） */
+.markdown-body {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+}
+
 /* Markdown 正文暗色适配：项目只引入 github-markdown-light.css，
    这里用暗色覆盖补足（.dark 作用域下生效，跟随 next-themes 切换） */
 .dark .markdown-body {

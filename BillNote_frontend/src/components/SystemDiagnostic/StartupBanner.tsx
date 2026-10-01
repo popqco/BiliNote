@@ -94,10 +94,11 @@ const StartupBanner = () => {
 
   if (!banner) return null
 
+  // 每档补 dark: 变体：这条横幅在启动/异常时出现，暗色下不能是浅底深字
   const colorByLevel: Record<Severity, string> = {
-    info: 'bg-blue-50 border-blue-300 text-blue-900',
-    warning: 'bg-amber-50 border-amber-300 text-amber-900',
-    error: 'bg-red-50 border-red-300 text-red-900',
+    info: 'bg-blue-50 border-blue-300 text-blue-900 dark:bg-blue-500/15 dark:border-blue-500/40 dark:text-blue-200',
+    warning: 'bg-amber-50 border-amber-300 text-amber-900 dark:bg-amber-500/15 dark:border-amber-500/40 dark:text-amber-200',
+    error: 'bg-red-50 border-red-300 text-red-900 dark:bg-red-500/15 dark:border-red-500/40 dark:text-red-200',
   }
 
   const iconByLevel: Record<Severity, string> = {

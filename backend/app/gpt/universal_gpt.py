@@ -30,6 +30,16 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+class CompletionStalled(RuntimeError):
+    """流式响应长时间不再吐出内容（上游假死 / 中间层慢慢滴心跳）。
+
+    httpx 的 read 超时对**流式**请求是按「两次收到字节之间」计时的，上游只要
+    定期发一个空分片就能一直吊着连接——实测有任务因此卡在「总结中」十几分钟，
+    两个 worker 全被占死，用户看到的现象就是「一直排队 / 一直不动」。
+    这里加两道闸：静默超时（多久没收到正文）和绝对上限（单次调用总时长）。
+    """
+
+
 class UniversalGPT(GPT):
     def __init__(self, client, model: str, temperature: float = 0.7):
         self.client = client
@@ -240,7 +250,23 @@ class UniversalGPT(GPT):
         )
         parts: list[str] = []
         finish_reason = None
+        # 两道闸，单位秒，可用环境变量覆盖：
+        #   OPENAI_STREAM_STALL_SECONDS    多久没收到正文就判定上游假死（默认 120）
+        #   OPENAI_STREAM_DEADLINE_SECONDS 单次调用总时长上限（默认 900）
+        stall_limit = float(os.getenv("OPENAI_STREAM_STALL_SECONDS", "120") or 120)
+        total_limit = float(os.getenv("OPENAI_STREAM_DEADLINE_SECONDS", "900") or 900)
+        started_at = time.monotonic()
+        last_content_at = started_at
         for chunk in stream:
+            now = time.monotonic()
+            if now - last_content_at > stall_limit:
+                raise CompletionStalled(
+                    f"上游 {stall_limit:.0f}s 没有返回正文（静默超时，model={self.model}）"
+                )
+            if now - started_at > total_limit:
+                raise CompletionStalled(
+                    f"单次调用超过 {total_limit:.0f}s 上限（model={self.model}）"
+                )
             if not getattr(chunk, "choices", None):
                 continue
             choice = chunk.choices[0]
@@ -250,6 +276,7 @@ class UniversalGPT(GPT):
             text = getattr(delta, "content", None)
             if text:
                 parts.append(text)
+                last_content_at = now
         content = "".join(parts)
         if not content.strip():
             raise EmptyCompletionError(
@@ -276,6 +303,10 @@ class UniversalGPT(GPT):
                 time.sleep(self._retry_base_backoff * (2 ** attempt))
             except Exception as exc:
                 last_exc = exc
+                # 假死超时不在这里重试：同一个大请求再发一次大概率还是挂，
+                # 直接抛给上层的降级阶梯换成更小的请求（ADR-0003）。
+                if isinstance(exc, CompletionStalled):
+                    raise
                 if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):
                     raise
                 sleep_seconds = self._retry_base_backoff * (2 ** attempt)

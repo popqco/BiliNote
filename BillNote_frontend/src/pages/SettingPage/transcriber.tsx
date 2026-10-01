@@ -276,7 +276,7 @@ export default function Transcriber() {
               <AlertTriangle className="h-4 w-4" />
               <AlertDescription>
                 MLX Whisper 当前不可用。需要 macOS 平台并安装{' '}
-                <code className="rounded bg-neutral-100 px-1">pip install mlx_whisper</code>，
+                <code className="rounded bg-muted px-1">pip install mlx_whisper</code>，
                 安装后重启后端生效。
               </AlertDescription>
             </Alert>
@@ -372,12 +372,12 @@ export default function Transcriber() {
             <Alert className="text-sm">
               <AlertDescription>
                 填 <strong>HF repo_id</strong>（如{' '}
-                <code className="rounded bg-neutral-100 px-1">Systran/faster-whisper-large-v3</code>
+                <code className="rounded bg-muted px-1">Systran/faster-whisper-large-v3</code>
                 ，会自动下载）或<strong>本地模型目录</strong>（如{' '}
-                <code className="rounded bg-neutral-100 px-1">/app/backend/models/my-whisper</code>
-                ，目录内需含 <code className="rounded bg-neutral-100 px-1">model.bin</code>，下载会跳过）。
+                <code className="rounded bg-muted px-1">/app/backend/models/my-whisper</code>
+                ，目录内需含 <code className="rounded bg-muted px-1">model.bin</code>，下载会跳过）。
                 添加后即可在上方「模型大小」下拉中选用。Docker 部署请把模型目录挂载进容器（见 README 的{' '}
-                <code className="rounded bg-neutral-100 px-1">models</code> 卷）。
+                <code className="rounded bg-muted px-1">models</code> 卷）。
               </AlertDescription>
             </Alert>
 

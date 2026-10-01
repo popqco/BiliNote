@@ -57,7 +57,7 @@ export default function Monitor() {
     )
 
     return (
-        <ScrollArea className="h-full overflow-y-auto bg-white">
+        <ScrollArea className="h-full overflow-y-auto bg-background">
             <div className="container mx-auto px-4 py-8">
                 {/* Header */}
                 <div className="mb-8 flex items-center justify-between">
@@ -90,7 +90,7 @@ export default function Monitor() {
                 </div>
 
                 {error && (
-                    <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700">
+                    <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
                         {error}
                     </div>
                 )}
@@ -108,7 +108,7 @@ export default function Monitor() {
                         </CardHeader>
                         <CardContent>
                             {loading && !status ? (
-                                <div className="flex items-center gap-2 text-gray-500">
+                                <div className="flex items-center gap-2 text-muted-foreground">
                                     <Loader2 className="h-4 w-4 animate-spin" />
                                     加载中...
                                 </div>
@@ -116,7 +116,7 @@ export default function Monitor() {
                                 <div className="space-y-2 text-sm">
                                     <div className="flex justify-between">
                                         <span className="text-muted-foreground">状态:</span>
-                                        <span className={status.backend.status === 'running' ? 'font-medium text-green-600' : 'font-medium text-red-600'}>
+                                        <span className={status.backend.status === 'running' ? 'font-medium text-green-600 dark:text-green-400' : 'font-medium text-red-600 dark:text-red-400'}>
                                             {status.backend.status === 'running' ? '运行中' : status.backend.status}
                                         </span>
                                     </div>
@@ -140,7 +140,7 @@ export default function Monitor() {
                         </CardHeader>
                         <CardContent>
                             {loading && !status ? (
-                                <div className="flex items-center gap-2 text-gray-500">
+                                <div className="flex items-center gap-2 text-muted-foreground">
                                     <Loader2 className="h-4 w-4 animate-spin" />
                                     加载中...
                                 </div>
@@ -182,7 +182,7 @@ export default function Monitor() {
                         </CardHeader>
                         <CardContent>
                             {loading && !status ? (
-                                <div className="flex items-center gap-2 text-gray-500">
+                                <div className="flex items-center gap-2 text-muted-foreground">
                                     <Loader2 className="h-4 w-4 animate-spin" />
                                     加载中...
                                 </div>
@@ -199,7 +199,7 @@ export default function Monitor() {
                                     {(status.whisper.transcriber_type === 'fast-whisper' || status.whisper.transcriber_type === 'mlx-whisper') && (
                                         <div className="flex justify-between">
                                             <span className="text-muted-foreground">本地下载:</span>
-                                            <span className={status.whisper.downloaded ? 'font-medium text-green-600' : 'font-medium text-amber-600'}>
+                                            <span className={status.whisper.downloaded ? 'font-medium text-green-600 dark:text-green-400' : 'font-medium text-amber-600'}>
                                                 {status.whisper.downloaded ? '已就绪' : '未下载（首次转写会触发下载）'}
                                             </span>
                                         </div>
@@ -220,7 +220,7 @@ export default function Monitor() {
                         </CardHeader>
                         <CardContent>
                             {loading && !status ? (
-                                <div className="flex items-center gap-2 text-gray-500">
+                                <div className="flex items-center gap-2 text-muted-foreground">
                                     <Loader2 className="h-4 w-4 animate-spin" />
                                     加载中...
                                 </div>
@@ -228,7 +228,7 @@ export default function Monitor() {
                                 <div className="space-y-2 text-sm">
                                     <div className="flex justify-between">
                                         <span className="text-muted-foreground">状态:</span>
-                                        <span className={status.ffmpeg.available ? 'font-medium text-green-600' : 'font-medium text-red-600'}>
+                                        <span className={status.ffmpeg.available ? 'font-medium text-green-600 dark:text-green-400' : 'font-medium text-red-600 dark:text-red-400'}>
                                             {status.ffmpeg.available ? '已安装' : '未安装'}
                                         </span>
                                     </div>
@@ -244,7 +244,7 @@ export default function Monitor() {
                 </div>
 
                 {/* Footer Info */}
-                <div className="mt-8 text-center text-xs text-gray-400">
+                <div className="mt-8 text-center text-xs text-muted-foreground">
                     状态每 30 秒自动刷新
                 </div>
             </div>

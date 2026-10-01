@@ -20,17 +20,48 @@ interface IProps {
   History: React.ReactNode
 }
 
+/**
+ * 面板布局持久化（localStorage）：
+ * 之前 PanelGroup 没有 autoSaveId，尺寸只存在内存里——进一次「设置」页
+ * HomeLayout 被卸载，回来时三个面板全部回到 defaultSize，用户自己拖好的
+ * 比例被重置（用户实拍反馈）。
+ */
+const HOME_LAYOUT_STORAGE_KEY = 'bilinote-home-layout'
+
+/** 折叠状态单独存一份布尔值：autoSaveId 存的是尺寸（折叠=0），恢复时不会再触发 onCollapse */
+function readCollapsed(side: 'left' | 'middle'): boolean {
+  try {
+    return localStorage.getItem(`bilinote-home-${side}-collapsed`) === '1'
+  } catch {
+    return false
+  }
+}
+
+function persistCollapsed(side: 'left' | 'middle', collapsed: boolean): void {
+  try {
+    localStorage.setItem(`bilinote-home-${side}-collapsed`, collapsed ? '1' : '0')
+  } catch {
+    /* 隐私模式等场景写不了 localStorage，忽略即可 */
+  }
+}
+
 const HomeLayout: FC<IProps> = ({ NoteForm, Preview, History }) => {
   const { resolvedTheme, setTheme } = useTheme()
   const [, setShowSettings] = useState(false)
-  const [isLeftCollapsed, setIsLeftCollapsed] = useState(false)
-  const [isMiddleCollapsed, setIsMiddleCollapsed] = useState(false)
   const leftPanelRef = useRef<ImperativePanelHandle>(null)
   const middlePanelRef = useRef<ImperativePanelHandle>(null)
+  // 折叠状态同样要跟着面板尺寸一起恢复：autoSaveId 会把折叠面板恢复成 0 宽度，
+  // 但 onCollapse 不一定触发，展开按钮就没了。
+  const [isLeftCollapsed, setIsLeftCollapsed] = useState(() => readCollapsed('left'))
+  const [isMiddleCollapsed, setIsMiddleCollapsed] = useState(() => readCollapsed('middle'))
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
-      <ResizablePanelGroup direction="horizontal" className="h-full w-full">
+      <ResizablePanelGroup
+        direction="horizontal"
+        className="h-full w-full"
+        autoSaveId={HOME_LAYOUT_STORAGE_KEY}
+      >
         {/* 左边表单 */}
         <ResizablePanel
           ref={leftPanelRef}
@@ -39,8 +70,14 @@ const HomeLayout: FC<IProps> = ({ NoteForm, Preview, History }) => {
           maxSize={35}
           collapsible
           collapsedSize={0}
-          onCollapse={() => setIsLeftCollapsed(true)}
-          onExpand={() => setIsLeftCollapsed(false)}
+          onCollapse={() => {
+            setIsLeftCollapsed(true)
+            persistCollapsed('left', true)
+          }}
+          onExpand={() => {
+            setIsLeftCollapsed(false)
+            persistCollapsed('left', false)
+          }}
         >
           <aside className="border-border bg-card flex h-full flex-col overflow-hidden border-r">
             <header className="flex h-16 items-center justify-between px-6">
@@ -134,8 +171,14 @@ const HomeLayout: FC<IProps> = ({ NoteForm, Preview, History }) => {
           maxSize={30}
           collapsible
           collapsedSize={0}
-          onCollapse={() => setIsMiddleCollapsed(true)}
-          onExpand={() => setIsMiddleCollapsed(false)}
+          onCollapse={() => {
+            setIsMiddleCollapsed(true)
+            persistCollapsed('middle', true)
+          }}
+          onExpand={() => {
+            setIsMiddleCollapsed(false)
+            persistCollapsed('middle', false)
+          }}
         >
           <aside className="border-border bg-card flex h-full flex-col overflow-hidden border-r">
             <header className="border-border flex h-10 shrink-0 items-center justify-between border-b px-3">

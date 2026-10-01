@@ -16,7 +16,11 @@ function ScrollArea({
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="focus-visible:ring-ring/50 size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:outline-1"
+        // [&>div]:!block 覆盖 Radix 内部包裹层的 display:table —— table 会被
+        // 最宽的子元素撑开，笔记里 1920px 的原片截图会把整列内容撑到 1920px 宽，
+        // 正文按这个宽度排版后被视口裁掉右半边（用户实拍：文字整段看不见）。
+        // 改成 block 后宽度=视口宽度，图片再用 max-w-full 自适应。
+        className="focus-visible:ring-ring/50 size-full rounded-[inherit] transition-[color,box-shadow] outline-none [&>div]:!block focus-visible:ring-[3px] focus-visible:outline-1"
       >
         {children}
       </ScrollAreaPrimitive.Viewport>

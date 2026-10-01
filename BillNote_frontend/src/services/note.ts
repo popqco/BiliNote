@@ -41,22 +41,20 @@ export const generateNote = async (data: {
   }
 }
 
-export const delete_task = async ({ video_id, platform }) => {
-  try {
-    const data = {
-      video_id,
-      platform,
-    }
-    const res = await request.post('/delete_task', data)
-
-
-      toast.success('任务已成功删除')
-      return res
-  } catch (e) {
-    toast.error('请求异常，删除任务失败')
-    console.error('❌ 删除任务失败:', e)
-    throw e
-  }
+/**
+ * 删除任务（后端真删：状态文件 + 缓存 + 导出笔记 + 向量索引）。
+ *
+ * 只传 task_id 就够；video_id/platform 是给老版本后端兜底的。
+ * 失败时不再自己弹 toast——由调用方（store.removeTask）决定文案并把卡片放回去，
+ * 避免出现「请求异常，删除任务失败」+「服务器错误，请稍后再试」两条叠加。
+ */
+export const delete_task = async (payload: {
+  task_id?: string
+  video_id?: string
+  platform?: string
+  force?: boolean
+}) => {
+  return await request.post('/delete_task', payload, { suppressToast: true })
 }
 
 export const get_task_status = async (task_id: string) => {

@@ -28,8 +28,8 @@ const ProviderCard: FC<IProviderCardProps> = ({ providerName, Icon, id }: IProvi
       }}
       className={
         styles.card +
-        ' flex h-14 items-center justify-between rounded border border-[#f3f3f3] p-2' +
-        (isActive ? ' bg-[#F0F0F0] font-semibold text-blue-600' : '')
+        ' flex h-14 items-center justify-between rounded border border-border p-2' +
+        (isActive ? ' bg-accent font-semibold text-blue-600 dark:text-blue-400' : '')
       }
     >
       <div className="flex items-center gap-2 text-lg">

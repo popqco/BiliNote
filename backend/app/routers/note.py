@@ -14,7 +14,18 @@ from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
-from app.services.note import NoteGenerator, logger, find_active_task_by_video, list_recent_tasks
+from app.services.note import (
+    NoteGenerator,
+    logger,
+    active_task_for_video,
+    find_active_task_by_video,
+    list_recent_tasks,
+    find_task_ids_by_video,
+    is_task_active,
+    mark_task_active,
+    mark_task_done,
+    purge_task,
+)
 from app.services.task_serial_executor import task_serial_executor, video_task_locks
 from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
@@ -32,8 +43,16 @@ router = APIRouter()
 
 
 class RecordRequest(BaseModel):
-    video_id: str
-    platform: str
+    # 删除任务的入参：至少给 task_id 或 video_id 之一。
+    # 旧前端只传 {video_id, platform}，且 platform 可能是 undefined（整个键被
+    # JSON.stringify 丢掉）——历史上这里会直接 422，前端只看到「服务器错误，
+    # 请稍后再试」+「删除任务失败」两条红条（2026-10-01 实测复现）。全部改成
+    # 可选，缺什么由服务端自己补。
+    video_id: Optional[str] = None
+    platform: Optional[str] = None
+    task_id: Optional[str] = None
+    # 强行删除正在生成中的任务（默认不允许，避免删了又被下一次状态写入复活）
+    force: Optional[bool] = False
 
 
 class VideoRequest(BaseModel):
@@ -160,10 +179,16 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
-    # 同一视频互斥：防止同视频双任务并发下载/生成触发文件锁冲突（WinError 32）。
-    # 不同视频互不阻塞，两个 worker 可让「转写（GPU）」与「总结（网络）」阶段重叠（ADR-0001）。
-    with video_task_locks.get(video_id or task_id):
-        note = task_serial_executor.run(_execute_note_task, task_id=task_id)
+    # 登记「本进程正在跑」：删除接口靠它拒绝删正在生成的任务，重复提交靠它
+    # 拦住「同一个 task 被点两次重新生成」导致的状态回退。
+    mark_task_active(task_id, video_id)
+    try:
+        # 同一视频互斥：防止同视频双任务并发下载/生成触发文件锁冲突（WinError 32）。
+        # 不同视频互不阻塞，两个 worker 可让「转写（GPU）」与「总结（网络）」阶段重叠（ADR-0001）。
+        with video_task_locks.get(video_id or task_id):
+            note = task_serial_executor.run(_execute_note_task, task_id=task_id)
+    finally:
+        mark_task_done(task_id)
     logger.info(f"Note generated: {task_id}")
     if not note or not note.markdown:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
@@ -180,12 +205,37 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
 
 @router.post('/delete_task')
 def delete_task(data: RecordRequest):
-    try:
-        # TODO: 待持久化完成
-        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
-        return R.success(msg='删除成功')
-    except Exception as e:
-        return R.error(msg=e)
+    """真正删除任务：状态文件 + 缓存 + 导出结果 + 向量索引。
+
+    之前这里是 TODO 空实现（只回一句「删除成功」），前端把卡片从本地列表里抹掉，
+    但后端的 {task_id}.status.json 还在 → 30 秒后 /tasks/recent 增量同步又把它
+    同步回来，用户看到「删掉的视频过一会儿又出现在列表里/又变成排队中」。
+    """
+    task_id = (data.task_id or "").strip()
+    video_id = (data.video_id or "").strip()
+
+    if not task_id and not video_id:
+        return R.error(msg="缺少 task_id 或 video_id，无法删除", code=400)
+
+    task_ids = [task_id] if task_id else find_task_ids_by_video(video_id, data.platform)
+    if not task_ids:
+        # 已经是「不存在」的目标状态，按成功处理，避免前端把卡片又加回来
+        return R.success({"deleted": 0, "task_ids": [], "message": "任务不存在或已被删除"})
+
+    running = [t for t in task_ids if is_task_active(t)]
+    if running and not data.force:
+        return R.error(
+            msg="该任务正在生成中，无法删除；请等它生成完成或失败后再删",
+            code=400,
+            data={"active": True, "task_ids": running},
+        )
+
+    total = 0
+    for tid in task_ids:
+        total += purge_task(tid).get("deleted", 0)
+
+    logger.info(f"删除任务完成：task_ids={task_ids}, 清理文件 {total} 个")
+    return R.success({"deleted": total, "task_ids": task_ids})
 
 
 @router.post("/upload")
@@ -273,11 +323,31 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         if data.task_id:
             # 如果传了task_id，说明是重试！
             task_id = data.task_id
+            # 重试也必须去重：任务还在跑的时候再点一次「重新生成」，如果放行就会
+            # 往队列里塞第二个同 task_id 的副本，并把正在跑的那次状态改写成
+            # PENDING —— 前端于是整段时间都显示「排队中、第 N 位」（2026-10-01
+            # 用户实拍复现）。这里直接告诉前端「已有同任务在跑」。
+            if is_task_active(task_id):
+                logger.info(f"重复提交拦截（重试命中运行中任务）: task_id={task_id}")
+                return R.error(
+                    msg="该任务正在生成中，无需重复提交",
+                    code=400,
+                    data={"duplicated": True, "existing_task_id": task_id, "video_id": video_id},
+                )
+            active_same_video = active_task_for_video(video_id) if video_id else None
+            if active_same_video and active_same_video != task_id:
+                logger.info(f"重复提交拦截（同视频运行中）: video_id={video_id} → {active_same_video}")
+                return R.error(
+                    msg="该视频已在生成队列中，请等这一次跑完",
+                    code=400,
+                    data={"duplicated": True, "existing_task_id": active_same_video, "video_id": video_id},
+                )
             logger.info(f"重试模式，复用已有 task_id={task_id}")
         else:
             # 提交去重：同一视频已有未完成任务时不再重复建任务（防重复下载与队列膨胀）
             if video_id:
-                active = find_active_task_by_video(video_id)
+                active_tid = active_task_for_video(video_id)
+                active = {"task_id": active_tid, "status": "RUNNING"} if active_tid else find_active_task_by_video(video_id)
                 if active:
                     logger.info(f"重复提交拦截: video_id={video_id} 已有未完成任务 {active['task_id']}")
                     return R.error(

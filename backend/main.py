@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -68,6 +69,16 @@ async def lifespan(app: FastAPI):
             logger.info(f"           已应用全局代理到环境变量: {_proxy}")
 
         logger.info("[startup 5/5] 启动完成，等待请求")
+
+        # 收敛上一个进程遗留的「非终态」任务（崩溃/强杀留下的 PENDING、SUMMARIZING
+        # 会永远显示成「排队中」）：启动即标记为失败并写明原因。
+        try:
+            from app.services.note import reap_interrupted_tasks
+            reaped = reap_interrupted_tasks(time.time())
+            if reaped:
+                logger.warning(f"           已收敛 {reaped} 个被中断的任务（标记为失败）")
+        except Exception:
+            logger.exception("收敛中断任务失败（不影响启动）")
 
         # 自动化调度线程：稍后再看定期检查 + 汇总通知（enabled=false 时空转，
         # 见 docs/adr/0004；Windows 计划任务入口 automation_cli.py 与其文件锁互斥）
