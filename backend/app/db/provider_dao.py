@@ -115,15 +115,22 @@ def update_provider(id: str, **kwargs):
         db.close()
 
 
-def delete_provider(id: str):
+def delete_provider(id: str) -> bool:
+    """删除供应商。返回 True=删掉了，False=不存在（调用方据此区分 404）。
+
+    之前这里只删行、不返回值，router 层无法区分「删掉了」还是「id 根本不存在」。
+    """
     db = next(get_db())
     try:
         provider = db.query(Provider).filter_by(id=id).first()
-        if provider:
-            db.delete(provider)
-            db.commit()
-            logger.info(f"Provider deleted successfully. id: {id}")
+        if not provider:
+            return False
+        db.delete(provider)
+        db.commit()
+        logger.info(f"Provider deleted successfully. id: {id}")
+        return True
     except Exception as e:
         logger.error(f"Failed to delete provider: {e}")
+        raise
     finally:
         db.close()

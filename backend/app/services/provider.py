@@ -147,5 +147,21 @@ class ProviderService:
             return None
 
     @staticmethod
-    def delete_provider(id: str):
-        return delete_provider(id)
+    def delete_provider(id: str) -> dict:
+        """删除供应商（仅 custom 类型可删，内置 7 家受保护）。
+
+        守卫顺序：先查存在性（404）→ 再查类型（内置拒绝）→ 先清该供应商下模型
+        （models 表无外键级联，不清会留孤儿行）→ 最后删供应商行。
+        """
+        from app.db.model_dao import delete_models_by_provider
+
+        row = get_provider_by_id(id)
+        if not row:
+            raise ValueError(f'供应商不存在: {id}')
+        if (row.type or '') != 'custom':
+            raise ValueError(f'内置供应商「{row.name}」不可删除')
+        deleted_models = delete_models_by_provider(id)
+        ok = delete_provider(id)
+        if not ok:
+            raise ValueError(f'供应商不存在: {id}')
+        return {"id": id, "deleted_models": deleted_models}

@@ -91,6 +91,22 @@ def update_provider(data: ProviderUpdateRequest):
         print(e)
         return R.error(msg=str(e))
 
+@router.delete("/delete_provider/{id}")
+def delete_provider(id: str):
+    """删除供应商：仅 custom 类型可删（内置 7 家拒绝），级联清理其下模型。
+
+    DELETE 方法 + 路径参数，与已有的 GET /models/delete/{model_id} 风格区分开：
+    供应商删除是破坏性操作，用正确的语义方法避免被预加载/爬虫误触发。
+    """
+    try:
+        res = ProviderService.delete_provider(id)
+        return R.success(msg='删除供应商成功', data=res)
+    except ValueError as e:
+        return R.error(msg=str(e), code=400)
+    except Exception as e:
+        return R.error(msg=f'删除供应商失败: {e}')
+
+
 @router.post('/connect_test')
 def gpt_connect_test(data: TestRequest):
     ModelService().connect_test(data.id, model=data.model)

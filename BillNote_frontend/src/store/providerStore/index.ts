@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { IProvider, IResponse } from '@/types'
 import {
   addProvider,
+  deleteProviderById,
   getProviderById,
   getProviderList,
   updateProviderById,
@@ -17,6 +18,7 @@ interface ProviderStore {
   loadProviderById: (id: string) => Promise<void>
   addNewProvider: (provider: IProvider) => Promise<void>
   updateProvider: (provider: IProvider) => Promise<void>
+  deleteProvider: (id: string) => Promise<void>
 }
 
 export const useProviderStore = create<ProviderStore>((set, get) => ({
@@ -91,6 +93,11 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
     }
   },
   getProviderList: () => get().provider,
+  deleteProvider: async (id: string) => {
+    await deleteProviderById(id)
+    // 后端级联清掉了该供应商下模型，本地整行移除即可
+    set(state => ({ provider: state.provider.filter(p => String(p.id) !== String(id)) }))
+  },
   fetchProviderList: async () => {
     try {
       const res  = await getProviderList()

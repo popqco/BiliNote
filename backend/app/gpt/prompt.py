@@ -40,8 +40,8 @@ BASE_PROMPT = '''
 4. **可读布局**：必要时使用项目符号，并保持段落简短，增强可读性。(如果额外重要的任务有格式需求可以不遵守)
 5. 视频中提及的数学公式必须保留，并以 LaTeX 语法呈现，要求如下（前端只认这两种定界符，
    写错会直接显示原文）：
-   - 行内公式用单个美元符包裹，例如 $f_0=\\frac{{1}}{{2\\pi\\sqrt{{LC}}}}$；
-   - 独立成行的公式用双美元符包裹，例如 $$V_{{out}}\\approx DV_{{in}}$$；
+   - 行内公式用单个美元符包裹，例如 $f_0=\\frac{1}{2\\pi\\sqrt{LC}}$；
+   - 独立成行的公式用双美元符包裹，例如 $$V_{out}\\approx DV_{in}$$；
    - 禁止使用 \\(...\\)、\\[...\\]、```latex 代码块或其它任何写法；
    - 公式内部不要再套 Markdown 加粗/斜体，保持纯 LaTeX。
 
@@ -80,5 +80,26 @@ MERGE_PROMPT = '''
 - 保留所有 *Content-[mm:ss] 与 *Screenshot-[mm:ss] 标记
 - 保持中文输出，专有名词保留英文
 - 不要使用代码块包裹输出
-- 保留 $...$ / $$...$$ 公式定界符原样，不要改写成其它形式
+- 数学公式必须保留为 LaTeX，且只认两种定界符（前端只认这两种，写错会显示原文）：
+  行内用单个美元符（如 $f_0=\\frac{1}{2\\pi\\sqrt{LC}}$），独立成行用双美元符
+  （如 $$V_{out}\\approx DV_{in}$$）；禁止改写成 \\(...\\)、\\[...\\]、```latex 代码块
+  或其它任何形式；公式内部保持纯 LaTeX，不要套 Markdown 加粗/斜体
 '''
+
+
+def render_base_prompt(video_title, segment_text, tags) -> str:
+    """渲染 BASE_PROMPT：只替换三个已知占位符，对其它花括号免疫。
+
+    背景：BASE_PROMPT 里 LaTeX 示例满是 `{1}`、`{LC}`、`{out}` 这类单花括号，
+    花括号一旦漏转义就会全链崩溃。2026-10-01 实测：一次公式文案改动漏写一处
+    `{{}}`，`str.format()` 抛 `IndexError: Replacement index 1 out of range`，
+    full/thinned/text_only 三级降级全部陪葬（见 app.log 20:26 / 20:35）。
+    这里改用精确字符串替换——模板里再添多少 `{...}` 示例都不会炸；
+    调用方传参里的花括号（转录文本/备注）本来就安全（实参不参与解析）。
+    """
+    return (
+        BASE_PROMPT
+        .replace("{video_title}", str(video_title))
+        .replace("{segment_text}", str(segment_text))
+        .replace("{tags}", str(tags))
+    )

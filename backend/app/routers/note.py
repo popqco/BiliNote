@@ -355,8 +355,19 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                         code=400,
                         data={"duplicated": True, "existing_task_id": active["task_id"], "video_id": video_id},
                     )
-            # 正常新建任务
-            task_id = str(uuid.uuid4())
+                # 同视频已有历史任务文件（成功或失败）时，复用最近一个 task_id：
+                # 重试/重提不再开新卡，新内容追加为该任务的新版本（前端 updateTaskContent
+                # 的 Markdown[] 版本链已支持）。之前这里无条件 uuid → 同一视频越刷越多张卡
+                # （2026-10-01 用户投诉「重试后列表里一堆同样的视频笔记」）。
+                # 自动化走 _submit_task 不经过这里，不受影响。
+                existing_tids = find_task_ids_by_video(video_id, data.platform)
+                if existing_tids:
+                    task_id = existing_tids[0]
+                    logger.info(f"同视频复用历史任务: video_id={video_id} → task_id={task_id}")
+                    # 复用分支走与重试相同的 PENDING 写入路径（下方统一处理）
+                else:
+                    # 正常新建任务
+                    task_id = str(uuid.uuid4())
 
         # 统一先写入 PENDING（含 video_id/origin，供排队展示、去重与自动化任务同步）
         NoteGenerator()._update_status(

@@ -107,8 +107,19 @@ def send_via_channels(title: str, content_md: str) -> List[dict]:
 
 
 def send_summary(result: dict) -> List[dict]:
-    """检查轮结束后的汇总通知。"""
+    """检查轮结束后的汇总通知。
+
+    空轮静默：本轮一个新任务都没提交（submitted 为空，即 0 成功 0 失败，
+    只有跳过）时不打扰用户，直接返回跳过标记。2026-10-01 用户投诉：连续收到
+    「成功 0 / 失败 0（本轮没有需要新总结的视频）」的邮件，纯属噪音。
+    注意：submitted 非空但全部 still_pending（超时未归）时仍要通知——
+    那是异常状态，不是「没事发生」。
+    """
     submitted = result.get("submitted") or []
+    if not submitted:
+        skipped = result.get("skipped") or []
+        logger.info(f"空轮静默：本轮无新任务（跳过 {len(skipped)}），不发送汇总通知")
+        return [{"channel": "（空轮静默）", "ok": True, "detail": f"本轮无新任务，跳过 {len(skipped)}，未打扰用户"}]
     ok = [s for s in submitted if s.get("status") == "SUCCESS"]
     failed = [s for s in submitted if s.get("status") == "FAILED"]
     pending = [s for s in submitted if s.get("status") not in ("SUCCESS", "FAILED")]
@@ -124,8 +135,6 @@ def send_summary(result: dict) -> List[dict]:
         lines.append(f"✅ {s.get('title') or s.get('bvid')}")
     for s in failed:
         lines.append(f"❌ {s.get('title') or s.get('bvid')}：{str(s.get('message') or '')[:80]}")
-    if not submitted:
-        lines.append("（本轮没有需要新总结的视频）")
 
     content = "\n".join(lines)
     title = f"BiliNote 检查轮：成功 {len(ok)} / 失败 {len(failed)}"

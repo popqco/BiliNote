@@ -19,6 +19,10 @@ export const addProvider = async (data: any, opts?: CallOpts) => {
   return await request.post('/add_provider', data, cfg(opts))
 }
 
+export const deleteProviderById = async (id: string) => {
+  return await request.delete(`/delete_provider/${id}`)
+}
+
 export const testConnection = async (data: any, opts?: CallOpts) => {
   return await request.post('/connect_test', data, cfg(opts))
 }

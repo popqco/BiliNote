@@ -176,8 +176,32 @@ const NoteForm = () => {
 
     return
   }, [])
+  // 剪贴板候选链接（useClipboardWatcher 发现新链接时写入）：切到新建态并填入。
+  // 放这里而不是 Home.tsx，是因为填表单必须经 react-hook-form 的 setValue，
+  // 跨组件传 form 实例反而耦合更深；用一个模块级单例事件桥接。
   useEffect(() => {
-    if (!currentTask) return
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { url: string; platform: string } | undefined
+      if (!detail?.url) return
+      // 先切新建态（触发上面的清空 effect），再在下一帧填入新链接，
+      // 避免被清空 effect 覆盖
+      setCurrentTask(null)
+      requestAnimationFrame(() => {
+        form.setValue('platform', detail.platform === 'local' ? 'local' : detail.platform as any, { shouldDirty: true })
+        form.setValue('video_url', detail.url, { shouldDirty: true })
+      })
+    }
+    window.addEventListener('bilinote:clipboard-video', handler)
+    return () => window.removeEventListener('bilinote:clipboard-video', handler)
+  }, [])
+  useEffect(() => {
+    if (!currentTask) {
+      // 「新建笔记」只做 setCurrentTask(null)：这里必须把链接清空，
+      // 否则输入框里还留着上一个视频的旧链接（2026-10-01 用户实拍）。
+      // 其它选项（模型/风格/格式）保留用户习惯，只清链接。
+      form.setValue('video_url', '', { shouldDirty: false })
+      return
+    }
     const { formData } = currentTask
 
     console.log('currentTask.formData.platform:', formData.platform)
@@ -241,19 +265,25 @@ const NoteForm = () => {
       return
     }
 
-    // 本地重复提交检测：同一视频已有未完成任务时，选中已有卡片而不是打新任务
+    // 本地重复提交检测：同一视频已有任务卡片时，选中已有卡片而不是打新任务。
+    // 之前只拦「未完成」的（SUCCESS/FAILED 放行 → 后端开新 task_id → 同一视频
+    // 越刷越多张卡）。现在后端会复用同视频 task_id，这里把 SUCCESS/FAILED 的
+    // 历史卡也先选中：后端复用落到同一张卡上，新内容追加为版本，不再堆卡。
     const key = extractVideoKey(payload.video_url)
     if (key) {
       const dup = useTaskStore
         .getState()
         .tasks.find(
-          t =>
-            !['SUCCESS', 'FAILED', 'FAILD'].includes(t.status) &&
-            extractVideoKey((t.formData as any)?.video_url) === key,
+          t => extractVideoKey((t.formData as any)?.video_url) === key,
         )
       if (dup) {
-        toast.error('该视频已在队列/生成中，已为你选中对应任务')
+        if (!['SUCCESS', 'FAILED', 'FAILD'].includes(dup.status)) {
+          toast.error('该视频已在队列/生成中，已为你选中对应任务')
+        } else {
+          toast.success('该视频已有笔记，将在原卡片上重新生成（新版本）')
+        }
         setCurrentTask(dup.id)
+        retryTask(dup.id, { ...payload, task_id: dup.id })
         return
       }
     }

@@ -1,4 +1,4 @@
-from app.gpt.prompt import BASE_PROMPT
+from app.gpt.prompt import render_base_prompt
 
 note_formats = [
     {'label': '目录', 'value': 'toc'},
@@ -22,8 +22,9 @@ note_styles = [
 
 # 生成 BASE_PROMPT 函数
 def generate_base_prompt(title, segment_text, tags, _format=None, style=None, extras=None):
-    # 生成 Base Prompt 开头部分
-    prompt = BASE_PROMPT.format(
+    # 生成 Base Prompt 开头部分（render_base_prompt 对模板内花括号免疫，
+    # LaTeX 示例再添多少 `{...}` 都不会触发 str.format 崩溃，见 prompt.py 注释）
+    prompt = render_base_prompt(
         video_title=title,
         segment_text=segment_text,
         tags=tags
@@ -33,9 +34,12 @@ def generate_base_prompt(title, segment_text, tags, _format=None, style=None, ex
     if _format:
         prompt += "\n" + "\n".join([get_format_function(f) for f in _format])
 
-    # 根据用户选择的笔记风格添加描述
+    # 根据用户选择的笔记风格添加描述（未知风格返回空串时不追加兜底，
+    # 避免无风格任务的 prompt 凭空多一句）
     if style:
-        prompt += "\n" + get_style_format(style)
+        style_text = get_style_format(style)
+        if style_text:
+            prompt += "\n" + style_text + "\n" + STYLE_FORMULA_GUARD
 
     # 添加额外内容
     if extras:
@@ -85,6 +89,19 @@ def get_style_format(style):
         "tutorial":"9.**教程笔记**:尽可能详细的记录教程,特别是关键点和一些重要的结论步骤"
     }
     return style_map.get(style, '')
+
+
+# 风格公式兜底：无论切到哪种笔记风格，都追加一句公式定界符提醒。
+# 背景：公式规则只在 BASE_PROMPT 第 5 条出现一次，风格文案越长（如小红书的爆款词表）
+# 越容易把它淹没，模型就退回习惯性的 \(...\) / \[...\] 写法，前端直接显示原文
+# （2026-10-01 用户实拍：LTspice 笔记公式全是原文）。style 追加在 base 之后，
+# 这句兜底离模型最近，且只做提醒不涉及花括号，无 .format 风险。
+STYLE_FORMULA_GUARD = (
+    '另：视频中的数学公式必须保留为 LaTeX，且只用两种定界符——'
+    '行内用单个美元符（如 $f_0=\\frac{1}{2\\pi\\sqrt{LC}}$），'
+    '独立成行用双美元符（如 $$V_{out}\\approx DV_{in}$$）；'
+    '禁止 \\(...\\)、\\[...\\]、```latex 代码块或其它写法。'
+)
 
 
 # 格式化输出内容

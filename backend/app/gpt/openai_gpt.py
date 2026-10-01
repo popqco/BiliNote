@@ -1,7 +1,7 @@
 from typing import List
 from app.gpt.base import GPT
 from openai import OpenAI
-from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK
+from app.gpt.prompt import render_base_prompt, AI_SUM, SCREENSHOT, LINK
 from app.gpt.provider.OpenAI_compatible_provider import OpenAICompatibleProvider
 from app.gpt.utils import fix_markdown
 from app.models.gpt_model import GPTSource
@@ -36,7 +36,7 @@ class OpenaiGPT(GPT):
         ]
 
     def create_messages(self, segments: List[TranscriptSegment], title: str,tags:str):
-        content = BASE_PROMPT.format(
+        content = render_base_prompt(
             video_title=title,
             segment_text=self._build_segment_text(segments),
             tags=tags

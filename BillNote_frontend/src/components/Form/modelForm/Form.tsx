@@ -63,8 +63,10 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
   const loadProviderById = useProviderStore(state => state.loadProviderById)
   const updateProvider = useProviderStore(state => state.updateProvider)
   const addNewProvider = useProviderStore(state => state.addNewProvider)
+  const deleteProvider = useProviderStore(state => state.deleteProvider)
   const [loading, setLoading] = useState(true)
   const [testing, setTesting] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [isBuiltIn, setIsBuiltIn] = useState(false)
   const loadModelsById= useModelStore(state => state.loadModelsById)
   const [modelOptions, setModelOptions] = useState<IModel[]>([]) // ⚡新增，保存模型列表
@@ -203,6 +205,23 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
 
   }
 
+  // 删除供应商（仅自定义可用，内置隐藏按钮 + 后端双重守卫）。
+  // 级联：后端顺手清掉该供应商下模型，前端跳回列表。
+  const handleDeleteProvider = async () => {
+    if (!id || isBuiltIn) return
+    if (!window.confirm('确定要删除这个供应商吗？其下已保存的模型会一并清除，该操作不可恢复。')) return
+    try {
+      setDeleting(true)
+      await deleteProvider(id)
+      toast.success('供应商已删除')
+      navigate('/settings/model/new')
+    } catch (e: any) {
+      toast.error(e?.msg || '删除供应商失败')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   // 保存Model信息
   const onModelSubmit = async (values: ModelFormValues) => {
     toast.success(`保存模型: ${values.modelName}`)
@@ -282,10 +301,20 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
               </FormItem>
             )}
           />
-          <div className="pt-2">
+          <div className="flex items-center gap-2 pt-2">
             <Button type="submit" disabled={!providerForm.formState.isDirty}>
               {isEditMode ? '保存修改' : '保存创建'}
             </Button>
+            {isEditMode && !isBuiltIn && (
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={deleting}
+                onClick={handleDeleteProvider}
+              >
+                {deleting ? '删除中...' : '删除供应商'}
+              </Button>
+            )}
           </div>
         </form>
       </Form>

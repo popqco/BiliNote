@@ -1,9 +1,10 @@
-import { FC, useEffect, useState } from 'react'
+import { FC, useCallback, useEffect, useState } from 'react'
 import HomeLayout from '@/layouts/HomeLayout.tsx'
 import NoteForm from '@/pages/HomePage/components/NoteForm.tsx'
 import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
 import { useTaskStore } from '@/store/taskStore'
 import History from '@/pages/HomePage/components/History.tsx'
+import { useClipboardWatcher, notifyClipboardVideo } from '@/hooks/useClipboardWatcher.tsx'
 type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
 export const HomePage: FC = () => {
   const tasks = useTaskStore(state => state.tasks)
@@ -14,6 +15,20 @@ export const HomePage: FC = () => {
   const [status, setStatus] = useState<ViewStatus>('idle')
 
   const content = currentTask?.markdown || ''
+
+  // 剪贴板视频链接识别：发现新链接 → 右下角弹窗（含标题封面）→ 点「生成笔记」
+  // 派发事件给 NoteForm 填入表单（只填不自动提交，模型/风格由用户确认）。
+  const handleClipboardCandidate = useCallback((info: { url: string; platform: string }) => {
+    window.dispatchEvent(new CustomEvent('bilinote:clipboard-video', { detail: info }))
+  }, [])
+  useClipboardWatcher(useCallback((info: {
+    url: string
+    platform: string
+    title?: string
+    cover_url?: string
+  }) => {
+    notifyClipboardVideo(info, handleClipboardCandidate)
+  }, [handleClipboardCandidate]))
 
   useEffect(() => {
     if (!currentTask) {

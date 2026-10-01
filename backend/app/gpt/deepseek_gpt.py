@@ -1,7 +1,7 @@
 from typing import List
 from app.gpt.base import GPT
 from app.utils.openai_client import build_openai_client
-from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT
+from app.gpt.prompt import render_base_prompt, AI_SUM, SCREENSHOT
 from app.gpt.utils import fix_markdown
 from app.models.gpt_model import GPTSource
 from app.models.transcriber_model import TranscriptSegment
@@ -34,7 +34,7 @@ class DeepSeekGPT(GPT):
         ]
 
     def create_messages(self, segments: List[TranscriptSegment], title: str,tags:str):
-        content = BASE_PROMPT.format(
+        content = render_base_prompt(
             video_title=title,
             segment_text=self._build_segment_text(segments),
             tags=tags

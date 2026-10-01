@@ -333,7 +333,7 @@ const Automation = () => {
         </div>
       </Section>
 
-      <Section title="通知渠道" desc="每轮检查结束后发送一条汇总；两个渠道可独立启用、独立失败。填完点「发送测试通知」即可验证，收不到会直接显示原因。">
+      <Section title="通知渠道" desc="每轮有新任务时才发一条汇总（0 成功 0 失败的空轮不打扰）；两个渠道可独立启用、独立失败。填完点「发送测试通知」即可验证，收不到会直接显示原因。">
         <Row label="微信推送（WxPusher）" desc="免费，微信里直接收推送，推荐">
           <Checkbox checked={!!wx.enabled} onCheckedChange={v => upd(['notify', 'wxpusher', 'enabled'], !!v)} />
         </Row>
