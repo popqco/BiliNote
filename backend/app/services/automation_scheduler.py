@@ -147,6 +147,14 @@ class AutomationScheduler:
 
     def run_round_once(self, cfg: Optional[dict] = None) -> Dict:
         cfg = cfg or AutomationConfigManager().get_config()
+
+        # 前置校验：生成配置不完整直接跳过（否则会提交出必然失败的任务）
+        gen = cfg.get("gen") or {}
+        if not gen.get("model_name") or not gen.get("provider_id"):
+            msg = "自动化生成配置不完整：请到「设置 → 自动化」选择模型后再运行"
+            logger.warning(msg)
+            return {"error": msg}
+
         started = datetime.now()
         logger.info(f"=== 自动化检查轮开始 {started:%Y-%m-%d %H:%M:%S} ===")
 
