@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
@@ -29,6 +31,14 @@ class AskRequest(BaseModel):
     history: list[ChatMessage] = []
     provider_id: str
     model_name: str
+    # 问答范围："current"（默认，只查当前笔记，历史行为）|
+    # "all"（跨全部已索引笔记）| 单个 task_id（限定查那一篇）。
+    scope: str = "current"
+    task_ids: Optional[list[str]] = None
+
+
+class BackfillRequest(BaseModel):
+    task_ids: Optional[list[str]] = None
 
 
 def _do_index(task_id: str):
@@ -83,8 +93,17 @@ def chat_status(task_id: str):
 
 @router.post("/chat/ask")
 def ask_question(data: AskRequest):
-    """基于笔记内容的 RAG 问答。"""
+    """基于笔记内容的 RAG 问答（scope="all" 时跨全部历史笔记）。"""
     try:
+        scope = (data.scope or "current").strip().lower()
+        task_ids = data.task_ids
+        if scope not in ("current", "all"):
+            # scope 传单个 task_id 时视为限定查那一篇
+            if task_ids is None and scope:
+                task_ids = [data.scope]
+                scope = "all"
+            else:
+                return R.error(msg=f"非法 scope: {data.scope}（仅支持 current / all）", code=400)
         history = [{"role": m.role, "content": m.content} for m in data.history]
         result = chat_service(
             task_id=data.task_id,
@@ -92,6 +111,8 @@ def ask_question(data: AskRequest):
             history=history,
             provider_id=data.provider_id,
             model_name=data.model_name,
+            scope=scope,
+            task_ids=task_ids,
         )
         return R.success(data=result)
     except ValueError as e:
@@ -99,3 +120,35 @@ def ask_question(data: AskRequest):
     except Exception as e:
         logger.error(f"Chat 问答失败: {e}", exc_info=True)
         return R.error(msg=f"问答失败: {str(e)}")
+
+
+@router.get("/chat/indexed")
+def indexed_tasks(limit: int = 50):
+    """返回全局索引中已建索引的 task_id 列表（供跨笔记范围提示）。"""
+    try:
+        limit = max(1, min(int(limit), 200))
+    except Exception:
+        limit = 50
+    try:
+        store = VectorStoreManager()
+        return R.success(data={"task_ids": store.indexed_task_ids(limit=limit)})
+    except Exception as e:
+        logger.error(f"查询全局索引失败: {e}")
+        return R.success(data={"task_ids": []})
+
+
+@router.post("/chat/backfill")
+def backfill_global_index(data: BackfillRequest, background_tasks: BackgroundTasks):
+    """为缺失全局索引的历史笔记补建索引（后台执行，复用双写 index_task）。"""
+    task_ids = data.task_ids
+
+    def _do_backfill(task_ids):
+        try:
+            store = VectorStoreManager()
+            result = store.backfill_global(only_task_ids=task_ids)
+            logger.info(f"全局补索引完成: {result}")
+        except Exception as e:
+            logger.error(f"全局补索引失败: {e}")
+
+    background_tasks.add_task(_do_backfill, task_ids)
+    return R.success(msg="开始补建索引")
