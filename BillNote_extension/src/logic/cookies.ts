@@ -8,6 +8,7 @@ const COOKIE_DOMAINS: Record<Exclude<Platform, 'local'>, string> = {
   youtube: '.youtube.com',
   douyin: '.douyin.com',
   kuaishou: '.kuaishou.com',
+  xiaohongshu: '.xiaohongshu.com',
 }
 
 export const SUPPORTED_COOKIE_PLATFORMS: Array<Exclude<Platform, 'local'>> = [
@@ -15,6 +16,7 @@ export const SUPPORTED_COOKIE_PLATFORMS: Array<Exclude<Platform, 'local'>> = [
   'douyin',
   'kuaishou',
   'youtube',
+  'xiaohongshu',
 ]
 
 export async function readBrowserCookies(platform: Exclude<Platform, 'local'>): Promise<string> {

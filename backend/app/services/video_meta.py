@@ -90,4 +90,40 @@ def fetch_video_meta(url: str, platform: str = "bilibili") -> Optional[dict]:
             meta = _bilibili_api_meta(bvid)
             if meta and meta.get("title"):
                 return meta
+    if platform == "xiaohongshu":
+        # yt-dlp 的 XiaoHongShuIE 已失效（匿名拉 explore 页 noteDetailMap 为空），
+        # 走自研 feed API（需用户已配小红书 Cookie）；失败静默返回 None。
+        meta = _xiaohongshu_api_meta(url)
+        if meta and meta.get("title"):
+            return meta
+        return None
     return _ytdlp_meta(url, platform)
+
+
+def _xiaohongshu_api_meta(url: str) -> Optional[dict]:
+    try:
+        from app.downloaders.xiaohongshu_helper.xiaohongshu import (
+            extract_note_id,
+            extract_xsec_token,
+            Xiaohongshu,
+            note_meta,
+        )
+    except Exception as e:
+        logger.warning(f"video_meta 小红书 helper 导入失败: {e}")
+        return None
+    note_id = extract_note_id(url)
+    if not note_id:
+        return None
+    try:
+        card = Xiaohongshu().fetch_note_card(note_id, extract_xsec_token(url))
+    except Exception as e:
+        logger.warning(f"video_meta 小红书 feed API 失败: {e}")
+        return None
+    meta = note_meta(card, note_id)
+    return {
+        "video_id": meta["video_id"],
+        "title": meta["title"],
+        "cover_url": meta["cover_url"] or None,
+        "duration": meta["duration"],
+        "platform": "xiaohongshu",
+    }

@@ -12,6 +12,8 @@ export function detectPlatform(url: string | undefined | null): Platform | null 
     return 'douyin'
   if (url.includes('kuaishou'))
     return 'kuaishou'
+  if (url.includes('xiaohongshu') || url.includes('xhslink'))
+    return 'xiaohongshu'
   return null
 }
 
@@ -20,5 +22,6 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
   youtube: 'YouTube',
   douyin: '抖音',
   kuaishou: '快手',
+  xiaohongshu: '小红书',
   local: '本地',
 }
