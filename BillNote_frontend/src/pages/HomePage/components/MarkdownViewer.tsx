@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
-import { Copy, Download, ArrowRight, Play, ExternalLink } from 'lucide-react'
+import { Copy, ArrowRight, Play, ExternalLink } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
@@ -26,6 +26,14 @@ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
+import { toPng } from 'html-to-image'
+import PosterCard, { type PosterData } from '@/pages/HomePage/components/PosterCard.tsx'
+import {
+  downloadBlob,
+  exportNoteFile,
+  extractPosterSummary,
+  type ExportFormat,
+} from '@/services/export'
 
 interface VersionNote {
   ver_id: string
@@ -50,6 +58,38 @@ const steps = [
 
 const remarkPlugins = [gfm, remarkMath]
 const rehypePlugins = [rehypeKatex, rehypeSlug]
+
+const PLATFORM_LABELS: Record<string, string> = {
+  bilibili: '哔哩哔哩',
+  youtube: 'YouTube',
+  douyin: '抖音',
+  xiaohongshu: '小红书',
+}
+
+const formatDuration = (seconds?: number): string => {
+  if (!seconds || seconds <= 0) return ''
+  const total = Math.round(seconds)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const mm = h > 0 ? String(m).padStart(2, '0') : String(m)
+  return h > 0 ? `${h}:${mm}:${String(s).padStart(2, '0')}` : `${mm}:${String(s).padStart(2, '0')}`
+}
+
+const formatPosterDate = (value?: string | Date): string => {
+  if (!value) return ''
+  const d = typeof value === 'string' ? new Date(value) : value
+  if (isNaN(d.getTime())) return ''
+  return d
+    .toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    .replace(/\//g, '-')
+}
 
 /**
  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
@@ -339,6 +379,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
   // （见下面的回顶 effect）。
   const readerViewportRef = useRef<HTMLDivElement>(null)
+  // 导出（PDF/Word/长图/海报）状态与 DOM 引用
+  const [exporting, setExporting] = useState<ExportFormat | null>(null)
+  const [posterData, setPosterData] = useState<PosterData | null>(null)
+  const contentCaptureRef = useRef<HTMLDivElement>(null)
+  const posterRef = useRef<HTMLDivElement>(null)
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
@@ -419,17 +464,176 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       URL.revokeObjectURL(url)
     },
   }
-  const handleDownload = () => {
+  const buildPosterData = (): PosterData | null => {
     const task = getCurrentTask()
-    const name = task?.audioMeta.title || 'note'
-    const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `${name}.md`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    if (!task) return null
+    const rawCover = task.audioMeta?.cover_url || ''
+    const apiBase = String(import.meta.env.VITE_API_BASE_URL || 'api').replace(/\/$/, '')
+    return {
+      title: task.audioMeta?.title || '视频笔记',
+      coverUrl: rawCover ? `${apiBase}/image_proxy?url=${encodeURIComponent(rawCover)}` : '',
+      platform: PLATFORM_LABELS[task.audioMeta?.platform] || task.audioMeta?.platform || '',
+      uploader: task.audioMeta?.raw_info?.uploader || '',
+      duration: formatDuration(task.audioMeta?.duration),
+      createdAt: formatPosterDate(createTime),
+      summary: extractPosterSummary(normalizeMathDelimiters(selectedContent)),
+      videoUrl: task.formData?.video_url || task.audioMeta?.raw_info?.webpage_url || '',
+    }
   }
+
+  // html-to-image 在部分环境会偶发挂起或抛错（字体收集 / CDN 样式表）：
+  // 先用带防御参数的组合，超时后退回最简参数再试一次，保证按钮不会永久卡死
+  const captureNodeToPng = async (
+    node: HTMLElement,
+    opts: { pixelRatio: number; backgroundColor: string; filter?: (el: HTMLElement) => boolean },
+  ): Promise<string> => {
+    const withTimeout = <T,>(p: Promise<T>): Promise<T> =>
+      Promise.race([
+        p,
+        new Promise<T>((_, reject) =>
+          setTimeout(() => reject(new Error('截图超时，请重试')), 20000),
+        ),
+      ])
+    try {
+      return await withTimeout(
+        toPng(node, {
+          pixelRatio: opts.pixelRatio,
+          backgroundColor: opts.backgroundColor,
+          cacheBust: true,
+          // 页面里存在依赖注入的跨域 CDN 样式表，字体收集会被网络抖动炸掉
+          skipFonts: true,
+          ...(opts.filter ? { filter: opts.filter } : {}),
+        }),
+      )
+    } catch {
+      return await withTimeout(
+        toPng(node, { pixelRatio: opts.pixelRatio, backgroundColor: opts.backgroundColor }),
+      )
+    }
+  }
+
+  // 长图：截取阅读区（视频信息条 + 正文）。超长内容按画布上限自适应降低倍率，
+  // 上限同 MarkmapComponent（32767 边长 / 2.68 亿像素）
+  const exportLongImage = async (title: string) => {
+    const node = contentCaptureRef.current
+    if (!node) {
+      toast.error('内容尚未渲染完成')
+      return
+    }
+    const rect = node.getBoundingClientRect()
+    const maxSide = 32767
+    const maxArea = 268000000
+    const pixelRatio = Math.max(
+      0.5,
+      Math.min(
+        2,
+        maxSide / Math.max(1, rect.height),
+        maxSide / Math.max(1, rect.width),
+        Math.sqrt(maxArea / Math.max(1, rect.width * rect.height)),
+      ),
+    )
+    const dataUrl = await captureNodeToPng(node, {
+      pixelRatio,
+      backgroundColor: getComputedStyle(document.body).backgroundColor || '#ffffff',
+      // react-medium-image-zoom 的放大/缩小按钮是无障碍隐藏节点，截出来会变成裸按钮
+      filter: el =>
+        !(
+          el instanceof HTMLElement &&
+          (el.hasAttribute('data-rmiz-btn-zoom') || el.hasAttribute('data-rmiz-btn-unzoom'))
+        ),
+    })
+    const blob = await (await fetch(dataUrl)).blob()
+    downloadBlob(blob, `${title}.png`)
+  }
+
+  const handleExport = async (format: ExportFormat) => {
+    if (exporting) return
+    const task = getCurrentTask()
+    const title = task?.audioMeta?.title || 'note'
+
+    // 海报的截图由下方 effect 在图片解码完成后收尾（含 exporting 复位）
+    if (format === 'poster') {
+      const data = buildPosterData()
+      if (!data) {
+        toast.error('当前没有可导出的笔记')
+        return
+      }
+      setExporting(format)
+      setPosterData(data)
+      return
+    }
+
+    setExporting(format)
+    try {
+      if (format === 'markdown') {
+        downloadBlob(new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' }), `${title}.md`)
+        toast.success('Markdown 已导出')
+        return
+      }
+      if (format === 'pdf' || format === 'docx') {
+        // 旧笔记在 IndexedDB 里是 \(...\) / \[...\] 写法，先归一化成 $ / $ 交给
+        // 后端公式管线（新笔记已是 $ 写法，归一化幂等）
+        const blob = await exportNoteFile({
+          markdown: normalizeMathDelimiters(selectedContent),
+          title,
+          output_format: format,
+        })
+        downloadBlob(blob, `${title}.${format}`)
+        toast.success(format === 'pdf' ? 'PDF 已导出' : 'Word 已导出')
+        return
+      }
+      if (format === 'longimage') {
+        await exportLongImage(title)
+        toast.success('长图已导出')
+        return
+      }
+    } catch (e: any) {
+      toast.error(e?.message || '导出失败')
+    } finally {
+      setExporting(null)
+    }
+  }
+
+  // 海报导出：PosterCard 已挂到屏幕外，等封面图解码完成、排版稳定后再截图
+  useEffect(() => {
+    if (!posterData || !posterRef.current) return
+    let cancelled = false
+    ;(async () => {
+      const node = posterRef.current!
+      const images = Array.from(node.querySelectorAll("img"))
+      // 等所有图片进入终态（加载成功或失败都放行，失败交给 onError 降级）。
+      // 注意 complete=true 且 naturalWidth=0 是「已失败」——error 事件可能
+      // 在我们挂监听之前就触发了，不显式判断会永远挂住
+      await Promise.all(
+        images.map(im => {
+          if (!im.complete) {
+            return new Promise<void>(resolve => {
+              im.addEventListener("load", () => resolve(), { once: true })
+              im.addEventListener("error", () => resolve(), { once: true })
+            })
+          }
+          return Promise.resolve()
+        }),
+      )
+      await new Promise(r => setTimeout(r, 80))
+      if (cancelled) return
+      try {
+        const dataUrl = await captureNodeToPng(node, { pixelRatio: 2, backgroundColor: '#ffffff' })
+        const blob = await (await fetch(dataUrl)).blob()
+        downloadBlob(blob, `${posterData.title}.png`)
+        toast.success('海报已导出')
+      } catch (e: any) {
+        console.error('[export] 海报截图失败:', e)
+        toast.error(e?.message || '海报导出失败')
+      } finally {
+        setPosterData(null)
+        setExporting(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [posterData])
 
   if (status === 'loading') {
     return (
@@ -489,7 +693,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         style={style}
         noteStyles={noteStyles}
         onCopy={handleCopy}
-        onDownload={handleDownload}
+        onExport={handleExport}
+        exporting={exporting}
         createAt={createTime}
         showTranscribe={showTranscribe}
         setShowTranscribe={setShowTranscribe}
@@ -521,6 +726,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               ) : (
               <>
               <ScrollArea viewportRef={readerViewportRef} className="min-w-0 flex-1">
+                {/* 导出长图的截图根：视频信息条 + 正文都包进来 */}
+                <div ref={contentCaptureRef} className="bg-background pb-6">
                 <div className="px-2">
                   <VideoBanner
                     audioMeta={currentTask?.audioMeta}
@@ -540,6 +747,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                       selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''),
                     )}
                   </ReactMarkdown>
+                </div>
                 </div>
               </ScrollArea>
               {showTranscribe && (
@@ -567,6 +775,14 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               </div>
             </div>
           )}
+        </div>
+      )}
+      {/* 摘要海报的屏幕外挂载点：仅导出期间渲染，截图由 effect 负责 */}
+      {posterData && (
+        <div style={{ position: 'fixed', left: -10000, top: 0, zIndex: -1 }} aria-hidden>
+          <div ref={posterRef}>
+            <PosterCard {...posterData} />
+          </div>
         </div>
       )}
     </div>

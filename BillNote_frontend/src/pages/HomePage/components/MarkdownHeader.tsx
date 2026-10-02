@@ -1,11 +1,19 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Copy, Download, BrainCircuit, MessageSquare } from 'lucide-react'
+import { Copy, Download, ChevronDown, FileText, FileDown, FileType2, Image, Share2, BrainCircuit, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Badge } from '@/components/ui/badge'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import type { ExportFormat } from '@/services/export'
 
 interface VersionNote {
   ver_id: string
@@ -25,7 +33,10 @@ interface NoteHeaderProps {
   style: string
   noteStyles: { value: string; label: string }[]
   onCopy: () => void
-  onDownload: () => void
+  /** 触发导出：markdown / pdf / docx / longimage / poster */
+  onExport: (format: ExportFormat) => void
+  /** 当前正在进行的导出格式（用于按钮 loading 态），无导出时为 null */
+  exporting?: string | null
   createAt?: string | Date
   setShowTranscribe: (show: boolean) => void
   showChat?: false | 'half' | 'full'
@@ -41,7 +52,8 @@ export function MarkdownHeader({
   style,
   noteStyles,
   onCopy,
-  onDownload,
+  onExport,
+  exporting,
   createAt,
   showTranscribe,
   setShowTranscribe,
@@ -158,17 +170,33 @@ export function MarkdownHeader({
           </Tooltip>
         </TooltipProvider>
 
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button onClick={onDownload} variant="ghost" size="sm" className="h-8 px-2">
-                <Download className="mr-1.5 h-4 w-4" />
-                <span className="text-sm">导出 Markdown</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>下载为 Markdown 文件</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-8 px-2" disabled={!!exporting}>
+              <Download className="mr-1.5 h-4 w-4" />
+              <span className="text-sm">{exporting ? '导出中…' : '导出'}</span>
+              <ChevronDown className="ml-0.5 h-3.5 w-3.5 opacity-60" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-44">
+            <DropdownMenuItem onClick={() => onExport('markdown')}>
+              <FileText /> Markdown
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onExport('pdf')}>
+              <FileDown /> PDF 文档
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onExport('docx')}>
+              <FileType2 /> Word 文档
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => onExport('longimage')}>
+              <Image /> 长图 PNG
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onExport('poster')}>
+              <Share2 /> 摘要海报
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
