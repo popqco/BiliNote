@@ -8,7 +8,9 @@ SUPPORTED_PLATFORMS = {
     "bilibili": r"(https?://)?(www\.)?bilibili\.com/video/[a-zA-Z0-9]+",
     "youtube": r"(https?://)?(www\.)?(youtube\.com/(watch\?v=|shorts/)|youtu\.be/)[\w\-]+",
     "douyin": "douyin",
-    "kuaishou": "kuaishou"
+    "kuaishou": "kuaishou",
+    "xiaohongshu": "xiaohongshu",
+    "xhslink": "xhslink",
 }
 
 
@@ -20,7 +22,7 @@ def is_supported_video_url(url: str) -> bool:
         return True
 
     for name, pattern in SUPPORTED_PLATFORMS.items():
-        if pattern in ["douyin", "kuaishou"]:
+        if pattern in ["douyin", "kuaishou", "xiaohongshu", "xhslink"]:
             if pattern in url:
                 return True
         else:

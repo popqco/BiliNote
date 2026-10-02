@@ -157,6 +157,8 @@ browser.runtime.onInstalled.addListener(() => {
         '*://youtu.be/*',
         '*://*.douyin.com/*',
         '*://*.kuaishou.com/*',
+        '*://*.xiaohongshu.com/*',
+        '*://*.xhslink.com/*',
       ],
     })
   }

@@ -8,7 +8,7 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
     从视频链接中提取视频 ID
 
     :param url: 视频链接
-    :param platform: 平台名（bilibili / youtube / douyin）
+    :param platform: 平台名（bilibili / youtube / douyin / xiaohongshu）
     :return: 提取到的视频 ID 或 None
     """
     if platform == "bilibili":
@@ -31,6 +31,24 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
         # 匹配 douyin.com/video/1234567890123456789
         match = re.search(r"/video/(\d+)", url)
         return match.group(1) if match else None
+
+    elif platform == "xiaohongshu":
+        # 小红书笔记 ID：/explore/<24hex> 或 /discovery/item/<24hex>；
+        # xhslink.com 短链先 follow redirect（与 douyin 短链同理）
+        candidate = url
+        found = re.findall(
+            r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+",
+            url,
+        )
+        if found:
+            candidate = found[0]
+        if "xhslink.com" in candidate:
+            try:
+                candidate = requests.head(candidate, allow_redirects=True, timeout=15).url
+            except Exception:
+                return None
+        match = re.search(r"(?:/explore/|/discovery/item/)([\da-fA-F]{24})", candidate)
+        return match.group(1).lower() if match else None
 
     return None
 

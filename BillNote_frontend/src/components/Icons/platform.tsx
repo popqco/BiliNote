@@ -166,3 +166,32 @@ export const LocalLogo = () => {
     </svg>
   )
 }
+
+export const XiaohongshuLogo = () => {
+  return (
+    <svg
+      className="icon"
+      viewBox="0 0 1024 1024"
+      version="1.1"
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+    >
+      <path
+        d="M0 0m184.32 0l655.36 0q184.32 0 184.32 184.32l0 655.36q0 184.32-184.32 184.32l-655.36 0q-184.32 0-184.32-184.32l0-655.36q0-184.32 184.32-184.32Z"
+        fill="#FF2442"
+      ></path>
+      <text
+        x="512"
+        y="660"
+        textAnchor="middle"
+        fontSize="420"
+        fontWeight="700"
+        fill="#FFFFFF"
+        fontFamily="PingFang SC, Microsoft YaHei, sans-serif"
+      >
+        红
+      </text>
+    </svg>
+  )
+}

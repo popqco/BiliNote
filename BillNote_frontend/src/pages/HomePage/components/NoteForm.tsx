@@ -604,7 +604,7 @@ const NoteForm = () => {
           <FormButton></FormButton>
 
           {/* 视频链接 & 平台 */}
-          <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
+          <SectionHeader title="视频链接" tip="支持 B 站、YouTube、抖音、快手、小红书等平台" />
           <div className="flex gap-2">
             {/* 平台选择 */}
 
@@ -650,13 +650,22 @@ const NoteForm = () => {
                       <Input disabled={!!editing} placeholder="请输入本地视频路径" {...field} />
                     </>
                   ) : (
-                    <Input disabled={!!editing} placeholder="请输入视频网站链接" {...field} />
+                    <Input
+                      disabled={!!editing}
+                      placeholder={platform === 'xiaohongshu' ? '请输入小红书视频笔记链接（暂不支持图文笔记）' : '请输入视频网站链接'}
+                      {...field}
+                    />
                   )}
                   <FormMessage style={{ display: 'none' }} />
                 </FormItem>
               )}
             />
           </div>
+          {platform === 'xiaohongshu' && (
+            <p className="text-xs text-muted-foreground">
+              小红书仅支持视频笔记（图文笔记无音频，无法生成）；首次使用请先到「设置 → 下载器配置 → 小红书」填入已登录 Cookie。
+            </p>
+          )}
 
           <FormField
             control={form.control}
