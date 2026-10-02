@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react'
 import toast from 'react-hot-toast'
-import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { get_video_meta } from '@/services/note.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useSystemStore } from '@/store/configStore'
@@ -39,8 +38,30 @@ import { sendOsClipboardNotify } from '@/utils/osClipboardNotify.ts'
  *   模型/风格/截图开关仍由用户确认，避免误触扣费。
  */
 
-const SEEN_KEY = 'bilinote-clipboard-seen'
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
+/**
+ * 取 Tauri 当前窗口句柄。纯 Web 端（无 __TAURI_INTERNALS__）返回 null，
+ * 上层跳过窗口焦点逻辑、只走 DOM focus/visibility 兜底。
+ *
+ * 为什么动态 import：@tauri-apps/api/webviewWindow 模块顶层在
+ * 无 Tauri 运行时直接读 window.__TAURI_INTERNALS__.metadata，
+ * 静态 import 会让整个应用在纯浏览器里白屏（Uncaught TypeError）。
+ */
+async function getTauriWindow(): Promise<{
+  isFocused: () => Promise<boolean>
+  onFocusChanged: (cb: (e: { payload: boolean }) => void) => Promise<() => void>
+} | null> {
+  if (!isTauri) return null
+  try {
+    const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+    return getCurrentWebviewWindow()
+  } catch {
+    return null
+  }
+}
+
+const SEEN_KEY = 'bilinote-clipboard-seen'
 
 function loadSeen(): Set<string> {
   try {
@@ -212,28 +233,32 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
 
     // Tauri 窗口焦点事件：权威焦点信号 + 回前台 flush。DOM focus/
     // visibilitychange 在 WebView2 里不可靠（见上），保留纯作 Web 兜底。
-    const win = getCurrentWebviewWindow()
+    // 纯 Web 端 getTauriWindow() 返回 null，直接跳过（动态 import，不能在
+    // 模块顶层静态 import @tauri-apps/api/webviewWindow，否则纯浏览器白屏）。
     let unlistenFocus: (() => void) | undefined
-    win
-      .isFocused()
-      .then(f => {
-        if (!disposed) focusedRef.current = f
-      })
-      .catch(() => {})
-    win
-      .onFocusChanged(e => {
-        if (disposed) return
-        focusedRef.current = e.payload
-        if (e.payload) {
-          flushPending()
-          void check()
-        }
-      })
-      .then(u => {
-        if (disposed) u()
-        else unlistenFocus = u
-      })
-      .catch(() => {})
+    void getTauriWindow().then(win => {
+      if (!win || disposed) return
+      win
+        .isFocused()
+        .then(f => {
+          if (!disposed) focusedRef.current = f
+        })
+        .catch(() => {})
+      win
+        .onFocusChanged(e => {
+          if (disposed) return
+          focusedRef.current = e.payload
+          if (e.payload) {
+            flushPending()
+            void check()
+          }
+        })
+        .then(u => {
+          if (disposed) u()
+          else unlistenFocus = u
+        })
+        .catch(() => {})
+    })
 
     const onFocus = () => { flushPending(); void check() }
     const onVisible = () => { if (!document.hidden) { flushPending(); void check() } }
