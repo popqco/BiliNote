@@ -12,7 +12,7 @@ import { useForm, useWatch, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
-import { Info, Loader2, Plus, Trash2 } from 'lucide-react'
+import { Info, Loader2, Plus, BookmarkPlus, ChevronDown, Trash2 } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
 import {
   Dialog,
@@ -44,7 +44,7 @@ import {
   SelectValue,
 } from '@/components/ui/select.tsx'
 import { Input } from '@/components/ui/input.tsx'
-import { Textarea } from '@/components/ui/textarea.tsx'
+import { Textarea } from '@/components/ui/textarea.tsx' // ExtrasPresetBlock 内备注框用（方案 C 下拉附着）
 import { noteStyles, noteFormats, videoPlatforms } from '@/constant/note.ts'
 import { fetchModels } from '@/services/model.ts'
 import { useNavigate } from 'react-router-dom'
@@ -149,7 +149,7 @@ const CheckboxGroup = ({
 /* -------------------- 备注预设区（自定义风格预设） -------------------- */
 /**
  * 「备注」框配套的个人风格预设：保存当前备注内容为具名预设，
- * 预设以 chips 形式一键填入备注框。持久化在独立 store
+ * 预设收进备注框左上角的「预设」下拉里，选中回填。持久化在独立 store
  *（localStorage `custom-style-presets`），不进 last-note-options。
  */
 const ExtrasPresetBlock = ({ form }: { form: { control: object; setValue: (name: 'extras', value: string, opts?: object) => void } }) => {
@@ -158,6 +158,7 @@ const ExtrasPresetBlock = ({ form }: { form: { control: object; setValue: (name:
   const removePreset = useCustomStylePresetStore(s => s.removePreset)
   const [saveOpen, setSaveOpen] = useState(false)
   const [presetName, setPresetName] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
   const extrasValue = useWatch({ control: form.control as never, name: 'extras' }) as
     | string
     | undefined
@@ -191,48 +192,94 @@ const ExtrasPresetBlock = ({ form }: { form: { control: object; setValue: (name:
 
   const applyPreset = (content: string) => {
     form.setValue('extras', content, { shouldDirty: true, shouldTouch: true })
+    setMenuOpen(false)
     toast.success('已填入备注框')
   }
 
   return (
     <div>
-      {/* 预设 chips：有预设才展示，一键填入；hover 出删除按钮 */}
-      {presets.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {presets.map(p => (
-            <span
-              key={p.id}
-              title={p.content}
-              className="group inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/60 py-0.5 pr-1 pl-2.5 text-xs"
+      <div className="mb-1.5 flex items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+          可在 Prompt 结尾附加自定义说明
+        </span>
+        {presets.length > 0 && (
+          <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary tabular-nums">
+            {presets.length}个预设
+          </span>
+        )}
+      </div>
+      <div className="relative">
+        <Textarea
+          value={extrasValue || ''}
+          onChange={e => form.setValue('extras', e.target.value, { shouldDirty: true })}
+          placeholder="笔记需要罗列出 xxx 关键点…"
+          className="min-h-20 pt-9"
+        />
+        <div className="absolute top-1.5 right-1.5 left-1.5 flex items-center justify-between">
+          <div className="relative">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 text-xs shadow-sm"
+              onClick={() => setMenuOpen(o => !o)}
             >
-              <button
-                type="button"
-                className="max-w-36 truncate hover:text-primary hover:underline"
-                onClick={() => applyPreset(p.content)}
-              >
-                {p.name}
-              </button>
-              <button
-                type="button"
-                aria-label={`删除预设 ${p.name}`}
-                className="rounded-full p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive focus:opacity-100"
-                onClick={() => {
-                  removePreset(p.id)
-                  toast.success(`已删除预设「${p.name}」`)
-                }}
-              >
-                <Trash2 className="h-3 w-3" />
-              </button>
-            </span>
-          ))}
+              <BookmarkPlus className="h-3.5 w-3.5" />
+              预设
+              <ChevronDown className={`h-3 w-3 transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
+            </Button>
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+                <div className="absolute top-8 left-0 z-20 w-64 rounded-md border bg-popover p-1 shadow-lg">
+                  {presets.length === 0 ? (
+                    <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+                      暂无预设 — 先在备注框写好内容再保存
+                    </p>
+                  ) : (
+                    presets.map(p => (
+                      <div
+                        key={p.id}
+                        className="group flex items-center gap-1 rounded px-1 py-0.5 hover:bg-accent"
+                      >
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 px-1.5 py-1 text-left"
+                          title={p.content}
+                          onClick={() => applyPreset(p.content)}
+                        >
+                          <div className="truncate text-xs font-medium">{p.name}</div>
+                          <div className="truncate text-[11px] text-muted-foreground">{p.content}</div>
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`删除预设 ${p.name}`}
+                          className="rounded p-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-destructive focus:opacity-100"
+                          onClick={() => {
+                            removePreset(p.id)
+                            toast.success(`已删除预设「${p.name}」`)
+                          }}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 text-xs text-primary"
+            onClick={handleSave}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            存为预设
+          </Button>
         </div>
-      )}
-
-      <div className="flex items-center justify-end">
-        <Button type="button" variant="outline" size="sm" onClick={handleSave}>
-          <Plus className="h-3.5 w-3.5" />
-          存为预设
-        </Button>
       </div>
 
       <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
@@ -826,15 +873,14 @@ const NoteForm = () => {
             )}
           />
 
-          {/* 备注 */}
+          {/* 备注：预设下拉附着在备注框内部（方案 C），Textarea 由 ExtrasPresetBlock 自持 */}
           <FormField
             control={form.control}
             name="extras"
-            render={({ field }) => (
+            render={() => (
               <FormItem>
-                <SectionHeader title="备注" tip="可在 Prompt 结尾附加自定义说明" />
+                <SectionHeader title="备注" />
                 <ExtrasPresetBlock form={form} />
-                <Textarea placeholder="笔记需要罗列出 xxx 关键点…" {...field} />
                 <FormMessage />
               </FormItem>
             )}
