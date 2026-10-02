@@ -27,6 +27,10 @@ pub fn run() {
         // 后台轮询会被 WebView 拒绝；经 Rust 侧读系统剪贴板则无此限制。
         // 只申请读权限（allow-read-text），不碰写权限。
         .plugin(tauri_plugin_clipboard_manager::init())
+        // 应用外系统通知：window.Notification 在 WebView2 下 requestPermission
+        // 直接回 denied（无弹窗、无授权），必须走 Rust 原生通知（notify-rust
+        // → Windows Toast），桌面端无需系统授权、署名走 tauri identifier。
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

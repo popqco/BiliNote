@@ -91,10 +91,12 @@ const General = () => {
             onCheckedChange={async v => {
               setOsNotifyEnabled(v)
               if (v) {
+                // 桌面端走 Rust 原生通知，无需授权恒 granted；
+                // 若 notify 命令不通（如旧构建），回滚并提示。
                 const { ensureOsNotifyPermission } = await import('@/utils/osClipboardNotify.ts')
                 const ok = await ensureOsNotifyPermission()
                 if (!ok) {
-                  toast.error('系统通知未获授权，已在系统设置中允许 BiliNote 的通知后重试')
+                  toast.error('系统通知通道不可用，请重启应用后重试')
                   setOsNotifyEnabled(false)
                 }
               }

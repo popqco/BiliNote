@@ -27,6 +27,7 @@ tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2.3.3"
+tauri-plugin-notification = "2.4.0"
 
 [package.metadata.tauri.bundle.macOS]
 frameworks = ["bin/BiliNoteBackend/_internal/"]
