@@ -8,17 +8,25 @@ import {
   FormMessage,
 } from '@/components/ui/form.tsx'
 import { useEffect,useState } from 'react'
-import { useForm, useWatch } from 'react-hook-form'
+import { useForm, useWatch, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
-import { Info, Loader2, Plus } from 'lucide-react'
+import { Info, Loader2, Plus, Trash2 } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog.tsx'
 import { generateNote, get_video_meta } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
 import { useNoteOptionsStore, pickLastNoteOptions } from '@/store/noteOptionsStore'
+import { useCustomStylePresetStore } from '@/store/customStylePresetStore'
 import {
   Tooltip,
   TooltipContent,
@@ -137,6 +145,131 @@ const CheckboxGroup = ({
     ))}
   </div>
 )
+
+/* -------------------- 备注预设区（自定义风格预设） -------------------- */
+/**
+ * 「备注」框配套的个人风格预设：保存当前备注内容为具名预设，
+ * 预设以 chips 形式一键填入备注框。持久化在独立 store
+ *（localStorage `custom-style-presets`），不进 last-note-options。
+ */
+const ExtrasPresetBlock = ({ form }: { form: { control: object; setValue: (name: 'extras', value: string, opts?: object) => void } }) => {
+  const presets = useCustomStylePresetStore(s => s.presets)
+  const upsertPreset = useCustomStylePresetStore(s => s.upsertPreset)
+  const removePreset = useCustomStylePresetStore(s => s.removePreset)
+  const [saveOpen, setSaveOpen] = useState(false)
+  const [presetName, setPresetName] = useState('')
+  const extrasValue = useWatch({ control: form.control as never, name: 'extras' }) as
+    | string
+    | undefined
+
+  const handleSave = () => {
+    const content = (extrasValue || '').trim()
+    if (!content) {
+      toast.error('备注为空，先写点内容再保存为预设')
+      return
+    }
+    setPresetName('')
+    setSaveOpen(true)
+  }
+
+  const confirmSave = () => {
+    const name = presetName.trim()
+    const content = (extrasValue || '').trim()
+    if (!name) {
+      toast.error('请给预设起个名字')
+      return
+    }
+    if (!content) {
+      toast.error('备注为空，先写点内容再保存为预设')
+      return
+    }
+    const existed = presets.some(p => p.name === name)
+    upsertPreset(name, content)
+    toast.success(existed ? `已覆盖预设「${name}」` : `已保存预设「${name}」`)
+    setSaveOpen(false)
+  }
+
+  const applyPreset = (content: string) => {
+    form.setValue('extras', content, { shouldDirty: true, shouldTouch: true })
+    toast.success('已填入备注框')
+  }
+
+  return (
+    <div>
+      {/* 预设 chips：有预设才展示，一键填入；hover 出删除按钮 */}
+      {presets.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {presets.map(p => (
+            <span
+              key={p.id}
+              title={p.content}
+              className="group inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/60 py-0.5 pr-1 pl-2.5 text-xs"
+            >
+              <button
+                type="button"
+                className="max-w-36 truncate hover:text-primary hover:underline"
+                onClick={() => applyPreset(p.content)}
+              >
+                {p.name}
+              </button>
+              <button
+                type="button"
+                aria-label={`删除预设 ${p.name}`}
+                className="rounded-full p-0.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:text-destructive focus:opacity-100"
+                onClick={() => {
+                  removePreset(p.id)
+                  toast.success(`已删除预设「${p.name}」`)
+                }}
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-center justify-end">
+        <Button type="button" variant="outline" size="sm" onClick={handleSave}>
+          <Plus className="h-3.5 w-3.5" />
+          存为预设
+        </Button>
+      </div>
+
+      <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>保存为风格预设</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Input
+              placeholder="预设名称，如：口语化解读"
+              value={presetName}
+              maxLength={30}
+              onChange={e => setPresetName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  confirmSave()
+                }
+              }}
+            />
+            {presets.some(p => p.name === presetName.trim()) && presetName.trim() && (
+              <p className="text-xs text-muted-foreground">同名预设已存在，保存将覆盖其内容。</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setSaveOpen(false)}>
+              取消
+            </Button>
+            <Button type="button" onClick={confirmSave}>
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
 
 /* -------------------- 主组件 -------------------- */
 const NoteForm = () => {
@@ -700,6 +833,7 @@ const NoteForm = () => {
             render={({ field }) => (
               <FormItem>
                 <SectionHeader title="备注" tip="可在 Prompt 结尾附加自定义说明" />
+                <ExtrasPresetBlock form={form} />
                 <Textarea placeholder="笔记需要罗列出 xxx 关键点…" {...field} />
                 <FormMessage />
               </FormItem>
