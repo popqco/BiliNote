@@ -16,6 +16,9 @@ interface ChatState {
   /** 当前问答范围（默认跨全部笔记，对标“第二大脑”） */
   scope: ChatScope
   setScope: (scope: ChatScope) => void
+  /** 问答选用的模型（model_name），全局生效、持久化；优先级高于任务卡片自带配置 */
+  chatModelName: string
+  setChatModelName: (m: string) => void
   addMessage: (taskId: string, msg: ChatMessage) => void
   clearChat: (taskId: string) => void
   getMessages: (taskId: string) => ChatMessage[]
@@ -29,8 +32,10 @@ export const useChatStore = create<ChatState>()(
     (set, get) => ({
       chatHistory: {},
       scope: 'all',
+      chatModelName: '',
 
       setScope: (scope) => set({ scope }),
+      setChatModelName: (m) => set({ chatModelName: m }),
 
       addMessage: (taskId, msg) =>
         set(state => ({
@@ -50,8 +55,12 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'bilinote-chat-storage',
-      // scope 也持久化：用户选过“当前笔记”后下次打开保持选择
-      partialize: (state) => ({ chatHistory: state.chatHistory, scope: state.scope }) as ChatState,
+      // scope / chatModelName 也持久化：用户选过“当前笔记”或问答模型后下次打开保持选择
+      partialize: (state) => ({
+        chatHistory: state.chatHistory,
+        scope: state.scope,
+        chatModelName: state.chatModelName,
+      }) as ChatState,
     },
   ),
 )

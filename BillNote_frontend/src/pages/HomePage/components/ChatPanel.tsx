@@ -12,6 +12,14 @@ import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maxi
 import { toast } from 'react-hot-toast'
 import { chatKey, useChatStore } from '@/store/chatStore'
 import { useTaskStore } from '@/store/taskStore'
+import { useModelStore } from '@/store/modelStore'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select.tsx'
 import {
   askQuestion,
   backfillGlobalIndex,
@@ -99,6 +107,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
 
   const scope = useChatStore(state => state.scope)
   const setScope = useChatStore(state => state.setScope)
+  const chatModelName = useChatStore(state => state.chatModelName)
+  const setChatModelName = useChatStore(state => state.setChatModelName)
   const key = chatKey(taskId, scope)
   const messages = useChatStore(state => state.chatHistory[key]) ?? []
   const addMessage = useChatStore(state => state.addMessage)
@@ -110,6 +120,20 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     () => tasks.find(t => t.id === currentTaskId) ?? null,
     [tasks, currentTaskId],
   )
+
+  // 问答模型列表：复用生成笔记的可用模型（modelList），选过即持久化；
+  // 校验有效性（模型被删后回落），为空时首次自动选中第一个。
+  const modelList = useModelStore(state => state.modelList)
+  const loadEnabledModels = useModelStore(state => state.loadEnabledModels)
+  useEffect(() => {
+    loadEnabledModels()
+  }, [loadEnabledModels])
+  useEffect(() => {
+    if (!modelList.length) return
+    if (!chatModelName || !modelList.some(m => m.model_name === chatModelName)) {
+      setChatModelName(modelList[0].model_name)
+    }
+  }, [modelList, chatModelName, setChatModelName])
 
   // 检查索引状态，未索引时自动触发，indexing 时轮询
   // 全部笔记模式额外拉取全局已索引数；若历史笔记缺全局索引则自动补建
@@ -174,10 +198,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       const question = value.trim()
       if (!question || loading) return
 
-      const providerId = currentTask?.formData?.provider_id
-      const modelName = currentTask?.formData?.model_name
+      // 问答模型：优先用面板上用户自选的（与左侧生成表单解耦），
+      // 其次回落任务卡片自带配置；provider 由 modelList 反查。
+      const modelName = chatModelName || currentTask?.formData?.model_name
+      const providerId =
+        modelList.find(m => m.model_name === modelName)?.provider_id ||
+        currentTask?.formData?.provider_id
       if (!providerId || !modelName) {
-        toast.error('无法获取模型配置，请确认任务已完成')
+        toast.error('无法获取模型配置，请先去设置页添加模型')
         return
       }
 
@@ -206,7 +234,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         setLoading(false)
       }
     },
-    [loading, taskId, key, scope, currentTask, messages, addMessage],
+    [loading, taskId, key, scope, chatModelName, modelList, currentTask, messages, addMessage],
   )
 
   // 转换为 Bubble.List 的数据格式
@@ -396,6 +424,28 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
 
       {/* 输入区域 */}
       <div className="border-t px-3 py-2">
+        {/* 问答模型选择：与左侧生成表单解耦，选过即记住（随 chat store 持久化） */}
+        <div className="mb-2 flex items-center gap-2">
+          <span className="shrink-0 text-xs text-muted-foreground">问答模型</span>
+          <Select
+            value={chatModelName}
+            onValueChange={setChatModelName}
+            onOpenChange={open => {
+              if (open) loadEnabledModels()
+            }}
+          >
+            <SelectTrigger className="h-7 min-w-0 flex-1 truncate text-xs">
+              <SelectValue placeholder="选择问答模型" />
+            </SelectTrigger>
+            <SelectContent>
+              {modelList.map(m => (
+                <SelectItem key={m.id} value={m.model_name}>
+                  {m.model_name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <Sender
           value={input}
           onChange={setInput}
