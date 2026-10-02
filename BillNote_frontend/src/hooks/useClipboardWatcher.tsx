@@ -3,6 +3,7 @@ import toast from 'react-hot-toast'
 import { get_video_meta } from '@/services/note.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useSystemStore } from '@/store/configStore'
+import { sendOsClipboardNotify } from '@/utils/osClipboardNotify.ts'
 
 /**
  * 剪贴板视频链接识别：命中支持的视频链接 → 解析标题封面 → 右下角弹窗
@@ -124,9 +125,10 @@ async function readClipboardText(): Promise<string | null> {
 }
 
 export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => void) => {
-  // 轮询开关/间隔走全局 store（设置页可改），订阅后切开关即时生效
+  // 轮询开关/间隔/OS 通知开关走全局 store（设置页可改），订阅后即时生效
   const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
   const pollIntervalSec = useSystemStore(s => s.clipboardPollIntervalSec)
+  const osNotifyEnabled = useSystemStore(s => s.clipboardOsNotifyEnabled)
   const seenRef = useRef<Set<string>>(loadSeen())
   const checkingRef = useRef(false)
   // 窗口不可见时命中的候选先攒在这里，回到前台再弹（攒多个就只弹最后一个）
@@ -169,8 +171,13 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
 
         const candidate = { url: found.url, platform: found.platform, title, cover_url }
         if (deferHidden && document.hidden) {
-          // 后台命中的先攒着：切回前台时 flush 再弹，避免打扰其它应用
+          // 后台命中的先攒着：切回前台时 flush 再弹，避免打扰其它应用；
+          // 若 OS 通知开着，同时经系统通知中心弹一条纯文本，
+          // 用户不用切回应用也能看到，点击通知回应用后 flush 弹出应用内卡片。
           pendingRef.current = candidate
+          if (osNotifyEnabled) {
+            void sendOsClipboardNotify(candidate.title || candidate.url)
+          }
         } else {
           cbRef.current(candidate)
         }
@@ -220,10 +227,14 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
       clearTimeout(timer)
       if (pollTimer !== undefined) clearTimeout(pollTimer)
     }
-  }, [pollEnabled, pollIntervalSec])
+  }, [pollEnabled, pollIntervalSec, osNotifyEnabled])
 }
 
 // 独立 toast 弹窗（右下角，含封面+标题+「生成笔记/忽略」按钮）
+// 封面走后端 image_proxy 代理：B 站 CDN 按 Referer 防盗链，WebView2 访问
+// tauri.localhost 会带上自己的 Referer 直连拿 403（实测 3/3）；代理侧固定
+// Referer: www.bilibili.com 直连 200。即使代理也失败，onError 隐藏封面
+// 只留标题，不再留裂图占位。
 export function notifyClipboardVideo(info: {
   url: string
   platform: string
@@ -231,6 +242,12 @@ export function notifyClipboardVideo(info: {
   cover_url?: string
 }, onAccept: (info: { url: string; platform: string }) => void) {
   const label = info.title || info.url
+  // 封面必须走后端 image_proxy：B 站 CDN 按 Referer 防盗链，
+  // 直链在 WebView2 里拿 403（实测 3/3），代理侧固定 Referer 才 200。
+  const apiBase = String((import.meta as any).env?.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
+  const coverSrc = info.cover_url
+    ? `${apiBase}/image_proxy?url=${encodeURIComponent(info.cover_url)}`
+    : ''
   toast.custom(
     t => (
       <div
@@ -238,8 +255,14 @@ export function notifyClipboardVideo(info: {
           t.visible ? 'animate-enter' : 'animate-leave'
         } pointer-events-auto flex w-full max-w-sm gap-3 rounded-lg border border-border bg-background p-3 shadow-lg`}
       >
-        {info.cover_url ? (
-          <img src={info.cover_url} alt="封面" className="h-14 w-20 shrink-0 rounded object-cover" />
+        {coverSrc ? (
+          <img
+            src={coverSrc}
+            alt="封面"
+            referrerPolicy="no-referrer"
+            onError={e => { e.currentTarget.style.display = 'none' }}
+            className="h-14 w-20 shrink-0 rounded object-cover"
+          />
         ) : null}
         <div className="min-w-0 flex-1">
           <div className="text-xs font-medium text-muted-foreground">剪贴板发现视频链接</div>

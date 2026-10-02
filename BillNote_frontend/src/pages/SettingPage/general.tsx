@@ -15,12 +15,16 @@ import { useSystemStore } from '@/store/configStore'
  * 零后台开销）；打开后每 N 秒经 Rust 侧读一次系统剪贴板（无需焦点），
  * 复制链接后切回窗口即弹窗。开关与间隔经 zustand persist 落盘
  *（localStorage: system-store），重启应用仍保留。
+ * 第二项：应用外系统通知 —— 轮询在后台命中时经 OS 通知中心弹一条，
+ * 应用不在前台也能看到；点击通知回到应用，应用内卡片（含封面+按钮）再弹出。
  */
 const General = () => {
   const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
   const setPollEnabled = useSystemStore(s => s.setClipboardPollEnabled)
   const pollIntervalSec = useSystemStore(s => s.clipboardPollIntervalSec)
   const setPollIntervalSec = useSystemStore(s => s.setClipboardPollIntervalSec)
+  const osNotifyEnabled = useSystemStore(s => s.clipboardOsNotifyEnabled)
+  const setOsNotifyEnabled = useSystemStore(s => s.setClipboardOsNotifyEnabled)
 
   const handleIntervalChange = (v: string) => {
     const n = Number(v)
@@ -72,6 +76,30 @@ const General = () => {
               <SelectItem value="10">每 10 秒</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-4">
+          <div className="text-sm">
+            应用外系统通知
+            <div className="text-muted-foreground text-xs">
+              轮询在后台命中视频链接时，经系统通知中心弹一条提醒——
+              不用切回 BiliNote 也能看到。点击通知回到应用，完整卡片再弹出。
+              关掉后后台命中只攒着、等回到前台才提示。
+            </div>
+          </div>
+          <Switch
+            checked={osNotifyEnabled}
+            onCheckedChange={async v => {
+              setOsNotifyEnabled(v)
+              if (v) {
+                const { ensureOsNotifyPermission } = await import('@/utils/osClipboardNotify.ts')
+                const ok = await ensureOsNotifyPermission()
+                if (!ok) {
+                  toast.error('系统通知未获授权，已在系统设置中允许 BiliNote 的通知后重试')
+                  setOsNotifyEnabled(false)
+                }
+              }
+            }}
+          />
         </div>
       </div>
     </div>

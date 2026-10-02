@@ -15,6 +15,12 @@ interface SystemState {
   setClipboardPollEnabled: (value: boolean) => void
   clipboardPollIntervalSec: number
   setClipboardPollIntervalSec: (value: number) => void
+
+  // 应用外系统通知：轮询在后台命中链接时，经 OS 通知中心弹一条
+  //（应用不在前台也能看到）；点击通知回到应用，应用内卡片再弹出。
+  // 默认开；关掉后后台命中只攒着、回前台才提示。纯文本通知，不带封面。
+  clipboardOsNotifyEnabled: boolean
+  setClipboardOsNotifyEnabled: (value: boolean) => void
 }
 // 暂不启用
 export const useSystemStore = create<SystemState>()(
@@ -30,6 +36,9 @@ export const useSystemStore = create<SystemState>()(
       setClipboardPollEnabled: value => set({ clipboardPollEnabled: value }),
       clipboardPollIntervalSec: 3,
       setClipboardPollIntervalSec: value => set({ clipboardPollIntervalSec: value }),
+
+      clipboardOsNotifyEnabled: true,
+      setClipboardOsNotifyEnabled: value => set({ clipboardOsNotifyEnabled: value }),
     }),
     {
       name: 'system-store', // 本地存储的 key
