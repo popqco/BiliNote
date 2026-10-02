@@ -91,13 +91,26 @@ const General = () => {
             onCheckedChange={async v => {
               setOsNotifyEnabled(v)
               if (v) {
-                // 桌面端走 Rust 原生通知，无需授权恒 granted；
-                // 若 notify 命令不通（如旧构建），回滚并提示。
-                const { ensureOsNotifyPermission } = await import('@/utils/osClipboardNotify.ts')
-                const ok = await ensureOsNotifyPermission()
-                if (!ok) {
+                // 桌面端走 Rust 原生通知，无需授权恒 granted。
+                // 两步验证：request_permission 只过权限面，notify 才是真命令——
+                // ACL 缺权限（如 2026-10-02 装机版 app.exe 缺 notification:default）
+                // 时 request_permission 照样 granted、notify 却被拒（invoke 报
+                // Command not allowed）。开启时发一条真实测试通知，命令不通当场
+                // 报错回滚，不留到第一次后台命中时静默失败。
+                const { ensureOsNotifyPermission, sendOsClipboardNotify } = await import(
+                  '@/utils/osClipboardNotify.ts'
+                )
+                if (!(await ensureOsNotifyPermission())) {
                   toast.error('系统通知通道不可用，请重启应用后重试')
                   setOsNotifyEnabled(false)
+                  return
+                }
+                const sent = await sendOsClipboardNotify('系统通知已开启，这是一条测试通知')
+                if (!sent) {
+                  toast.error('测试通知发送失败（notify 命令被拒），请更新应用后重试')
+                  setOsNotifyEnabled(false)
+                } else {
+                  toast.success('测试通知已发出；若没看到横幅，请检查系统勿扰/全屏占用')
                 }
               }
             }}

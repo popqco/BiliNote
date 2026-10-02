@@ -60,6 +60,19 @@ pub fn run() {
             // 检查 ffmpeg 是否在 PATH 中可用
             check_ffmpeg_availability();
 
+            // 应用外系统通知 · AUMID 落地（见 ensure_start_menu_shortcut 文档）。
+            // 后台线程执行：COM + 文件 IO 不该卡在启动路径上；失败仅记录，
+            // 下次启动会再试（幂等重建）。
+            #[cfg(windows)]
+            {
+                let app_id = app.config().identifier.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = ensure_start_menu_shortcut(&app_id) {
+                        eprintln!("[os-notify] Start Menu 快捷方式(AUMID)创建失败: {e}");
+                    }
+                });
+            }
+
             // 启动 Sidecar 并把 child handle 存到 state，方便后续 restart_backend_sidecar 使用
             let child = spawn_backend_sidecar(app.handle()).map_err(|e| {
                 eprintln!("Sidecar 启动失败: {}", e);
@@ -96,6 +109,67 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+// ── 应用外系统通知 · AUMID 落地 ─────────────────────────────────────────
+// Windows 只给"认识"的 AUMID 显示 Toast 横幅：通知会被通知平台接收（注册表
+// Notifications\Settings\<AUMID>\LastNotificationAddedTime 照常更新），但只要
+// Start Menu 里没有带 PKEY_AppUserModel_ID 属性的快捷方式，横幅就永不显示
+// （2026-10-02 实测：notify-rust show()=Ok、注册表更新、屏幕无横幅；仅写
+// HKCU\Software\Classes\AppUserModelId 也不够。给 Start Menu 建带 AUMID 的
+// 快捷方式是微软文档对免安装桌面应用的唯一正解，ToastNotificationManager
+// Compat 也是这么做的）。这里幂等地重建该快捷方式，exe 取 current_exe——
+// 应用挪目录也能自愈；AUMID 用 tauri identifier，与插件发通知时的署名一致。
+#[cfg(windows)]
+fn ensure_start_menu_shortcut(app_id: &str) -> Result<(), String> {
+    use windows::core::{HSTRING, Interface, PWSTR};
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    let appdata = std::env::var("APPDATA").map_err(|e| format!("APPDATA 未设置: {e}"))?;
+    let lnk = std::path::Path::new(&appdata)
+        .join(r"Microsoft\Windows\Start Menu\Programs\BiliNote.lnk");
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe 失败: {e}"))?;
+
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("CoCreateInstance(ShellLink) 失败: {e}"))?;
+        link.SetPath(&HSTRING::from(exe.as_os_str()))
+            .map_err(|e| format!("SetPath 失败: {e}"))?;
+        let store: IPropertyStore = link
+            .cast()
+            .map_err(|e| format!("cast(IPropertyStore) 失败: {e}"))?;
+        let key = PROPERTYKEY {
+            fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
+            pid: 5, // PKEY_AppUserModel_ID
+        };
+        // VT_LPWSTR 的 PROPVARIANT：windows 0.62 没有 InitPropVariantFromString，
+        // 手工填 union（HSTRING 缓冲以 NUL 结尾，SetValue 内部会复制）。
+        // union 字段里的 ManuallyDrop 不做自动 DerefMut，先 as_mut 拿内层。
+        let awid = HSTRING::from(app_id);
+        let mut pv = PROPVARIANT::default();
+        let inner = &mut *pv.Anonymous.Anonymous;
+        inner.vt = VT_LPWSTR;
+        inner.Anonymous.pwszVal = PWSTR::from_raw(awid.as_ptr() as *mut u16);
+        let set = store
+            .SetValue(&key, &pv)
+            .map_err(|e| format!("SetValue(AUMID) 失败: {e}"));
+        let _ = PropVariantClear(&mut pv); // SetValue 已复制，及时释放
+        set?;
+        store
+            .Commit()
+            .map_err(|e| format!("PropertyStore.Commit 失败: {e}"))?;
+        let pf: IPersistFile = link
+            .cast()
+            .map_err(|e| format!("cast(IPersistFile) 失败: {e}"))?;
+        pf.Save(&HSTRING::from(lnk.as_os_str()), true)
+            .map_err(|e| format!("Save({:?}) 失败: {e}", lnk.display()))?;
+    }
+    Ok(())
 }
 
 // 关闭期统一杀 sidecar，take() 把 child 从 state 拿走避免重复 kill。

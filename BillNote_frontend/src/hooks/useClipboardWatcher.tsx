@@ -14,7 +14,8 @@ import { sendOsClipboardNotify } from '@/utils/osClipboardNotify.ts'
  *    零后台开销、零打扰；
  * 2. 轮询开：每 N 秒经 Rust 侧读一次系统剪贴板（Tauri clipboard-manager，
  *    不需要窗口焦点，后台也能读），复制链接后即使不切回窗口也能捕获；
- *    若此时窗口不可见，候选先攒着、等回到前台再一次性弹窗（不打扰其它应用）。
+ *    若此时窗口不在前台（失焦即算，最小化/被完全遮挡同理），候选先攒着、等回
+ *    到前台再一次性弹窗；OS 通知开着时同步弹一条系统通知（不用切回应用也能看到）。
  *
  * 为什么只能轮询、没有"中断"：
  * 操作系统根本不提供剪贴板变更通知（Windows 只有 AddClipboardFormatListener
@@ -141,9 +142,9 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
   useEffect(() => {
     let disposed = false
 
-    /** 读一次剪贴板 → 命中新链接则解析标题封面。deferHidden=true 时窗口不可见
-     *  只攒候选不弹窗（由回到前台的 flush 统一弹）。返回 true 表示读成功。 */
-    const check = async (deferHidden = false): Promise<boolean> => {
+    /** 读一次剪贴板 → 命中新链接则解析标题封面。deferUnfocused=true 时窗口不
+     *  在前台就只攒候选不弹窗（由回到前台的 flush 统一弹）。返回 true 表示读成功。 */
+    const check = async (deferUnfocused = false): Promise<boolean> => {
       if (checkingRef.current || disposed) return true
       checkingRef.current = true
       try {
@@ -170,10 +171,16 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
         if (disposed) return true
 
         const candidate = { url: found.url, platform: found.platform, title, cover_url }
-        if (deferHidden && document.hidden) {
-          // 后台命中的先攒着：切回前台时 flush 再弹，避免打扰其它应用；
-          // 若 OS 通知开着，同时经系统通知中心弹一条纯文本，
-          // 用户不用切回应用也能看到，点击通知回应用后 flush 弹出应用内卡片。
+        // 焦点门控，不是可见性门控：BiliNote 没拿到前台焦点就该走 OS 通知 +
+        // 攒候选。旧实现用 document.hidden（最小化/被完全遮挡才 true），窗口
+        // 只是开在后台时，应用内弹窗弹在看不见的窗口里、OS 通知又被跳过，
+        // 用户永远收不到提醒（2026-10-02 实测复现：注册表 LastNotificationAdded
+        // Time 不更新、切回窗口弹窗已在）。document.hidden 保留作兜底：WebView2
+        // 失焦瞬间 hasFocus() 可能仍短暂为 true。
+        if (deferUnfocused && (document.hidden || !document.hasFocus())) {
+          // 非前台命中的先攒着：回到前台时 flush 再弹应用内卡片，避免打扰；
+          // 若 OS 通知开着，同时经系统通知中心弹一条纯文本——不用切回应用
+          // 也能看到，点击通知回应用后 flush 弹出完整卡片。
           pendingRef.current = candidate
           if (osNotifyEnabled) {
             void sendOsClipboardNotify(candidate.title || candidate.url)
