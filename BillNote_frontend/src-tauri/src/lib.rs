@@ -125,7 +125,9 @@ fn ensure_start_menu_shortcut(app_id: &str) -> Result<(), String> {
     use windows::core::{HSTRING, Interface, PWSTR};
     use windows::Win32::Foundation::PROPERTYKEY;
     use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PROPVARIANT};
-    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoTaskMemAlloc, IPersistFile, CLSCTX_INPROC_SERVER,
+    };
     use windows::Win32::System::Variant::VT_LPWSTR;
     use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
@@ -148,13 +150,21 @@ fn ensure_start_menu_shortcut(app_id: &str) -> Result<(), String> {
             pid: 5, // PKEY_AppUserModel_ID
         };
         // VT_LPWSTR 的 PROPVARIANT：windows 0.62 没有 InitPropVariantFromString，
-        // 手工填 union（HSTRING 缓冲以 NUL 结尾，SetValue 内部会复制）。
-        // union 字段里的 ManuallyDrop 不做自动 DerefMut，先 as_mut 拿内层。
-        let awid = HSTRING::from(app_id);
+        // 手工填 union。缓冲必须用 CoTaskMemAlloc——后面的 PropVariantClear 会
+        // 按 CoTaskMemFree 释放，塞 HSTRING 内部缓冲就是堆损坏
+        // （实测 0xc0000374，进程启动 5-15s 后崩，2026-10-02）。
+        // union 字段里的 ManuallyDrop 不做自动 DerefMut，先解引用拿内层。
+        let wide: Vec<u16> = app_id.encode_utf16().chain([0]).collect();
+        let buf = CoTaskMemAlloc(wide.len() * 2);
+        if buf.is_null() {
+            return Err("CoTaskMemAlloc 失败".into());
+        }
+        let pwsz = PWSTR(buf as *mut u16);
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), pwsz.0, wide.len());
         let mut pv = PROPVARIANT::default();
         let inner = &mut *pv.Anonymous.Anonymous;
         inner.vt = VT_LPWSTR;
-        inner.Anonymous.pwszVal = PWSTR::from_raw(awid.as_ptr() as *mut u16);
+        inner.Anonymous.pwszVal = pwsz;
         let set = store
             .SetValue(&key, &pv)
             .map_err(|e| format!("SetValue(AUMID) 失败: {e}"));
