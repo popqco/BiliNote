@@ -18,6 +18,7 @@ import { generateNote, get_video_meta } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
+import { useNoteOptionsStore, pickLastNoteOptions } from '@/store/noteOptionsStore'
 import {
   Tooltip,
   TooltipContent,
@@ -148,16 +149,21 @@ const NoteForm = () => {
   const { loadEnabledModels, modelList, showFeatureHint, setShowFeatureHint } = useModelStore()
 
   /* ---- 表单 ---- */
+  // 默认值优先取用户最后一次使用的选项（noteOptionsStore 落盘）：
+  // 新建笔记 / 重挂载 / 重启应用都不用重设采样间隔、笔记格式、视频理解等
+  // （2026-10-02 反馈）；没有历史使用记录时回退出厂默认。
+  const lastOptions = useNoteOptionsStore.getState().last
   const form = useForm<NoteFormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       platform: 'bilibili',
-      quality: 'medium',
-      model_name: modelList[0]?.model_name || '',
-      style: 'minimal',
-      video_interval: 6,
-      grid_size: [2, 2],
-      format: [],
+      quality: lastOptions?.quality ?? 'medium',
+      model_name: lastOptions?.model_name || modelList[0]?.model_name || '',
+      style: lastOptions?.style ?? 'minimal',
+      video_understanding: lastOptions?.video_understanding ?? false,
+      video_interval: lastOptions?.video_interval ?? 6,
+      grid_size: lastOptions?.grid_size ?? [2, 2],
+      format: lastOptions?.format ?? [],
     },
   })
   const currentTask = getCurrentTask()
@@ -204,21 +210,32 @@ const NoteForm = () => {
     }
     const { formData } = currentTask
 
-    console.log('currentTask.formData.platform:', formData.platform)
+    // 回退链：任务卡片自己存的值 → 用户最后一次使用的值 → 出厂默认。
+    // 旧任务卡片的 formData 可能根本没有视频理解/笔记格式这些后加字段，
+    // 直接回退硬编码默认会把用户习惯设置打没（2026-10-02 反馈：切换卡片后
+    // 采样间隔变回 6、笔记格式全被取消）。模型名要过一遍 modelList 有效性，
+    // 卡片/记忆里存的是已删除的模型时落回第一个可用模型。
+    const last = useNoteOptionsStore.getState().last
+    const hasModel = (m?: string) => !!m && modelList.some(x => x.model_name === m)
 
     form.reset({
       platform: formData.platform || 'bilibili',
       video_url: formData.video_url || '',
-      model_name: formData.model_name || modelList[0]?.model_name || '',
-      style: formData.style || 'minimal',
-      quality: formData.quality || 'medium',
+      model_name:
+        (hasModel(formData.model_name) ? formData.model_name : '') ||
+        (hasModel(last?.model_name) ? last!.model_name : '') ||
+        modelList[0]?.model_name ||
+        '',
+      style: formData.style || last?.style || 'minimal',
+      quality: formData.quality || last?.quality || 'medium',
       extras: formData.extras || '',
       screenshot: formData.screenshot ?? false,
       link: formData.link ?? false,
-      video_understanding: formData.video_understanding ?? false,
-      video_interval: formData.video_interval ?? 6,
-      grid_size: formData.grid_size ?? [2, 2],
-      format: formData.format ?? [],
+      video_understanding:
+        formData.video_understanding ?? last?.video_understanding ?? false,
+      video_interval: formData.video_interval ?? last?.video_interval ?? 6,
+      grid_size: formData.grid_size ?? last?.grid_size ?? [2, 2],
+      format: formData.format ?? last?.format ?? [],
     })
   }, [
     // 当下面任意一个变了，就重新 reset
@@ -228,6 +245,25 @@ const NoteForm = () => {
     // 还要加上 formData 的各字段，或者直接 currentTask
     currentTask?.formData,
   ])
+
+  // 记住最后一次使用的选项：用 watch 订阅（而非 useEffect 依赖表单值），
+  // 重订阅只在挂载/卸载发生。防抖 600ms 落盘；只存「设置」——视频链接/
+  // 平台/备注是内容不记。切换卡片、新建笔记引起的 reset 也会流到这里，
+  // 存下的始终是表单当前状态 = 用户最新意图。
+  useEffect(() => {
+    let timer: number | undefined
+    const sub = form.watch(values => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        useNoteOptionsStore.getState().setLast(pickLastNoteOptions(values))
+      }, 600)
+    })
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      sub.unsubscribe()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /* ---- 帮助函数 ---- */
   const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
