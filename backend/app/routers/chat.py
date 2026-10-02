@@ -118,8 +118,21 @@ def ask_question(data: AskRequest):
     except ValueError as e:
         return R.error(msg=str(e))
     except Exception as e:
+        # 模型调用失败时把“哪个模型 + 哪个供应商 + 上游原话”透给前端，
+        # 否则用户只看到“问答失败”，无法区分是 key 没配、余额不足、
+        # 模型名不对还是上游 500（muse-spark-1.3-contributor-free
+        # 经实测就是上游通道问题：同一 key 无 tools 直调同样 502）。
         logger.error(f"Chat 问答失败: {e}", exc_info=True)
-        return R.error(msg=f"问答失败: {str(e)}")
+        try:
+            from app.services.provider import ProviderService
+
+            prov = ProviderService.get_provider_by_id(data.provider_id)
+            pname = (prov or {}).get("name") or data.provider_id
+        except Exception:
+            pname = data.provider_id
+        return R.error(
+            msg=f"问答失败（模型 {data.model_name} / 供应商 {pname}）：{str(e)}"
+        )
 
 
 @router.get("/chat/indexed")

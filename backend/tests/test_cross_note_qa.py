@@ -62,8 +62,13 @@ def _load_vector_store(tmpdir: str):
 
 
 def _write_note(note_dir: str, task_id: str, title: str, keyword: str, body: str):
-    """写一份最小可索引笔记：标题进 meta chunk（标题即召回锚点），正文进 markdown。"""
-    md = f"## {title}核心观点\n\n{body} {keyword} {keyword} {keyword}\n"
+    """写一份最小可索引笔记：标题进 meta chunk，正文进 markdown。
+
+    注意 markdown 标题与正文关键词刻意错开（如标题“量子纠缠科普”、
+    正文关键词“回锅肉郫县豆瓣”不许出现在同一篇），避免 embedding
+    把标题词和正文词混成同一语义，干扰跨查召回测试。
+    """
+    md = f"## 本篇核心观点\n\n{body} {keyword} {keyword} {keyword}\n"
     note = {
         "markdown": md,
         "transcript": {"segments": []},
@@ -122,10 +127,23 @@ class TestCrossNoteQA(unittest.TestCase):
 
     def test_cross_limit_to_task_ids(self):
         """task_ids 限定只查给定笔记，查不到范围外的内容。"""
-        chunks = self.store.query_cross("量子纠缠", task_ids=["task-bbb-cooking"])
+        chunks = self.store.query_cross("回锅肉", task_ids=["task-bbb-cooking"])
+        self.assertTrue(chunks)
         task_ids = {c["metadata"].get("task_id") for c in chunks}
         self.assertTrue(task_ids <= {"task-bbb-cooking"})
         self.assertNotIn("task-aaa-physics", task_ids)
+
+    def test_cross_only_keeps_relevant_notes(self):
+        """高度相关时不掺无关笔记：量子问题只召回物理笔记。
+
+        （margin 相对截断：与最佳候选差距大的弱相关片段被丢弃，
+        不再像旧按篇配额那样每篇硬塞来源。）
+        """
+        chunks = self.store.query_cross("量子纠缠叠加态实验验证")
+        self.assertTrue(chunks)
+        task_ids = {c["metadata"].get("task_id") for c in chunks}
+        self.assertIn("task-aaa-physics", task_ids)
+        self.assertNotIn("task-bbb-cooking", task_ids)
 
     def test_query_with_task_ids_routes_to_global(self):
         """query(task_ids=...) 走全局索引并带来源标记。"""

@@ -27,6 +27,28 @@ interface ChatState {
 export const chatKey = (taskId: string, scope: ChatScope) =>
   scope === 'all' ? 'all' : taskId
 
+/** 问答来源跳转目标：切到哪篇笔记、定位到哪个章节/转录时间。 */
+export interface SourceJumpTarget {
+  task_id: string
+  /** markdown 来源的章节标题（与索引 section_title 一致） */
+  section_title?: string
+  /** transcript 来源的起始秒数 */
+  start_time?: number
+  nonce: number
+}
+
+interface ChatJumpState {
+  jumpTarget: SourceJumpTarget | null
+  requestJump: (t: Omit<SourceJumpTarget, 'nonce'>) => void
+  consumeJump: () => void
+}
+
+export const useChatJumpStore = create<ChatJumpState>()((set) => ({
+  jumpTarget: null,
+  requestJump: (t) => set({ jumpTarget: { ...t, nonce: Date.now() } }),
+  consumeJump: () => set({ jumpTarget: null }),
+}))
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({

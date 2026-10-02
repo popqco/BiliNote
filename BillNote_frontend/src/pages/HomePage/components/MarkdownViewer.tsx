@@ -20,6 +20,7 @@ import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { normalizeMathDelimiters } from '@/lib/utils'
 import { useTaskStore } from '@/store/taskStore'
+import { useChatJumpStore } from '@/store/chatStore'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
@@ -427,6 +428,81 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   useEffect(() => {
     readerViewportRef.current?.scrollTo({ top: 0 })
   }, [currentTask?.id, currentVerId])
+
+  // 问答来源跳转：切笔记后定位到对应章节 / 打开原文并定位时间。
+  // 跳转请求带 nonce，每次点击都触发；markdown 渲染是异步的，
+  // 这里轮询等待目标 heading 出现（最多约 3s），找到即滚动并高亮。
+  const jumpTarget = useChatJumpStore(state => state.jumpTarget)
+  const consumeJump = useChatJumpStore(state => state.consumeJump)
+  const [transcriptFocusTime, setTranscriptFocusTime] = useState<number | null>(null)
+  useEffect(() => {
+    if (!jumpTarget) return
+    // 跨笔记跳转：目标笔记还没切过来时先等（setCurrentTask 是异步的，
+    // 当前 currentTask 仍是旧笔记），不要 consume，等切过来后下一轮再处理。
+    if (jumpTarget.task_id !== currentTask?.id) return
+    consumeJump()
+    // transcript 来源：打开原文面板并定位时间
+    if (jumpTarget.start_time != null && !jumpTarget.section_title) {
+      setShowTranscribe(true)
+      setTranscriptFocusTime(jumpTarget.start_time)
+      return
+    }
+    setTranscriptFocusTime(null)
+    const title = (jumpTarget.section_title || '').trim()
+    if (!title) return
+    const normalize = (s: string) => s.replace(/[-：:\s*[\]]/g, '').toLowerCase()
+    const search = normalize(title)
+    if (!search) return
+    let tries = 0
+    const timer = window.setInterval(() => {
+      tries += 1
+      const root = contentCaptureRef.current
+      const headings = (root || document).querySelectorAll('h1, h2, h3, h4, h5, h6')
+      let hit: Element | null = null
+      for (const h of headings) {
+        const text = h.textContent || ''
+        const norm = normalize(text)
+        if (norm.includes(search) || search.includes(norm)) {
+          hit = h
+          break
+        }
+      }
+      if (hit || tries >= 30) {
+        window.clearInterval(timer)
+        if (!hit) {
+          toast.error('未找到对应章节')
+          return
+        }
+        // 阅读区滚的是 Radix ScrollArea 内层 viewport（window 不滚）。
+        // readerViewportRef 透传到 Radix Viewport 偶发为 null（ref 合并时机），
+        // 优先用 ref，拿不到就从目标 heading 就近找 viewport，保证能滚。
+        const vp =
+          readerViewportRef.current ||
+          (hit.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null)
+        if (vp) {
+          const vpRect = vp.getBoundingClientRect()
+          const hRect = (hit as HTMLElement).getBoundingClientRect()
+          vp.scrollTo({ top: vp.scrollTop + (hRect.top - vpRect.top) - 16, behavior: 'smooth' })
+        } else {
+          hit.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+        // 高亮目标章节 2s：直接操作 DOM clas，避免重建 markdown components
+        // 导致整篇笔记重新渲染（大笔记会闪）。
+        const el = hit as HTMLElement
+        const prev = el.style.transition
+        el.style.transition = 'background-color 0.3s'
+        el.style.backgroundColor = 'rgba(250, 204, 21, 0.25)'
+        window.setTimeout(() => {
+          el.style.backgroundColor = ''
+          el.style.transition = prev
+        }, 2000)
+      }
+    }, 100)
+    return () => window.clearInterval(timer)
+    // 依赖必须含 currentTask?.id：跨笔记跳转时第一次 effect 因任务未切过来
+    // 直接 return（未 consume），切过来后靠这个依赖重跑一轮才真正定位。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpTarget, currentTask?.id])
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
@@ -752,7 +828,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               </ScrollArea>
               {showTranscribe && (
                 <div className={'ml-2 w-2/4'}>
-                  <TranscriptViewer />
+                  <TranscriptViewer focusTime={transcriptFocusTime} />
                 </div>
               )}
               {/* 侧边问答模式：markdown + ChatPanel 各占一半 */}

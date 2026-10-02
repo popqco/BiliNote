@@ -146,7 +146,8 @@ def chat(
 
         msg = response.choices[0].message
 
-        # 没有工具调用，直接返回
+        # 没有工具调用，直接返回。tools 只是 LLM 主动深挖当前笔记的手段，
+        # 跨笔记证据以初始全局检索为准：工具返回只追加进对话，不污染 sources。
         if not msg.tool_calls:
             return {"answer": msg.content or "", "sources": sources}
 

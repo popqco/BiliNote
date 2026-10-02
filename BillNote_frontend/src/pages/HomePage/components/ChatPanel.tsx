@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, Trash2, ChevronDown, ChevronUp, BookOpen, UserRound, Bot, Maximize2, Minimize2 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
-import { chatKey, useChatStore } from '@/store/chatStore'
+import { chatKey, useChatJumpStore, useChatStore } from '@/store/chatStore'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
 import {
@@ -48,21 +48,44 @@ function SourceBadges({
 }) {
   const [expanded, setExpanded] = useState(false)
   const setCurrentTask = useTaskStore(state => state.setCurrentTask)
+  const requestJump = useChatJumpStore(state => state.requestJump)
 
   if (!sources || sources.length === 0) return null
 
+  const detailOf = (s: ChatSource) =>
+    s.source_type === 'markdown'
+      ? s.section_title || '笔记'
+      : s.source_type === 'meta'
+        ? '视频信息'
+        : `${(s.start_time ?? 0).toFixed(0)}s ~ ${(s.end_time ?? 0).toFixed(0)}s`
+
   const labelOf = (s: ChatSource) => {
-    const detail =
-      s.source_type === 'markdown'
-        ? s.section_title || '笔记'
-        : s.source_type === 'meta'
-          ? '视频信息'
-          : `${(s.start_time ?? 0).toFixed(0)}s ~ ${(s.end_time ?? 0).toFixed(0)}s`
-    // 跨笔记来源带《标题》前缀，可点击跳转；本篇来源保持原样
+    const detail = detailOf(s)
+    // 跨笔记来源带《标题》前缀；本篇来源保持原样
     if (s.note_title && s.task_id && s.task_id !== currentTaskId) {
       return `《${s.note_title}》 ${detail}`
     }
     return detail
+  }
+
+  const jumpTitleOf = (s: ChatSource) => {
+    if (!s.task_id) return undefined
+    if (s.task_id !== currentTaskId) return '点击跳转到该笔记对应位置'
+    // 本篇来源：定位到笔记内对应章节/转录时间
+    if (s.source_type === 'markdown' && s.section_title) return '点击定位到笔记该章节'
+    if (s.source_type === 'transcript' && s.start_time != null)
+      return '点击打开原文并定位到该时间'
+    return undefined
+  }
+
+  const handleJump = (s: ChatSource) => {
+    if (!s.task_id) return
+    if (s.task_id !== currentTaskId) setCurrentTask(s.task_id)
+    requestJump({
+      task_id: s.task_id,
+      section_title: s.section_title,
+      start_time: s.start_time,
+    })
   }
 
   return (
@@ -78,15 +101,15 @@ function SourceBadges({
       {expanded && (
         <div className="mt-1 flex flex-wrap gap-1">
           {sources.map((s, i) => {
-            const jumpable = s.task_id && s.task_id !== currentTaskId
+            const jumpTitle = jumpTitleOf(s)
             return (
               <Badge
                 key={i}
                 variant="outline"
                 className="text-xs font-normal"
-                style={jumpable ? { cursor: 'pointer' } : undefined}
-                title={jumpable ? '点击跳转到该笔记' : undefined}
-                onClick={jumpable ? () => setCurrentTask(s.task_id!) : undefined}
+                style={jumpTitle ? { cursor: 'pointer' } : undefined}
+                title={jumpTitle}
+                onClick={jumpTitle ? () => handleJump(s) : undefined}
               >
                 {labelOf(s)}
               </Badge>

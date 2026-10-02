@@ -19,7 +19,7 @@ interface Task {
   }
 }
 
-const TranscriptViewer = () => {
+const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
   const getCurrentTask = useTaskStore((state) => state.getCurrentTask)
   const currentTaskId = useTaskStore((state) => state.currentTaskId)
   const [task, setTask] = useState<Task | null>(null)
@@ -29,6 +29,24 @@ const TranscriptViewer = () => {
   useEffect(() => {
     setTask(getCurrentTask())
   }, [currentTaskId, getCurrentTask])
+
+  // 问答来源跳转：按时间定位到最接近的转录片段并高亮滚动
+  useEffect(() => {
+    if (focusTime == null) return
+    const segments = task?.transcript?.segments
+    if (!segments?.length) return
+    let best = 0
+    for (let i = 1; i < segments.length; i++) {
+      if (Math.abs(segments[i].start - focusTime) < Math.abs(segments[best].start - focusTime)) {
+        best = i
+      }
+    }
+    setActiveSegment(best)
+    // 等一帧让高亮先生效再滚动
+    requestAnimationFrame(() => {
+      segmentRefs.current[best]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [focusTime, task])
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60)

@@ -14,6 +14,26 @@ NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 VECTOR_DB_DIR = os.getenv("VECTOR_DB_DIR", "vector_db")
 
 
+def _clean_section_title(title: str) -> str:
+    """清洗章节标题，去掉可点击跳转后缀，保证来源 badge 与正文 heading 一致。
+
+    笔记 markdown 的 H2/H3 常带“原片（04:00）* / [原片 @ 04:00](url)*”跳转
+    后缀：来源 badge 显示的是清洗后的短标题，前端点击后按短标题模糊匹配
+    heading 才能命中；不清洗则 badge 文本含 URL/括号变体，匹配失败。
+    """
+    title = re.sub(r'\s*\[原片\s*@\s*[\d:]+\s*\]\([^)]*\)\*?', '', title).strip()
+    # 一个标题可能挂多个原片后缀（如“…原片（07:39）* 原片（08:00）*”），
+    # 中间还夹着分隔星号；先把“ * ”分隔符折叠再循环清后缀。
+    title = re.sub(r'\s*\*\s*', ' ', title).strip()
+    while True:
+        cleaned = re.sub(r'\s*原片[（(][\d:]+[）)]\*?', '', title).strip()
+        if cleaned == title:
+            break
+        title = cleaned
+    title = title.rstrip('*').strip()
+    return title or "intro"
+
+
 def _chunk_markdown(markdown: str) -> list[dict]:
     """按 H2/H3 标题拆分 markdown 为语义块。"""
     sections = re.split(r'(?=^#{2,3}\s)', markdown, flags=re.MULTILINE)
@@ -23,7 +43,9 @@ def _chunk_markdown(markdown: str) -> list[dict]:
         if not section or len(section) < 30:
             continue
         heading_match = re.match(r'^(#{2,3})\s+(.+)', section)
-        title = heading_match.group(2).strip() if heading_match else "intro"
+        raw_title = heading_match.group(2).strip() if heading_match else "intro"
+        # section_title 存清洗后的短标题（无原片后缀），正文 chunk 保留原文
+        title = _clean_section_title(raw_title.splitlines()[0])
         chunks.append({
             "text": section,
             "metadata": {"source_type": "markdown", "section_title": title},
@@ -103,8 +125,16 @@ def _build_meta_chunk(audio_meta: dict) -> list[dict]:
 
 GLOBAL_COLLECTION_NAME = "all_notes"
 
-# 跨笔记检索时每篇笔记的来源配额（与单篇检索保持一致：meta 1、markdown 2、transcript 3）
-_SOURCE_QUOTAS = {"meta": 1, "markdown": 2, "transcript": 3}
+# 跨查全局召回规模：一次查多少候选，再按距离截断取 Top。
+# 注意不能沿用单篇的“按篇配额召回”（每篇硬塞 meta1/md2/tr3），
+# 否则无关笔记的弱相关片段也会被塞进上下文，来源数量虚胖、问答被带偏。
+CROSS_CANDIDATES = 30
+CROSS_TOP_K = 6
+# 与最佳候选的距离差距超过该值视为弱相关，直接丢弃（相对截断，
+# 比绝对阈值更稳：embedding 距离尺度随问题漂移，绝对值卡不准。
+# 实测两篇真实笔记：价格问题 margin 0.1 时来源纯净（只剩本篇），
+# 香水问题保持 6 条；0.15 则会漏进 2 条无关 meta/intro。）
+CROSS_MARGIN = 0.1
 
 # 单次跨查最多覆盖的笔记数（防 token 爆炸：配额按篇累加，上限兜底）
 MAX_CROSS_NOTES = 50
@@ -296,10 +326,11 @@ class VectorStoreManager:
     def query_cross(
         self, query_text: str, task_ids: Optional[list] = None
     ) -> list[dict]:
-        """跨笔记检索：查全局 collection，每篇笔记按来源配额召回。
+        """跨笔记检索：全局按语义距离统一召回 Top-K，不过滤出自哪篇笔记。
 
         ``task_ids`` 为空/None 时查全部已索引笔记；否则只查给定笔记。
-        每篇笔记内部复用“meta 1 / markdown 2 / transcript 3”配额。
+        候选按 distance 升序截断 + 弱相关丢弃：无关笔记的片段不会被
+        硬塞进上下文，来源数量即实际被引用的片段数。
         """
         try:
             collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)
@@ -307,33 +338,41 @@ class VectorStoreManager:
             logger.warning("全局 Collection 不存在，请先建立索引")
             return []
 
+        where = None
         if task_ids is not None:
             task_ids = [t for t in task_ids if t][:MAX_CROSS_NOTES]
             if not task_ids:
                 return []
-        else:
-            task_ids = self.indexed_task_ids(limit=MAX_CROSS_NOTES)
-            if not task_ids:
-                return []
+            where = {"task_id": {"$in": task_ids}}
 
-        all_chunks = []
-        for tid in task_ids:
-            for source_type, quota in _SOURCE_QUOTAS.items():
-                try:
-                    results = collection.query(
-                        query_texts=[query_text],
-                        n_results=quota,
-                        where={
-                            "$and": [
-                                {"source_type": source_type},
-                                {"task_id": tid},
-                            ]
-                        },
-                    )
-                    all_chunks.extend(self._parse_results(results))
-                except Exception:
-                    continue
-        return all_chunks
+        try:
+            results = collection.query(
+                query_texts=[query_text],
+                n_results=CROSS_CANDIDATES,
+                where=where,
+            )
+        except Exception as e:
+            logger.warning(f"跨笔记检索失败: {e}")
+            return []
+
+        chunks = self._parse_results(results)
+        if not chunks:
+            return []
+        # 按距离升序：与最佳候选差距超过 CROSS_MARGIN 的视为弱相关丢弃，
+        # 再取 Top-K。无关笔记的片段不会被硬塞进上下文。
+        ranked = sorted(
+            chunks,
+            key=lambda c: c["distance"] if c.get("distance") is not None else 0,
+        )
+        best = ranked[0].get("distance")
+        if best is None:
+            return ranked[:CROSS_TOP_K]
+        kept = [
+            c
+            for c in ranked
+            if c.get("distance") is None or c["distance"] - best <= CROSS_MARGIN
+        ]
+        return kept[:CROSS_TOP_K]
 
     def indexed_task_ids(self, limit: int = MAX_CROSS_NOTES) -> list:
         """返回全局索引中已建索引的 task_id 列表（按写入顺序去重）。"""
