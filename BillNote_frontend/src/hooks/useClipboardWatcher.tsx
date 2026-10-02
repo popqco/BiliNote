@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import toast from 'react-hot-toast'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { get_video_meta } from '@/services/note.ts'
 import { useTaskStore } from '@/store/taskStore'
 import { useSystemStore } from '@/store/configStore'
@@ -14,7 +15,8 @@ import { sendOsClipboardNotify } from '@/utils/osClipboardNotify.ts'
  *    零后台开销、零打扰；
  * 2. 轮询开：每 N 秒经 Rust 侧读一次系统剪贴板（Tauri clipboard-manager，
  *    不需要窗口焦点，后台也能读），复制链接后即使不切回窗口也能捕获；
- *    若此时窗口不可见，候选先攒着、等回到前台再一次性弹窗（不打扰其它应用）。
+ *    若此时窗口不在前台（失焦即算，最小化/被完全遮挡同理），候选先攒着、等回
+ *    到前台再一次性弹窗；OS 通知开着时同步弹一条系统通知（不用切回应用也能看到）。
  *
  * 为什么只能轮询、没有"中断"：
  * 操作系统根本不提供剪贴板变更通知（Windows 只有 AddClipboardFormatListener
@@ -131,19 +133,21 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
   const osNotifyEnabled = useSystemStore(s => s.clipboardOsNotifyEnabled)
   const seenRef = useRef<Set<string>>(loadSeen())
   const checkingRef = useRef(false)
-  // 窗口不可见时命中的候选先攒在这里，回到前台再弹（攒多个就只弹最后一个）
+  // 窗口不在前台时命中的候选先攒在这里，回到前台再弹（攒多个就只弹最后一个）
   const pendingRef = useRef<ClipboardCandidate | null>(null)
   // 连续读取失败次数（指数退避用，成功一次即清零）
   const failStreakRef = useRef(0)
+  // 窗口焦点状态（Tauri onFocusChanged 事件驱动，见下方 effect 里的说明）
+  const focusedRef = useRef(true)
   const cbRef = useRef(onCandidate)
   cbRef.current = onCandidate
 
   useEffect(() => {
     let disposed = false
 
-    /** 读一次剪贴板 → 命中新链接则解析标题封面。deferHidden=true 时窗口不可见
-     *  只攒候选不弹窗（由回到前台的 flush 统一弹）。返回 true 表示读成功。 */
-    const check = async (deferHidden = false): Promise<boolean> => {
+    /** 读一次剪贴板 → 命中新链接则解析标题封面。deferUnfocused=true 时窗口不
+     *  在前台就只攒候选不弹窗（由回到前台的 flush 统一弹）。返回 true 表示读成功。 */
+    const check = async (deferUnfocused = false): Promise<boolean> => {
       if (checkingRef.current || disposed) return true
       checkingRef.current = true
       try {
@@ -170,10 +174,19 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
         if (disposed) return true
 
         const candidate = { url: found.url, platform: found.platform, title, cover_url }
-        if (deferHidden && document.hidden) {
-          // 后台命中的先攒着：切回前台时 flush 再弹，避免打扰其它应用；
-          // 若 OS 通知开着，同时经系统通知中心弹一条纯文本，
-          // 用户不用切回应用也能看到，点击通知回应用后 flush 弹出应用内卡片。
+        // 焦点门控：BiliNote 没拿到前台焦点就该走 OS 通知 + 攒候选。
+        //
+        // 为什么不用 document.hidden / document.hasFocus()：WebView2（Tauri）里
+        // 这两个信号在窗口最小化、失焦后都不更新——2026-10-02 插桩实测，
+        // Win32 IsIconic=true 时页面里 hidden=false、hasFocus() 恒 true，
+        // visibilitychange/focus 事件也永不触发。旧实现因此永远走「直接弹
+        // 应用内弹窗」分支：弹在看不见的窗口里、OS 通知被跳过。
+        // Tauri 的 onFocusChanged 由 Rust 侧 Win32 消息驱动，是唯一可靠信号；
+        // document.hidden / hasFocus 保留兜底（纯 Web 端它们是准确的）。
+        if (deferUnfocused && (document.hidden || !document.hasFocus() || !focusedRef.current)) {
+          // 非前台命中的先攒着：回到前台时 flush 再弹应用内卡片，避免打扰；
+          // 若 OS 通知开着，同时经系统通知中心弹一条纯文本——不用切回应用
+          // 也能看到，点击通知回应用后 flush 弹出完整卡片。
           pendingRef.current = candidate
           if (osNotifyEnabled) {
             void sendOsClipboardNotify(candidate.title || candidate.url)
@@ -196,6 +209,31 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
         pendingRef.current = null
       }
     }
+
+    // Tauri 窗口焦点事件：权威焦点信号 + 回前台 flush。DOM focus/
+    // visibilitychange 在 WebView2 里不可靠（见上），保留纯作 Web 兜底。
+    const win = getCurrentWebviewWindow()
+    let unlistenFocus: (() => void) | undefined
+    win
+      .isFocused()
+      .then(f => {
+        if (!disposed) focusedRef.current = f
+      })
+      .catch(() => {})
+    win
+      .onFocusChanged(e => {
+        if (disposed) return
+        focusedRef.current = e.payload
+        if (e.payload) {
+          flushPending()
+          void check()
+        }
+      })
+      .then(u => {
+        if (disposed) u()
+        else unlistenFocus = u
+      })
+      .catch(() => {})
 
     const onFocus = () => { flushPending(); void check() }
     const onVisible = () => { if (!document.hidden) { flushPending(); void check() } }
@@ -222,6 +260,7 @@ export const useClipboardWatcher = (onCandidate: (info: ClipboardCandidate) => v
 
     return () => {
       disposed = true
+      unlistenFocus?.()
       window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVisible)
       clearTimeout(timer)

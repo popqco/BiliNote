@@ -29,6 +29,18 @@ tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2.3.3"
 tauri-plugin-notification = "2.4.0"
 
+# 仅 Windows：Start Menu 快捷方式写入 AUMID 属性（IShellLinkW + IPropertyStore
+# + IPersistFile），让系统通知中心认得免安装 exe 的 Toast 署名。
+# 版本对齐 Cargo.lock 已有的 windows 0.62.x，只加 feature 不引入新版本。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+] }
+
 [package.metadata.tauri.bundle.macOS]
 frameworks = ["bin/BiliNoteBackend/_internal/"]
 
