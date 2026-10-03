@@ -80,6 +80,27 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("收敛中断任务失败（不影响启动）")
 
+        # P1-②：reap 启动 + 定时双跑。启动只收敛「上一个进程」的遗留；长常驻
+        # 进程（桌面端后端不重启）中新产生的悬挂（队列丢任务/执行线程静默死亡
+        # 留下的 PENDING）靠这个每 10 分钟一轮的定时收敛。reap 自带双保险，
+        # 不会误伤真在跑的任务：mtime 30 秒内写过的文件跳过 + 内存已登记跳过。
+        def _reap_loop() -> None:
+            import threading as _threading
+            from app.services.note import reap_interrupted_tasks as _reap
+            while True:
+                _threading.Event().wait(600)
+                try:
+                    n = _reap(time.time())
+                    if n:
+                        logger.warning(f"定时收敛 {n} 个停滞任务（标记为失败）")
+                except Exception:
+                    logger.exception("定时收敛停滞任务失败（下轮继续）")
+
+        import threading
+        _reap_thread = threading.Thread(target=_reap_loop, name="reap-stale-tasks", daemon=True)
+        _reap_thread.start()
+        logger.info("[startup 5/5] 停滞任务定时收敛已启动（每 10 分钟一轮）")
+
         # 自动化调度线程：稍后再看定期检查 + 汇总通知（enabled=false 时空转，
         # 见 docs/adr/0004；Windows 计划任务入口 automation_cli.py 与其文件锁互斥）
         from app.services.automation_scheduler import AutomationScheduler

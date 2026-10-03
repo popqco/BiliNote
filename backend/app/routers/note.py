@@ -25,6 +25,7 @@ from app.services.note import (
     mark_task_active,
     mark_task_done,
     purge_task,
+    release_stale_active_task,
 )
 from app.services.task_serial_executor import task_serial_executor, video_task_locks
 from app.services.video_meta import fetch_video_meta
@@ -328,20 +329,31 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             # PENDING —— 前端于是整段时间都显示「排队中、第 N 位」（2026-10-01
             # 用户实拍复现）。这里直接告诉前端「已有同任务在跑」。
             if is_task_active(task_id):
-                logger.info(f"重复提交拦截（重试命中运行中任务）: task_id={task_id}")
-                return R.error(
-                    msg="该任务正在生成中，无需重复提交",
-                    code=400,
-                    data={"duplicated": True, "existing_task_id": task_id, "video_id": video_id},
-                )
+                # P1-①：内存命中时先核磁盘终态——磁盘已 FAILED/SUCCESS 说明登记是
+                # 僵尸（进程重启前 mark_task_done 没跑到 / finally 被跳过），清掉后
+                # 继续走正常重试流程；磁盘仍非终态或文件缺失/损坏才保持 400 拦截。
+                if release_stale_active_task(task_id):
+                    logger.info(f"重试放行（僵尸登记已清理）: task_id={task_id}")
+                else:
+                    logger.info(f"重复提交拦截（重试命中运行中任务）: task_id={task_id}")
+                    return R.error(
+                        msg="该任务正在生成中，无需重复提交",
+                        code=400,
+                        data={"duplicated": True, "existing_task_id": task_id, "video_id": video_id},
+                    )
             active_same_video = active_task_for_video(video_id) if video_id else None
             if active_same_video and active_same_video != task_id:
-                logger.info(f"重复提交拦截（同视频运行中）: video_id={video_id} → {active_same_video}")
-                return R.error(
-                    msg="该视频已在生成队列中，请等这一次跑完",
-                    code=400,
-                    data={"duplicated": True, "existing_task_id": active_same_video, "video_id": video_id},
-                )
+                # 同上：同视频的内存登记也可能是僵尸（磁盘已终态），清掉后放行；
+                # 真在跑才保持 400 拦截。
+                if release_stale_active_task(active_same_video):
+                    logger.info(f"重试放行（同视频僵尸登记已清理）: video_id={video_id} → {active_same_video}")
+                else:
+                    logger.info(f"重复提交拦截（同视频运行中）: video_id={video_id} → {active_same_video}")
+                    return R.error(
+                        msg="该视频已在生成队列中，请等这一次跑完",
+                        code=400,
+                        data={"duplicated": True, "existing_task_id": active_same_video, "video_id": video_id},
+                    )
             logger.info(f"重试模式，复用已有 task_id={task_id}")
         else:
             # 提交去重：同一视频已有未完成任务时不再重复建任务（防重复下载与队列膨胀）
@@ -431,6 +443,22 @@ def get_task_status(task_id: str):
                 })
 
         if status == TaskStatus.FAILED.value:
+            # P1-③：FAILED-but-has-result 允许查看。重试/同视频复用 task_id 时，
+            # 老结果文件（{task_id}.json）还在——直接 500 会让之前成功的内容也
+            # 看不了。信封仍走 R.error（code=500，调用方按失败处理），只是把
+            # 结果附在 data.result 里，前端失败卡片可展示。
+            if os.path.exists(result_path):
+                try:
+                    with open(result_path, "r", encoding="utf-8") as rf:
+                        result_content = json.load(rf)
+                    return R.error(message or "任务失败", code=500, data={
+                        "task_id": task_id,
+                        "status": status,
+                        "has_result": True,
+                        "result": result_content,
+                    })
+                except Exception as e:
+                    logger.warning(f"读取失败任务的结果文件失败 (task_id={task_id}): {e}")
             return R.error(message or "任务失败", code=500)
 
         # 处理中状态：附带早期元信息（标题/封面）与排队位次
