@@ -61,7 +61,13 @@ def index_task(data: IndexRequest, background_tasks: BackgroundTasks):
         return R.success(msg="正在索引中")
 
     # 如果已经索引过，直接返回
-    store = VectorStoreManager()
+    try:
+        store = VectorStoreManager()
+    except Exception as e:
+        # 打包缺依赖（如 chromadb rust bindings）时这里就炸：
+        # 直接报人话，不要走到后台再变 failed。
+        logger.error(f"索引初始化失败: {data.task_id}, {e}")
+        return R.error(msg=f"索引初始化失败：{e}", code=500)
     if store.is_indexed(data.task_id):
         _index_status[data.task_id] = "indexed"
         return R.success(msg="已完成索引")
