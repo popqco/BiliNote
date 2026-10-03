@@ -296,6 +296,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                         "platform": "bilibili",
                         "origin": "manual",
                         "video_url": it["video_url"],
+                        "model_name": data.model_name,
+                        "provider_id": data.provider_id,
+                        "style": data.style,
                         "audio_meta": {
                             "title": it.get("title"),
                             "cover_url": it.get("cover_url"),
@@ -381,7 +384,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                     # 正常新建任务
                     task_id = str(uuid.uuid4())
 
-        # 统一先写入 PENDING（含 video_id/origin，供排队展示、去重与自动化任务同步）
+        # 统一先写入 PENDING（含 video_id/origin，供排队展示、去重与自动化任务同步；
+        # 含 model_name/provider_id/style，供徽标与 Viewer 回填——此前没写，
+        # 手动提交的笔记一旦走 /tasks/recent 回填，模型/风格徽标即空白）
         NoteGenerator()._update_status(
             task_id,
             TaskStatus.PENDING,
@@ -390,6 +395,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                 "platform": data.platform,
                 "origin": "manual",
                 "video_url": str(data.video_url),
+                "model_name": data.model_name,
+                "provider_id": data.provider_id,
+                "style": data.style,
             },
         )
 

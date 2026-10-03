@@ -272,7 +272,14 @@ class NoteGenerator:
             # 6. 完成
             self._update_status(task_id, TaskStatus.SUCCESS)
             logger.info(f"笔记生成成功 (task_id={task_id})")
-            return NoteResult(markdown=markdown, transcript=transcript, audio_meta=audio_meta)
+            return NoteResult(
+                markdown=markdown,
+                transcript=transcript,
+                audio_meta=audio_meta,
+                model_name=model_name,
+                provider_id=provider_id,
+                style=style,
+            )
 
         except Exception as exc:
             logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
@@ -1069,6 +1076,10 @@ def list_recent_tasks(limit: int = 80) -> List[dict]:
             "platform": data.get("platform") or meta.get("platform"),
             "video_url": data.get("video_url"),
             "origin": data.get("origin", "manual"),
+            # 徽标数据源：提交时即写入状态文件，老任务没有则为空
+            "model_name": data.get("model_name"),
+            "provider_id": data.get("provider_id"),
+            "style": data.get("style"),
             "title": meta.get("title"),
             "cover_url": meta.get("cover_url"),
             "duration": meta.get("duration"),

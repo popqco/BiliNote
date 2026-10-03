@@ -42,13 +42,27 @@ export const useTasksSync = (interval = 30000) => {
             const res: any = await get_task_status(bt.task_id)
             if (res?.result) {
               const { markdown, transcript, audio_meta } = res.result
-              useTaskStore.getState().updateTaskContent(bt.task_id, {
+              // 结果文件里的生成参数快照（model_name/provider_id/style）一并合进
+              // formData：徽标与 NoteForm 回显的数据源。只补本地缺失的键，
+              // 不覆盖用户本地已有的提交值。
+              const patch: any = {
                 status: 'SUCCESS',
                 markdown,
                 transcript,
                 audioMeta: audio_meta,
                 message: undefined,
-              })
+              }
+              const fd = local.formData || {}
+              const merged: any = { ...fd }
+              let touched = false
+              for (const k of ['model_name', 'provider_id', 'style', 'quality', 'video_url', 'platform'] as const) {
+                if (!merged[k] && res.result[k]) {
+                  merged[k] = res.result[k]
+                  touched = true
+                }
+              }
+              if (touched) patch.formData = merged
+              useTaskStore.getState().updateTaskContent(bt.task_id, patch)
             }
           } catch (e) {
             console.warn('同步任务结果失败:', bt.task_id, e)

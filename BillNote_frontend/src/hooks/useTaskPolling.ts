@@ -71,6 +71,17 @@ export const useTaskPolling = (interval = 3000) => {
           if (status === 'SUCCESS') {
             const { markdown, transcript, audio_meta } = res.result
             toast.success('笔记生成成功')
+            // 结果文件里的生成参数快照一并合进 formData（徽标数据源），
+            // 不覆盖本地已有的提交值。
+            const fd = task.formData || {}
+            const merged: any = { ...fd }
+            let touched = false
+            for (const k of ['model_name', 'provider_id', 'style', 'quality', 'video_url', 'platform'] as const) {
+              if (!merged[k] && res.result[k]) {
+                merged[k] = res.result[k]
+                touched = true
+              }
+            }
             useTaskStore.getState().updateTaskContent(task.id, {
               status,
               markdown,
@@ -78,6 +89,7 @@ export const useTaskPolling = (interval = 3000) => {
               audioMeta: audio_meta,
               queuePosition: undefined,
               message: undefined,
+              ...(touched ? { formData: merged } : {}),
             })
             continue
           }

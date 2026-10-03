@@ -69,6 +69,14 @@ export interface Task {
     quality: string
     model_name: string
     provider_id: string
+    /** 笔记风格（minimal/detailed/…）：徽标与 NoteForm 回显用；老任务可能缺失 */
+    style?: string
+    format?: string[]
+    extras?: string
+    video_understanding?: boolean
+    video_interval?: number
+    grid_size?: [number, number]
+    task_id?: string
   }
 }
 
@@ -136,11 +144,14 @@ export const useTaskStore = create<TaskStore>()(
               // 如果是 markdown 字符串，封装为版本
               if (typeof data.markdown === 'string') {
                 const prev = task.markdown
+                // 版本徽标用合并后的 formData：轮询/同步可能在同一 patch 里带来
+                // 后端结果文件的 model_name/style（旧 task.formData 还是空的）。
+                const fd = (data as any).formData || task.formData || {}
                 const newVersion: Markdown = {
                   ver_id: `${task.id}-${uuidv4()}`,
                   content: data.markdown,
-                  style: task.formData.style || '',
-                  model_name: task.formData.model_name || '',
+                  style: fd.style || '',
+                  model_name: fd.model_name || '',
                   created_at: new Date().toISOString(),
                 }
 
@@ -154,8 +165,8 @@ export const useTaskStore = create<TaskStore>()(
                         ? [{
                           ver_id: `${task.id}-${uuidv4()}`,
                           content: prev,
-                          style: task.formData.style || '',
-                          model_name: task.formData.model_name || '',
+                          style: fd.style || '',
+                          model_name: fd.model_name || '',
                           created_at: new Date().toISOString(),
                         }]
                         : []),
@@ -184,6 +195,24 @@ export const useTaskStore = create<TaskStore>()(
       addBackendTask: (bt: any, result?: any) =>
         set(state => {
           if (state.tasks.some(t => t.id === bt.task_id)) return state
+          // 徽标数据源优先级：结果文件（model_name/provider_id/style）
+          // ＞ /tasks/recent 概要（status 文件 PENDING 时写入）
+          // ＞ 空。任何一层缺失都继续往下一层找，不再写死 ''。
+          const formData = {
+            video_url: result?.video_url || bt.video_url || '',
+            platform: result?.platform || bt.platform || '',
+            quality: result?.quality || bt.quality || 'medium',
+            model_name: result?.model_name || bt.model_name || '',
+            provider_id: result?.provider_id || bt.provider_id || '',
+            style: result?.style || bt.style || '',
+            format: result?.format || bt.format || [],
+            extras: result?.extras || bt.extras || '',
+            video_understanding: result?.video_understanding ?? bt.video_understanding ?? false,
+            video_interval: result?.video_interval ?? bt.video_interval ?? 6,
+            grid_size: result?.grid_size || bt.grid_size || [2, 2],
+            link: result?.link ?? bt.link ?? undefined,
+            screenshot: result?.screenshot ?? bt.screenshot ?? undefined,
+          }
           const task: Task = {
             id: bt.task_id,
             status: bt.status,
@@ -201,15 +230,7 @@ export const useTaskStore = create<TaskStore>()(
               video_id: bt.video_id || '',
             },
             createdAt: new Date().toISOString(),
-            formData: {
-              video_url: bt.video_url || '',
-              platform: bt.platform || '',
-              quality: 'medium',
-              model_name: '',
-              provider_id: '',
-              link: undefined,
-              screenshot: undefined,
-            },
+            formData,
           }
           return { tasks: [task, ...state.tasks] }
         }),
