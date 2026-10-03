@@ -13,6 +13,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip.tsx'
 import LazyImage from "@/components/LazyImage.tsx";
+import { buildImageProxyUrl } from "@/utils/workerConnection.ts";
 import {FC, useState, useEffect, useMemo} from 'react'
 
 interface NoteHistoryProps {
@@ -37,8 +38,6 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const tasks = useTaskStore(state => state.tasks)
   const removeTask = useTaskStore(state => state.removeTask)
-  // 确保baseURL没有尾部斜杠
-  const baseURL = (String(import.meta.env.VITE_API_BASE_URL || 'api')).replace(/\/$/, '')
   const [rawSearch, setRawSearch] = useState('')
   const [search, setSearch] = useState('')
   const fuse = useMemo(() => new Fuse(tasks, {
@@ -121,7 +120,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
 
                       src={
                         task.audioMeta.cover_url
-                            ? `${baseURL}/image_proxy?url=${encodeURIComponent(task.audioMeta.cover_url)}`
+                            ? buildImageProxyUrl(task.audioMeta.cover_url)
                             : '/placeholder.png'
                       }
                       alt="封面"

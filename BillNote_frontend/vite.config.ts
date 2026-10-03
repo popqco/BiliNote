@@ -31,7 +31,11 @@ export default defineConfig(({ mode }) => {
   const appVersion = env.VITE_APP_VERSION || process.env.VITE_APP_VERSION || readAppVersion()
 
   return {
-    base: './',
+    // 深链直开（/settings/model 等）白屏的根因曾是 base:'./'：浏览器按相对路径
+    // 拼 chunk（/settings/assets/… → 后端 SPA fallback 回 HTML → MIME 错挂掉整站）。
+    // 改回 '/'：所有 chunk 走绝对路径，任意深链直开都能拿到 JS（USB 真机实测）。
+    // Tauri 桌面端不受影响：它走 HashRouter（pathname 恒 '/' + hash 路由）。
+    base: '/',
     define: {
       __APP_VERSION__: JSON.stringify(appVersion),
     },

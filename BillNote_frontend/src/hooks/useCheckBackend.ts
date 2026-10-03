@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { resolveApiBaseUrl } from '@/utils/workerConnection.ts'
 
 // 后端就绪检测的几个时间常量
 // - 总等待上限 60s：超过这个时间没就绪就切「启动失败」UI，
@@ -14,8 +15,9 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 // 直接用 fetch 而非 utils/request 的共享 axios：那个 axios 装了全局 toast 拦截器，
 // 启动期每次 /sys_check 失败都会弹一个红色 toast，2s 一次轮询会叠出十几个。
 function getBackendBase(): string {
-  const fromEnv = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined
-  return ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  // 已配对的 Worker 地址优先（含用户在配对页填的局域网/组网地址），否则回退构建期 env。
+  // 同源直服（后端 serve 前端）场景下 resolveApiBaseUrl 返回 '/api'，fetch 同源即可。
+  return resolveApiBaseUrl()
 }
 
 async function probeSysCheck(): Promise<boolean> {

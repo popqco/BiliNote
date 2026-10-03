@@ -14,7 +14,9 @@ export default function GlobalClipboardWatcher() {
   const navigate = useNavigate()
 
   const handleAccept = useCallback((info: { url: string; platform: string }) => {
-    if (window.location.hash.includes('#/settings') || window.location.pathname.startsWith('/settings')) {
+    // 设置页判断要兼容 Tauri HashRouter（真实路由在 hash 里，pathname 恒为 '/'）。
+    const hash = typeof window !== 'undefined' ? window.location.hash : ''
+    if (hash.includes('#/settings') || window.location.pathname.startsWith('/settings')) {
       navigate('/')
       window.setTimeout(() => {
         window.dispatchEvent(new CustomEvent('bilinote:clipboard-video', { detail: info }))
