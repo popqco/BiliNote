@@ -471,10 +471,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     if (target.task_id !== currentTask?.id) return
     let sectionTitle = target.section_title || ''
     if (target.start_time != null) {
-      // transcript 来源：打开原文面板并定位时间。用户反馈只开转写
-      // “不直观”——同时把正文定位到覆盖该时间点的章节，两处一起看。
-      setShowTranscribe(true)
-      setTranscriptFocusTime(target.start_time)
+      // transcript 来源：按用户反馈只定位正文，不自动打开原文面板
+      // （用户手动开的原文面板保持原样）。正文定位到覆盖该时间点的
+      // 章节——按 heading 的 原片(MM:SS) 时间戳推断。
       if (!sectionTitle) {
         sectionTitle = findSectionTitleForTime(target.start_time) || ''
       }

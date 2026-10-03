@@ -75,10 +75,10 @@ function SourceBadges({
   const jumpTitleOf = (s: ChatSource) => {
     if (!s.task_id) return undefined
     if (s.task_id !== currentTaskId) return '点击跳转到该笔记对应位置'
-    // 本篇来源：定位到笔记内对应章节/转录时间
+    // 本篇来源：定位到笔记内对应章节（转录来源按时间映射到章节）
     if (s.source_type === 'markdown' && s.section_title) return '点击定位到笔记该章节'
     if (s.source_type === 'transcript' && s.start_time != null)
-      return '点击打开原文并定位到该时间'
+      return '点击定位到笔记该章节'
     return undefined
   }
 
