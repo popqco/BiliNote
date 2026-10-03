@@ -13,4 +13,5 @@ class ModelConfig:
     api_key: str                # 调用该模型使用的 API Key
     base_url: str               # 模型 API 接口地址（OpenAI SDK兼容）
     model_name: str             # 实际请求用的模型名称，如 "gpt-4-turbo"
+    api_format: Optional[str] = None  # 供应商 API 协议："chat"（默认 Chat Completions）| "responses"（OpenAI Responses，仅部分网关支持）
     created_at: Optional[datetime] = None  # 可选：创建时间（从 SQLite 自动生成）

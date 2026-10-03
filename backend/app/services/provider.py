@@ -28,6 +28,7 @@ class ProviderService:
             "type":row.get("type"),
             "enabled": row.get("enabled"),
             "base_url": row.get("base_url"),
+            "api_format": row.get("api_format") or "chat",
             "api_key": row.get("api_key"),
             "created_at": jsonable_encoder(row.get("created_at")),
             # "name": row[1],
@@ -51,6 +52,7 @@ class ProviderService:
             "type":row.get("type"),
             "enabled": row.get("enabled"),
             "base_url": row.get("base_url"),
+            "api_format": row.get("api_format") or "chat",
             "api_key":  ProviderService.mask_key(row.get("api_key")),
             "created_at": jsonable_encoder(row.get("created_at")),
 
@@ -69,7 +71,7 @@ class ProviderService:
             return '*' * len(key)
         return key[:4] + '*' * (len(key) - 8) + key[-4:]
     @staticmethod
-    def add_provider( name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1):
+    def add_provider( name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat"):
         try:
             # 内置供应商（type='built-in'）只能由 seed 流程写入；API 创建一律落到 'custom'，
             # 否则历史上出现过批量伪内置脏数据
@@ -80,7 +82,7 @@ class ProviderService:
                 raise ValueError(f'供应商名称已存在: {name}')
             id = uuid().lower()
             logo = 'custom'
-            return insert_provider(id, name, api_key, base_url, logo, type_, enabled)
+            return insert_provider(id, name, api_key, base_url, logo, type_, enabled, api_format=api_format or 'chat')
         except Exception as  e:
             print('创建模式失败',e)
             raise
@@ -93,6 +95,7 @@ class ProviderService:
             "type": p.type,
             "api_key": p.api_key,
             "base_url": p.base_url,
+            "api_format": (getattr(p, "api_format", None) or "chat"),
             "enabled": p.enabled,
             "created_at": p.created_at,
         }
