@@ -284,7 +284,10 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     }
 
     return items
-  }, [messages, loading])
+    // taskId 必须进依赖：SourceBadges 靠它判断“本篇/跨笔记”来源并决定
+    // 点击时是否先切笔记。漏掉会导致切换笔记后徽章仍按旧笔记计算跳转
+    // 目标（browser-use 实测：切到香水后点猛玛来源，setCurrentTask 不触发）。
+  }, [messages, loading, taskId])
 
   // Bubble 角色配置
   const roles = useMemo(

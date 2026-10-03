@@ -20,7 +20,7 @@ import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { normalizeMathDelimiters } from '@/lib/utils'
 import { useTaskStore } from '@/store/taskStore'
-import { useChatJumpStore } from '@/store/chatStore'
+import { useChatJumpStore, type SourceJumpTarget } from '@/store/chatStore'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
@@ -426,34 +426,61 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   // 这里在内容 id 变化后把 viewport 拉回顶部；目录锚点跳转不受影响
   // （那是点击事件里单独做的 scrollIntoView）。
   useEffect(() => {
+    // 跳转待执行时不把阅读区拉回顶部：切笔记后内容异步加载会多次触发
+    // 本 effect，抢先 scrollTo(0) 会把跳转定位刚滚到的位置清掉。
+    const pending = activeJumpRef.current
+    if (pending && pending.task_id === currentTask?.id) return
     readerViewportRef.current?.scrollTo({ top: 0 })
   }, [currentTask?.id, currentVerId])
 
   // 问答来源跳转：切笔记后定位到对应章节 / 打开原文并定位时间。
-  // 跳转请求带 nonce，每次点击都触发；markdown 渲染是异步的，
-  // 这里轮询等待目标 heading 出现（最多约 3s），找到即滚动并高亮。
+  //
+  // 竞态教训（2026-10-03 browser-use 实测抓到）：旧实现把轮询 effect 直接
+  // 挂在 [jumpTarget, currentTask?.id] 上并在 effect 里同步 consumeJump()——
+  // consume 会把 store 的 jumpTarget 置空 → effect 依赖变化立即重跑 →
+  // cleanup 在轮询第一次 tick 之前就把定时器清掉，跳转从来没真正滚动过。
+  // 现在分两层：请求到达时先把目标摘到 ref（consume 不再影响定位流程），
+  // 定位 effect 依赖「跳转信号 + 当前笔记 + 内容版本」，内容异步渲染
+  // （切笔记/版本变化）后自动重跑，轮询等 heading 出现再滚动。
   const jumpTarget = useChatJumpStore(state => state.jumpTarget)
   const consumeJump = useChatJumpStore(state => state.consumeJump)
+  const activeJumpRef = useRef<SourceJumpTarget | null>(null)
+  const [jumpSignal, setJumpSignal] = useState(0)
   const [transcriptFocusTime, setTranscriptFocusTime] = useState<number | null>(null)
   useEffect(() => {
     if (!jumpTarget) return
-    // 跨笔记跳转：目标笔记还没切过来时先等（setCurrentTask 是异步的，
-    // 当前 currentTask 仍是旧笔记），不要 consume，等切过来后下一轮再处理。
-    if (jumpTarget.task_id !== currentTask?.id) return
+    activeJumpRef.current = jumpTarget
     consumeJump()
+    // 同笔记跳转时 currentTask/currentVerId 都不变，靠这个信号触发定位
+    setJumpSignal(s => s + 1)
+  }, [jumpTarget, consumeJump])
+
+  useEffect(() => {
+    const target = activeJumpRef.current
+    if (!target) return
+    // 跨笔记跳转：目标笔记还没切过来时先等（切过来后依赖触发重跑）
+    if (target.task_id !== currentTask?.id) return
     // transcript 来源：打开原文面板并定位时间
-    if (jumpTarget.start_time != null && !jumpTarget.section_title) {
+    if (target.start_time != null && !target.section_title) {
+      activeJumpRef.current = null
       setShowTranscribe(true)
-      setTranscriptFocusTime(jumpTarget.start_time)
+      setTranscriptFocusTime(target.start_time)
       return
     }
-    setTranscriptFocusTime(null)
-    const title = (jumpTarget.section_title || '').trim()
-    if (!title) return
+    const title = (target.section_title || '').trim()
+    if (!title) {
+      activeJumpRef.current = null
+      setTranscriptFocusTime(null)
+      return
+    }
     const normalize = (s: string) => s.replace(/[-：:\s*[\]]/g, '').toLowerCase()
     const search = normalize(title)
     if (!search) return
+    // 找到 heading 后不能一滚了之：跨笔记跳转时笔记内容异步加载会
+    // 中途重挂载阅读区（scrollTop 清零），一次 scrollTo 会被冲掉。
+    // 这里持续校验目标位置，被冲掉就补滚，连续两轮稳定才算完成。
     let tries = 0
+    let stableTicks = 0
     const timer = window.setInterval(() => {
       tries += 1
       const root = contentCaptureRef.current
@@ -467,42 +494,66 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           break
         }
       }
-      if (hit || tries >= 30) {
-        window.clearInterval(timer)
-        if (!hit) {
+      if (!hit) {
+        if (tries >= 40) {
+          window.clearInterval(timer)
+          activeJumpRef.current = null
           toast.error('未找到对应章节')
-          return
         }
-        // 阅读区滚的是 Radix ScrollArea 内层 viewport（window 不滚）。
-        // readerViewportRef 透传到 Radix Viewport 偶发为 null（ref 合并时机），
-        // 优先用 ref，拿不到就从目标 heading 就近找 viewport，保证能滚。
-        const vp =
-          readerViewportRef.current ||
-          (hit.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null)
-        if (vp) {
-          const vpRect = vp.getBoundingClientRect()
-          const hRect = (hit as HTMLElement).getBoundingClientRect()
-          vp.scrollTo({ top: vp.scrollTop + (hRect.top - vpRect.top) - 16, behavior: 'smooth' })
-        } else {
-          hit.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        }
-        // 高亮目标章节 2s：直接操作 DOM clas，避免重建 markdown components
-        // 导致整篇笔记重新渲染（大笔记会闪）。
-        const el = hit as HTMLElement
-        const prev = el.style.transition
-        el.style.transition = 'background-color 0.3s'
-        el.style.backgroundColor = 'rgba(250, 204, 21, 0.25)'
-        window.setTimeout(() => {
-          el.style.backgroundColor = ''
-          el.style.transition = prev
-        }, 2000)
+        return
       }
-    }, 100)
+      // 阅读区滚的是 Radix ScrollArea 内层 viewport（window 不滚）。
+      // readerViewportRef 透传到 Radix Viewport 偶发为 null（ref 合并时机），
+      // 优先用 ref，拿不到就从目标 heading 就近找 viewport，保证能滚。
+      const vp =
+        readerViewportRef.current ||
+        (hit.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null)
+      const vpRect = vp ? vp.getBoundingClientRect() : null
+      const offset = vpRect
+        ? (hit as HTMLElement).getBoundingClientRect().top - vpRect.top
+        : (hit as HTMLElement).getBoundingClientRect().top
+      if (Math.abs(offset - 16) <= 48) {
+        stableTicks += 1
+        if (stableTicks >= 2) {
+          window.clearInterval(timer)
+          activeJumpRef.current = null
+          // 高亮目标章节 2s：直接操作 DOM class，避免重建 markdown components
+          // 导致整篇笔记重新渲染（大笔记会闪）。
+          const el = hit as HTMLElement
+          const prev = el.style.transition
+          el.style.transition = 'background-color 0.3s'
+          el.style.backgroundColor = 'rgba(250, 204, 21, 0.25)'
+          window.setTimeout(() => {
+            el.style.backgroundColor = ''
+            el.style.transition = prev
+          }, 2000)
+        }
+        return
+      }
+      stableTicks = 0
+      if (tries >= 50) {
+        window.clearInterval(timer)
+        activeJumpRef.current = null
+        return
+      }
+      if (vp) {
+        // 平滑滚动约 300-500ms，而校验间隔只有 120ms：每轮都用 smooth
+        // 会不停重启动画、位置永远到不了目标（browser-use 实测滚 10 次
+        // 全部从 0 重来）。前两次给 smooth，之后一律瞬时补滚。
+        vp.scrollTo({
+          top: vp.scrollTop + offset - 16,
+          behavior: tries >= 3 ? 'auto' : 'smooth',
+        })
+      } else {
+        hit.scrollIntoView({ behavior: tries >= 3 ? 'auto' : 'smooth', block: 'start' })
+      }
+    }, 120)
     return () => window.clearInterval(timer)
-    // 依赖必须含 currentTask?.id：跨笔记跳转时第一次 effect 因任务未切过来
-    // 直接 return（未 consume），切过来后靠这个依赖重跑一轮才真正定位。
+    // 跨笔记：currentTask?.id 切过来后重跑；内容异步加载：currentVerId
+    // 变化后重跑（旧实现没这个依赖，新笔记 markdown 渲染完成前轮询
+    // 可能已经在旧内容上耗尽了重试次数）。jumpSignal：同笔记跳转触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jumpTarget, currentTask?.id])
+  }, [jumpSignal, currentTask?.id, currentVerId])
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
