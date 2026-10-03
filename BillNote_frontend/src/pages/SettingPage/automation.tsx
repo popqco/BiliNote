@@ -90,14 +90,18 @@ const Automation = () => {
 
   const upd = (path: string[], value: any) => setCfg((c: any) => setIn(c, path, value))
 
+  // 远控关闭时的 Viewer 体验：读/写自动化配置被 403 时给一句人话，
+  // 而不是"服务器错误"。code 403 经拦截器已弹过后端 msg，这里只做静默兜底。
+  const isRemoteLocked = (e: any) => e?.code === 403
+
   const onSave = async () => {
     setBusy(true)
     try {
       const saved = await save_automation_config(cfg)
       setCfg(saved)
       toast.success('自动化配置已保存')
-    } catch (e) {
-      console.error(e)
+    } catch (e: any) {
+      if (!isRemoteLocked(e)) console.error(e)
     } finally {
       setBusy(false)
     }

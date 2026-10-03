@@ -82,7 +82,11 @@ function App() {
             <Route path="/" element={<OnboardingGuard><Index /></OnboardingGuard>}>
               <Route index element={<HomePage />} />
               <Route path="settings" element={<SettingPage />}>
-                <Route index element={<Navigate to="model" replace />} />
+                {/* /settings 本体即菜单总览（SettingLayout 两级导航依赖它）：
+                    index 绝不能 <Navigate> 到任何详情页——之前先跳 model 后改跳
+                    connection，都导致手机端「连接 → 设置 → 连接 → …」死循环，
+                    菜单总览永远停留不住。index 只放占位（手机端隐藏，桌面端提示选左侧）。 */}
+                <Route index element={<div className="text-muted-foreground p-8 text-sm">请从左侧选择设置项</div>} />
                 <Route path="model" element={<Model />}>
                   <Route path="new" element={<ProviderForm isCreate />} />
                   <Route path=":id" element={<ProviderForm />} />

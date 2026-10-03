@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { addProvider, addModel, testConnection, getProviderList, updateProviderById } from '@/services/model'
 import { getTranscriberConfig, updateTranscriberConfig } from '@/services/transcriber'
+import { resolveApiBaseUrl } from '@/utils/workerConnection.ts'
 import logo from '@/assets/icon.svg'
 
 // 后端 R.error / ProviderError 的形状是 { code, msg, data }，没有 .message。
@@ -16,8 +17,8 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
 // 后端连通性自检不走共享 axios（会弹 toast），用裸 fetch 避免启动期 toast 叠堆
 function getBackendBase(): string {
-  const fromEnv = (import.meta as any).env?.VITE_API_BASE_URL as string | undefined
-  return ((fromEnv && fromEnv.length > 0) ? fromEnv : '/api').replace(/\/$/, '')
+  // 已配对的 Worker 地址优先，否则回退构建期 env（Viewer 场景 onboarding 也要连 Worker）。
+  return resolveApiBaseUrl()
 }
 async function pingBackend(): Promise<boolean> {
   try {
