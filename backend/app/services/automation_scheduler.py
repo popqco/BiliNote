@@ -294,6 +294,9 @@ class AutomationScheduler:
                 "platform": "bilibili",
                 "origin": "auto",
                 "video_url": item["video_url"],
+                "model_name": gen.get("model_name"),
+                "provider_id": gen.get("provider_id"),
+                "style": gen.get("style"),
                 "audio_meta": {
                     "title": item.get("title"),
                     "cover_url": item.get("cover_url"),

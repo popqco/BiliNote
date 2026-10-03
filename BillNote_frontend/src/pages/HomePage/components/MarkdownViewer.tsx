@@ -7,6 +7,8 @@ import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
 import Idle from '@/components/Lottie/Idle.tsx'
 import StepBar from '@/pages/HomePage/components/StepBar.tsx'
+import { fetchEnableModels } from '@/services/model.ts'
+import { get_automation_config } from '@/services/automation.ts'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { atomDark as codeStyle } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import Zoom from 'react-medium-image-zoom'
@@ -818,6 +820,45 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   }
 
   if (status === 'failed' && !isMultiVersion) {
+    // 失败页"重试"：不要直接拿老任务 formData 去发——参数快照前的老任务
+    // 没有 model_name/provider_id，直接发只会复现"后台炸响应已发出、任务永远
+    // 排队中"（且新版 taskStore 会弹红 toast 拦截）。这里先自动补齐一次可用
+    // 模型，补不上才提示去选（摘自 mobile-split 4f3d28e）。
+    const handleRetryWithModelFill = async () => {
+      const task = getCurrentTask()
+      const fd: any = task?.formData || {}
+      if (fd.model_name && fd.provider_id) {
+        retryTask(task!.id)
+        return
+      }
+      try {
+        const [models, autoCfg] = await Promise.all([
+          fetchEnableModels().catch(() => []),
+          get_automation_config().catch(() => null),
+        ])
+        const list = Array.isArray(models) ? models : []
+        // 优先用任务快照里的模型名（用户上次就是这么选的），否则用第一个可用模型，
+        // 再否则用当前自动化配置的模型。
+        const pick =
+          list.find((m: any) => m.model_name === fd.model_name) ||
+          list[0] ||
+          null
+        const gen = (autoCfg as any)?.gen
+        const model_name = pick?.model_name || gen?.model_name
+        const provider_id = pick?.provider_id || gen?.provider_id
+        if (!model_name || !provider_id) {
+          toast.error('没有可用模型可补，请先到「设置 → AI模型设置」添加并启用一个模型')
+          return
+        }
+        useTaskStore.getState().updateTaskContent(task!.id, {
+          formData: { ...fd, model_name, provider_id },
+        } as any)
+        retryTask(task!.id, { ...fd, model_name, provider_id, task_id: task!.id })
+      } catch (e) {
+        console.error('重试补模型失败：', e)
+        toast.error('重试前补模型失败，请到新建表单重选模型后再提交')
+      }
+    }
     return (
       <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
         <Error />
@@ -827,7 +868,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
             {currentTask?.message || '请检查后台或稍后再试'}
           </p>
 
-          <Button onClick={() => retryTask(currentTask.id)} size="lg">
+          <Button onClick={handleRetryWithModelFill} size="lg">
             重试
           </Button>
         </div>
