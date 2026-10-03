@@ -250,6 +250,13 @@ export const useTaskStore = create<TaskStore>()(
         if (!task) return
 
         const newFormData = payload || task.formData
+        // 无 payload 的重试（失败页"重试"按钮）：formData 可能缺模型参数
+        // （参数快照前的老任务），直接发会复现"后台炸响应已发出、任务永远 PENDING"。
+        // 这里先拦住：缺哪个说哪个，不发请求、不改状态。
+        if (!newFormData?.model_name || !newFormData?.provider_id) {
+          toast.error('该任务缺少模型参数（老任务无参数快照），请先在表单重选模型后再点重新生成')
+          return
+        }
         try {
           await generateNote({
             ...newFormData,

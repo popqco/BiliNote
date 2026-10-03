@@ -469,11 +469,24 @@ const NoteForm = () => {
 
   const onSubmit = async (values: NoteFormValues) => {
     console.log('Not even go here')
+    // provider 反查必须判空：老任务的模型可能被改名/删除/禁用（不在启用列表里），
+    // 之前 `find(...)!` 直接 TypeError 炸整页；即使侥幸发出空 provider 请求，
+    // 后台 run_note_task 里 raise 也只会炸成响应已发出的异常、任务永远 PENDING
+    // （2026-10-03 陀螺仪任务实测）。这里拦住并给一句人话。
+    const matched = modelList.find(m => m.model_name === values.model_name)
+    if (!matched) {
+      toast.error(
+        values.model_name
+          ? `模型「${values.model_name}」不在可用列表（可能被改名/删除/禁用），请重选模型后再提交`
+          : '请选择模型后再提交',
+      )
+      return
+    }
     const payload: NoteFormValues = {
       ...values,
       video_url:
         values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
-      provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
+      provider_id: matched.provider_id,
       task_id: currentTaskId || '',
     }
     if (currentTaskId) {

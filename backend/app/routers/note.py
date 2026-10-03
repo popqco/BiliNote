@@ -158,8 +158,17 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
                   video_interval=0, grid_size=[], video_id: str = None
                   ):
 
+    # 后台任务里的参数缺失不能 raise HTTPException——响应早就发出去了，
+    # 异常只会炸成 "Caught handled exception, but response already started"，
+    # 状态文件永远停在 PENDING，前端永远"排队中"（2026-10-03 陀螺仪任务实测）。
+    # 缺参数直接写 FAILED 并返回，错误进状态文件 message，前端看得到。
     if not model_name or not provider_id:
-        raise HTTPException(status_code=400, detail="请选择模型和提供者")
+        logger.warning(f"任务 {task_id} 缺少模型参数（model_name={model_name!r}），直接标失败")
+        NoteGenerator()._update_status(
+            task_id, TaskStatus.FAILED,
+            message="HTTPException: 请选择模型和提供者（提交时未带模型参数，请重新选择模型后生成）",
+        )
+        return
 
     def _execute_note_task():
         return NoteGenerator().generate(
@@ -323,6 +332,13 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             and str(data.video_url).startswith("http")
         ):
             return R.error(msg="无法从链接中提取视频 ID，请确认粘贴的是单个视频链接", code=400)
+
+        # 提交入口参数校验：model_name/provider_id 缺了直接 400 拒绝，不要建
+        # PENDING 任务再丢给后台——后台里 raise 只会炸成响应已发出的异常，
+        # 状态文件永远 PENDING，前端永远"排队中"（2026-10-03 陀螺仪任务实测）。
+        if not data.model_name or not data.provider_id:
+            logger.warning(f"拒绝 generate_note：缺少模型参数（video_id={video_id}）")
+            return R.error(msg="请选择模型和提供者后再提交", code=400)
 
         if data.task_id:
             # 如果传了task_id，说明是重试！

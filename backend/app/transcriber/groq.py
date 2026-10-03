@@ -42,9 +42,12 @@ class GroqTranscriber(Transcriber, ABC):
         filename = file_path
 
         with open(filename, "rb") as file:
+            # GROQ_TRANSCRIBER_MODEL 未配置时 os.getenv 返回 None，Groq 会报
+            # 400 invalid_model（'`model` is a required property'）——任务直接失败。
+            # 这里给缺省 whisper-large-v3-turbo（与 .env 注释一致），避免静默 None。
             transcription = client.audio.transcriptions.create(
                 file=(filename, file.read()),
-                model=os.getenv('GROQ_TRANSCRIBER_MODEL'),
+                model=os.getenv('GROQ_TRANSCRIBER_MODEL') or 'whisper-large-v3-turbo',
                 response_format="verbose_json",
             )
             print(transcription.text)
