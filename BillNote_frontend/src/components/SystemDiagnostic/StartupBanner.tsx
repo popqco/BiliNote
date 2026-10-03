@@ -86,12 +86,15 @@ const StartupBanner = () => {
         })
       })
 
+      // P1-④：terminated 横幅允许手动关闭（dismissible: true）。之前 false +
+      // 无自动清逻辑 = 红横幅永远卡死。backend-restarted / backend-ready 的
+      // 自动清逻辑不动；warning/timeout 的形状逻辑不动。
       const offTerminated = await listen<number | null>('backend-terminated', event => {
         setBanner({
           severity: 'error',
           title: '后端进程已退出',
           detail: `退出码：${event.payload ?? '未知'}。打开「部署监控」或重启应用以恢复。`,
-          dismissible: false,
+          dismissible: true,
         })
       })
 
