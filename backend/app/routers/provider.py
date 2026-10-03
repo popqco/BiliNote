@@ -17,6 +17,8 @@ class ProviderRequest(BaseModel):
     base_url: str
     logo: Optional[str] = None
     type: str
+    # 供应商 API 协议："chat"（默认 Chat Completions）| "responses"
+    api_format: Optional[str] = None
 
 class TestRequest(BaseModel):
     id: str
@@ -30,6 +32,7 @@ class ProviderUpdateRequest(BaseModel):
     logo: Optional[str] = None
     type: Optional[str] = None
     enabled:Optional[int] = None
+    api_format: Optional[str] = None
 
 @router.post("/add_provider")
 def add_provider(data: ProviderRequest):
@@ -39,7 +42,8 @@ def add_provider(data: ProviderRequest):
             api_key=data.api_key,
             base_url=data.base_url,
             logo=data.logo,
-            type_=data.type
+            type_=data.type,
+            api_format=data.api_format or 'chat',
         )
         return R.success(msg='添加模型供应商成功',data=res)
     except Exception as e:
@@ -75,7 +79,7 @@ def update_provider(data: ProviderUpdateRequest):
     try:
         if all(
             field is None
-            for field in [data.name, data.api_key, data.base_url, data.logo, data.type,data.enabled]
+            for field in [data.name, data.api_key, data.base_url, data.logo, data.type,data.enabled,data.api_format]
         ):
             return R.error(msg='请至少填写一个参数')
 

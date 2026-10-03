@@ -50,6 +50,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         apiKey: item.api_key,
         baseUrl: item.base_url,
         type: item.type,
+        apiFormat: (item as Record<string, unknown>).api_format as string | undefined,
         enabled: item.enabled,
       }
 
@@ -59,6 +60,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
       ...provider,
       api_key: provider.apiKey,
       base_url: provider.baseUrl,
+      api_format: provider.apiFormat || 'chat',
     }
     try {
       const res = await addProvider(payload)
@@ -84,6 +86,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         ...merged,
         api_key: merged.apiKey,
         base_url: merged.baseUrl,
+        api_format: merged.apiFormat || 'chat',
       }
       // 拦截器已解包：成功时直接返回 data 部分
       await updateProviderById(data)

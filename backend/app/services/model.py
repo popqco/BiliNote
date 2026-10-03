@@ -167,6 +167,7 @@ class ModelService:
             api_key=provider.get('api_key'),
             base_url=provider.get('base_url'),
             model=model,
+            api_format=provider.get('api_format') or 'chat',
         )
         if ok:
             return True

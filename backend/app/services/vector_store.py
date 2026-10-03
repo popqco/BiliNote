@@ -162,50 +162,89 @@ def _query_bigrams(query_text: str) -> list[str]:
     return [cleaned[i : i + 2] for i in range(len(cleaned) - 1)]
 
 
-def _lexical_rerank(
+def _select_cross_top(
     query_text: str, candidates: list[dict], top_k: int
 ) -> list[dict]:
-    """候选内 IDF 加权二元组重排：关键词命中的候选优先，
-    词面完全不沾边的候选直接丢弃。
+    """跨查候选统一筛选（全局路径与回退路径共用，保证来源纯净度一致）。
 
-    （2026-10-03 实测：同样 30 候选，“监视器的价格是多少”经同义词归一后，
-    “5. 专业剧组与租赁商价值”（含 8999 元定价）lex 排第一，而香水笔记
-    的邻苯价格片段因二元组不命中被压到后面；纯 embedding 距离则把两者
-    混在一起 0.5391 vs 0.5393 无法区分。）
-    截断规则：只在最佳命中足够强（>= _LEX_MIN_BEST）时启用，
-    保留 lex >= 最佳 * _LEX_RATIO 的候选；泛问（lex 普遍低）保持
-    原 embedding 顺序，避免误杀。
-    其余问题（同义词外）保持原 embedding 顺序。
+    1) 词面重排优先：问题有明确关键词（最佳 lex >= _LEX_MIN_BEST）时，
+       只保留词面命中达最佳一半的候选——**无关笔记的片段在这一步被剔除**，
+       哪怕它的 embedding 距离离问题更近。
+    2) 词面通过后再过一道宽松距离闸（_CROSS_LOOSE_MARGIN，相对词面命中
+       候选里的最佳距离），防止纯词面碰巧命中把语义上离题的片段捞回来。
+    3) 泛问回退（词面普遍弱）：退回 embedding 距离 + CROSS_MARGIN 截断，
+       保持旧行为。
+
+    （2026-10-03 复盘用户实拍 bug：“猛玛极影7 ultra…价格…”问句 30 候选里，
+    旧逻辑先用 CROSS_MARGIN=0.1 的距离截断再词面重排，导致词面最强、
+    含 8999 元定价的“5. 专业剧组与租赁商价值”（距离 0.4234，超出 margin）
+    被误杀，只剩 intro 弱相关块；而 HNSW 故障回退路径则每篇硬塞配额，
+    香水笔记噪音直接混进引用来源。词面优先后两问题同解。）
     """
+    if not candidates:
+        return []
     query_text = _normalize_query_text(query_text)
     q_bigrams = set(_query_bigrams(query_text))
-    if not q_bigrams or not candidates:
-        return candidates[:top_k]
-    n = len(candidates)
-    doc_sets = [set(_bigrams(_normalize_query_text(c.get("text", "")))) for c in candidates]
-    df: dict[str, int] = {}
-    for s in doc_sets:
-        for b in s:
-            df[b] = df.get(b, 0) + 1
-    idf = {b: math.log(1 + n / c) for b, c in df.items()}
-    scored = []
-    for cand, s in zip(candidates, doc_sets):
-        lex = sum(idf.get(b, 0.0) for b in q_bigrams if b in s)
-        scored.append((lex, cand))
-    best_lex = max(s for s, _ in scored)
-    if best_lex < _LEX_MIN_BEST:
-        return candidates[:top_k]
-    scored.sort(
-        key=lambda item: (
-            -item[0],
-            item[1].get("distance")
-            if item[1].get("distance") is not None
-            else float("inf"),
-        )
+    if q_bigrams:
+        n = len(candidates)
+        doc_sets = [set(_bigrams(_normalize_query_text(c.get("text", "")))) for c in candidates]
+        df: dict[str, int] = {}
+        for s in doc_sets:
+            for b in s:
+                df[b] = df.get(b, 0) + 1
+        idf = {b: math.log(1 + n / c) for b, c in df.items()}
+        scored = []
+        for cand, s in zip(candidates, doc_sets):
+            lex = sum(idf.get(b, 0.0) for b in q_bigrams if b in s)
+            scored.append((lex, cand))
+        best_lex = max(s for s, _ in scored)
+        if best_lex >= _LEX_MIN_BEST:
+            cutoff = best_lex * _LEX_RATIO
+            # 距离闸以“词面命中候选”的最佳距离为基准，而不是全体候选的
+            # 最佳距离：无关笔记可能偶然离问题更近，用它会把真命中卡掉。
+            base = min(
+                (
+                    c["distance"]
+                    for _, c in scored
+                    if c.get("distance") is not None
+                ),
+                default=None,
+            )
+            lex_kept = [
+                (lex, cand)
+                for lex, cand in scored
+                if lex >= cutoff
+                and (
+                    cand.get("distance") is None
+                    or base is None
+                    or cand["distance"] - base <= _CROSS_LOOSE_MARGIN
+                )
+            ]
+            if lex_kept:
+                kept = [c for _, c in lex_kept]
+                kept.sort(
+                    key=lambda c: c.get("distance")
+                    if c.get("distance") is not None
+                    else float("inf")
+                )
+                return kept[:top_k]
+            # 词面命中全部被距离闸拦下：保底给词面最强的单条，宁可少给
+            # 也不给噪音。
+            best_pair = max(scored, key=lambda item: item[0])
+            return [best_pair[1]]
+    ranked = sorted(
+        candidates,
+        key=lambda c: c["distance"] if c.get("distance") is not None else 0,
     )
-    cutoff = best_lex * _LEX_RATIO
-    filtered = [c for lex, c in scored if lex >= cutoff]
-    return (filtered or [scored[0][1]])[:top_k]
+    best = ranked[0].get("distance")
+    if best is None:
+        return candidates[:top_k]
+    kept = [
+        c
+        for c in ranked
+        if c.get("distance") is None or c["distance"] - best <= CROSS_MARGIN
+    ]
+    return kept[:top_k]
 
 
 GLOBAL_COLLECTION_NAME = "all_notes"
@@ -229,6 +268,10 @@ MAX_CROSS_NOTES = 50
 # 截断只保留 lex >= 最佳 * 0.5 的候选，词面不沾边的直接丢弃。
 _LEX_MIN_BEST = 2.0
 _LEX_RATIO = 0.5
+# 词面过滤通过后附加的宽松距离闸：相对“词面命中候选”的最佳距离。
+# 比主距离闸（CROSS_MARGIN=0.1）松——词面已经证明强相关，这里只拦
+# 语义上明显跑题的纯词面巧合（如问句里常见的“价格”二字）。
+_CROSS_LOOSE_MARGIN = 0.25
 
 
 def _note_title(note_data: dict, task_id: str) -> str:
@@ -427,10 +470,11 @@ class VectorStoreManager:
         """跨笔记检索：全局按语义距离统一召回 Top-K，不过滤出自哪篇笔记。
 
         ``task_ids`` 为空/None 时查全部已索引笔记；否则只查给定笔记。
-        候选按 distance 升序截断 + 弱相关丢弃：无关笔记的片段不会被
+        候选先过词面重排（_select_cross_top）：无关笔记的片段不会被
         硬塞进上下文，来源数量即实际被引用的片段数。
-        全局集合读失败（多写者并发的 HNSW 瞬态错）时回退到各单篇集合
-        的配额召回，保证问答仍有来源而不是直接 0 条。
+        全局集合读失败（多写者并发的 HNSW 瞬态错）时先尝试原地重建全局
+        集合并重查一次；仍失败则回退到各单篇集合召回 + 同一套筛选，
+        保证问答仍有来源且来源纯净度不打折。
         """
         try:
             collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)
@@ -445,34 +489,104 @@ class VectorStoreManager:
                 return []
             where = {"task_id": {"$in": task_ids}}
 
+        chunks = self._try_query_global(collection, query_text, where)
+        if chunks is None:
+            # 全局集合坏了（典型：多进程写入后 HNSW 段失效，查询报
+            # "Error creating hnsw index"）：先重建再试一次，重建失败
+            # 或仍查不动才降级到单篇集合。
+            logger.warning("全局集合查询失败，尝试重建后重查")
+            if self._rebuild_global_from_per_note():
+                try:
+                    collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)
+                    chunks = self._try_query_global(collection, query_text, where)
+                except Exception as e:
+                    logger.warning(f"重建后重查仍失败: {e}")
+                    chunks = None
+            if chunks is None:
+                return self._query_cross_fallback(query_text, task_ids)
+
+        if not chunks:
+            return []
+        return _select_cross_top(query_text, chunks, CROSS_TOP_K)
+
+    def _try_query_global(
+        self, collection, query_text: str, where: Optional[dict]
+    ) -> Optional[list[dict]]:
+        """执行全局集合查询，任何异常都吞掉返回 None（需重建/回退）。"""
+        try:
+            return self._query_global(collection, query_text, where)
+        except Exception as e:
+            logger.warning(f"全局集合查询失败: {e}")
+            return None
+
+    def _query_global(
+        self, collection, query_text: str, where: Optional[dict]
+    ) -> Optional[list[dict]]:
+        """执行全局集合查询。返回 None 表示查询失败（需重建/回退）。"""
         try:
             results = collection.query(
                 query_texts=[_normalize_query_text(query_text)],
                 n_results=CROSS_CANDIDATES,
                 where=where,
             )
+            return self._parse_results(results)
         except Exception as e:
-            logger.warning(f"跨笔记检索失败，回退单篇集合: {e}")
-            return self._query_cross_fallback(query_text, task_ids)
+            logger.warning(f"全局集合查询失败: {e}")
+            return None
 
-        chunks = self._parse_results(results)
-        if not chunks:
-            return []
-        # 按距离升序：与最佳候选差距超过 CROSS_MARGIN 的视为弱相关丢弃，
-        # 再取 Top-K。无关笔记的片段不会被硬塞进上下文。
-        ranked = sorted(
-            chunks,
-            key=lambda c: c["distance"] if c.get("distance") is not None else 0,
-        )
-        best = ranked[0].get("distance")
-        if best is None:
-            return _lexical_rerank(query_text, ranked, CROSS_TOP_K)
-        kept = [
-            c
-            for c in ranked
-            if c.get("distance") is None or c["distance"] - best <= CROSS_MARGIN
-        ]
-        return _lexical_rerank(query_text, kept, CROSS_TOP_K)
+    def _rebuild_global_from_per_note(self) -> bool:
+        """从各单篇集合重建全局 ``all_notes``（多进程写入后 HNSW 段
+        失效的自愈路径：段文件坏掉时查询必挂，而单篇集合是好的——
+        直接把单篇内容搬回全局集合，比重新嵌入全文便宜且不依赖笔记文件）。
+        """
+        try:
+            docs: list[str] = []
+            metas: list[dict] = []
+            ids: list[str] = []
+            title_cache: dict[str, str] = {}
+            for col in self._client.list_collections():
+                name = col.name if hasattr(col, "name") else str(col)
+                if name == GLOBAL_COLLECTION_NAME:
+                    continue
+                try:
+                    got = self._client.get_collection(name).get(limit=10000)
+                except Exception:
+                    continue
+                documents = got.get("documents") or []
+                if not documents:
+                    continue
+                title = self._fallback_note_title(name, title_cache)
+                for doc, meta, cid in zip(
+                    documents, got.get("metadatas") or [], got.get("ids") or []
+                ):
+                    docs.append(doc)
+                    metas.append(
+                        {**(meta or {}), "task_id": name, "note_title": title}
+                    )
+                    ids.append(f"{name}:{cid}")
+            if not docs:
+                return False
+            try:
+                self._client.delete_collection(GLOBAL_COLLECTION_NAME)
+            except Exception:
+                pass
+            collection = self._client.create_collection(
+                name=GLOBAL_COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+            # 分批写，避免大库一次 add 超时
+            batch = 200
+            for i in range(0, len(docs), batch):
+                collection.add(
+                    documents=docs[i : i + batch],
+                    metadatas=metas[i : i + batch],
+                    ids=ids[i : i + batch],
+                )
+            logger.info(f"全局集合重建完成: chunks={len(docs)}")
+            return True
+        except Exception as e:
+            logger.warning(f"全局集合重建失败: {e}")
+            return False
 
     def _local_note_task_ids(self) -> list:
         """扫描笔记目录兜底拿 task_id（全局集合不可读、indexed 为空时用）。"""
@@ -514,12 +628,16 @@ class VectorStoreManager:
     def _query_cross_fallback(
         self, query_text: str, task_ids: Optional[list]
     ) -> list[dict]:
-        """全局集合不可读时的降级：逐篇查单篇集合，按原配额召回。
+        """全局集合不可读时的降级：逐篇查单篇集合。
+
+        旧版按篇配额召回后轮询合并——每篇硬塞 meta1/md2/tr3，无关笔记的
+        弱相关片段必然混进引用来源（2026-10-03 用户实拍：问猛玛价格，
+        引用一半来自香水笔记）。现在合并全部候选后走与全局路径相同的
+        ``_select_cross_top`` 筛选，噪音在词面/距离两道闸被剔掉。
 
         单篇集合的 metadata 没有 task_id/note_title（历史行为），这里补上，
-        否则来源 badge 丢跨篇标记、点击跳转无目标——这就是“引用直接没了”
-        的第二层成因。全局集合本身不可读时 indexed_task_ids 同样不可信，
-        再退一层直接扫描笔记目录拿 task_id。
+        否则来源 badge 丢跨篇标记、点击跳转无目标。全局集合本身不可读时
+        indexed_task_ids 同样不可信，再退一层直接扫描笔记目录拿 task_id。
         """
         if task_ids is None:
             task_ids = []
@@ -530,27 +648,20 @@ class VectorStoreManager:
             if not task_ids:
                 task_ids = self._local_note_task_ids()
         title_cache: dict[str, str] = {}
-        per_note: list[list[dict]] = []
+        merged: list[dict] = []
         for tid in (task_ids or [])[:MAX_CROSS_NOTES]:
             chunks = self.query(tid, _normalize_query_text(query_text), n_results=6)
-            if chunks:
-                for c in chunks:
-                    meta = c.setdefault("metadata", {})
-                    meta.setdefault("task_id", tid)
-                    if not meta.get("note_title"):
-                        meta["note_title"] = self._fallback_note_title(
-                            tid, title_cache
-                        )
-                per_note.append(chunks)
-        # 按篇轮取，保证多篇都有代表且总数不超过 Top-K
-        merged: list[dict] = []
-        for i in range(CROSS_TOP_K):
-            for chunks in per_note:
-                if i < len(chunks):
-                    merged.append(chunks[i])
-                if len(merged) >= CROSS_TOP_K:
-                    return merged
-        return merged
+            if not chunks:
+                continue
+            for c in chunks:
+                meta = c.setdefault("metadata", {})
+                meta.setdefault("task_id", tid)
+                if not meta.get("note_title"):
+                    meta["note_title"] = self._fallback_note_title(
+                        tid, title_cache
+                    )
+            merged.extend(chunks)
+        return _select_cross_top(query_text, merged, CROSS_TOP_K)
 
     def indexed_task_ids(self, limit: int = MAX_CROSS_NOTES) -> list:
         """返回全局索引中已建索引的 task_id 列表（按写入顺序去重）。"""

@@ -145,6 +145,51 @@ class TestCrossNoteQA(unittest.TestCase):
         self.assertIn("task-aaa-physics", task_ids)
         self.assertNotIn("task-bbb-cooking", task_ids)
 
+    def test_fallback_path_pure(self):
+        """全局路径与重建都失败时，回退路径也不掺无关笔记。
+
+        （2026-10-03 用户实拍 bug：旧回退按篇配额召回后轮询合并，
+        问 A 笔记的问题引用里混进 B 笔记片段。修复后回退与全局路径
+        共用同一套词面/距离筛选，噪音在合并后被剔掉。）
+        """
+        store = self.store
+        store._query_global = lambda collection, q, where: None
+        store._rebuild_global_from_per_note = lambda: False
+        try:
+            chunks = store.query_cross("量子纠缠叠加态实验验证")
+        finally:
+            del store._query_global
+            del store._rebuild_global_from_per_note
+        self.assertTrue(chunks)
+        task_ids = {c["metadata"].get("task_id") for c in chunks}
+        self.assertNotIn("task-bbb-cooking", task_ids)
+        for c in chunks:
+            self.assertTrue(c["metadata"].get("note_title"))
+
+    def test_query_self_heals_broken_global(self):
+        """全局集合查询瞬态失败（HNSW 错）时：重建一次→重查成功，
+        不需要降级到回退路径，结果仍带跨篇来源标记。"""
+        store = self.store
+        real_query = store._query_global
+        calls = {"n": 0}
+
+        def flaky(collection, query_text, where):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # _query_global 内部吞异常返回 None，这里模拟坏段
+                raise RuntimeError("Error creating hnsw index (simulated)")
+            return real_query(collection, query_text, where)
+
+        store._query_global = flaky
+        try:
+            chunks = store.query_cross("量子纠缠叠加态实验验证")
+        finally:
+            del store._query_global
+        self.assertEqual(calls["n"], 2)  # 第一次失败 + 重建后重查
+        self.assertTrue(chunks)
+        for c in chunks:
+            self.assertEqual(c["metadata"].get("task_id"), "task-aaa-physics")
+
     def test_query_with_task_ids_routes_to_global(self):
         """query(task_ids=...) 走全局索引并带来源标记。"""
         chunks = self.store.query(

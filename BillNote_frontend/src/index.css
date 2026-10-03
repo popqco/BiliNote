@@ -210,27 +210,7 @@ html, body, #root {
   background-color: transparent;
 }
 
-/* AI 问答输入框（@ant-design/x Sender）暗色适配：组件按 antd 晴色系
-   token（colorBgContainer 等浅底）生成样式，不读项目的 --background，
-   .dark 下输入区会呈现“浅底 + 浅字”，对比度不足看不清字。
-   这里用浅灰底 + 深灰字固定输入区配色，两套主题下都可读。 */
-.dark .ant-sender {
-  background-color: #f5f5f5;
-  border-color: oklch(1 0 0 / 20%);
-  color: #262626;
-}
-.dark .ant-sender .ant-sender-content {
-  background-color: transparent;
-}
-.dark .ant-sender .ant-sender-input,
-.dark .ant-sender .ant-input {
-  background-color: transparent;
-  color: #262626;
-}
-.dark .ant-sender .ant-input::placeholder,
-.dark .ant-sender textarea::placeholder {
-  color: #8c8c8c;
-}
-.dark .ant-sender .ant-btn {
-  color: #262626;
-}
+/* AI 问答（@ant-design/x Bubble / Sender）的暗色适配已上移到
+   AntdThemeProvider：根上按 next-themes 切 antd darkAlgorithm，
+   token 级跟随明暗主题。旧的 .dark .ant-sender 浅灰覆盖 hack 已删——
+   它把输入区钉成 #f5f5f5（近白），深色模式下就是用户抱怨的“白框”。 */

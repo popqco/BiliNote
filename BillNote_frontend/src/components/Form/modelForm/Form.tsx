@@ -36,6 +36,9 @@ const ProviderSchema = z.object({
   apiKey: z.string().optional(),
   baseUrl: z.string().url('必须是合法 URL'),
   type: z.string(),
+  // 供应商 API 协议：chat=Chat Completions（绝大多数 OpenAI 兼容供应商）；
+  // responses=OpenAI Responses（OpenCode 系网关等只提供该协议，走 chat 会 502）
+  apiFormat: z.string(),
 })
 
 type ProviderFormValues = z.infer<typeof ProviderSchema>
@@ -84,6 +87,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       apiKey: '',
       baseUrl: '',
       type: 'custom',
+      apiFormat: 'chat',
     },
   })
   const filteredModelOptions = modelOptions.filter(model => {
@@ -105,7 +109,10 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       if (isEditMode) {
 
         const data = await loadProviderById(id!)
-        providerForm.reset(data)
+        providerForm.reset({
+          ...data,
+          apiFormat: (data as Record<string, unknown>)?.apiFormat as string || 'chat',
+        })
         setIsBuiltIn(data.type === 'built-in')
       } else {
         providerForm.reset({
@@ -113,6 +120,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           apiKey: '',
           baseUrl: '',
           type: 'custom',
+          apiFormat: 'chat',
         })
         setIsBuiltIn(false)
       }
@@ -284,6 +292,31 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
                 <Button type="button" onClick={handleTest} variant="ghost" disabled={testing}>
                   {testing ? '测试中...' : '测试连通性'}
                 </Button>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={providerForm.control}
+            name="apiFormat"
+            render={({ field }) => (
+              <FormItem className="flex items-center gap-4">
+                <FormLabel className="w-24 text-right shrink-0">API 格式</FormLabel>
+                <div className="flex-1">
+                  <Select value={field.value} onValueChange={field.onChange} disabled={isBuiltIn}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="选择 API 格式" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="chat">Chat Completions（默认）</SelectItem>
+                      <SelectItem value="responses">Responses（OpenCode 等网关）</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    只提供 OpenAI Responses 接口的网关（如 OpenCode Free 本地代理）选
+                    Responses，否则调用会报 502；普通 OpenAI 兼容供应商保持默认即可。
+                  </p>
+                </div>
                 <FormMessage />
               </FormItem>
             )}

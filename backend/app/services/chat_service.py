@@ -78,6 +78,36 @@ def _build_sources(chunks: list[dict]) -> list[dict]:
     return sources
 
 
+def _call_llm(gpt, messages: list, use_tools: bool):
+    """单轮 LLM 调用，带两层就地降级。
+
+    免费推理模型（muse-spark 等）常见两类不兼容：不接受自定义
+    temperature、不支持 function calling——直接把原始报错抛给用户只会
+    让人以为“模型坏了”。这里识别这两类报错后去掉对应参数重试一次；
+    去掉 tools 后模型不会再回工具调用，本轮直接当最终回答返回。
+    """
+    kwargs = {"model": gpt.model, "messages": messages}
+    if use_tools:
+        kwargs["tools"] = TOOLS
+    try:
+        return gpt.client.chat.completions.create(temperature=0.7, **kwargs)
+    except Exception as exc:
+        raw = str(exc).lower()
+        if "temperature" in raw and (
+            "does not support" in raw or "unsupported" in raw or "only the default" in raw
+        ):
+            logger.warning(f"模型 {gpt.model} 不支持自定义 temperature，去参重试")
+            return gpt.client.chat.completions.create(**kwargs)
+        if use_tools and ("tool" in raw or "function" in raw):
+            logger.warning(
+                f"模型 {gpt.model} 疑似不支持 tools（{str(exc)[:150]}），去工具重试"
+            )
+            return gpt.client.chat.completions.create(
+                **{k: v for k, v in kwargs.items() if k != "tools"}
+            )
+        raise
+
+
 def chat(
     task_id: str,
     question: str,
@@ -129,6 +159,7 @@ def chat(
         model_name=model_name,
         provider=provider["type"],
         name=provider["name"],
+        api_format=provider.get("api_format") or "chat",
     )
     gpt = GPTFactory.from_config(config)
 
@@ -137,12 +168,7 @@ def chat(
     # 4. Tool calling 循环（最多 3 轮）
     max_rounds = 3
     for round_i in range(max_rounds):
-        response = gpt.client.chat.completions.create(
-            model=gpt.model,
-            messages=messages,
-            tools=TOOLS,
-            temperature=0.7,
-        )
+        response = _call_llm(gpt, messages, use_tools=True)
 
         msg = response.choices[0].message
 
@@ -172,10 +198,6 @@ def chat(
             })
 
     # 超过最大轮次，做最后一次不带 tools 的调用
-    response = gpt.client.chat.completions.create(
-        model=gpt.model,
-        messages=messages,
-        temperature=0.7,
-    )
+    response = _call_llm(gpt, messages, use_tools=False)
 
     return {"answer": response.choices[0].message.content or "", "sources": sources}
