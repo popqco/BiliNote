@@ -1123,6 +1123,31 @@ def active_task_for_video(video_id: str) -> Optional[str]:
     return None
 
 
+def release_stale_active_task(task_id: str) -> bool:
+    """内存登记 vs 磁盘终态对齐（P1-①：双事实源脱节收敛）。
+
+    磁盘 `{task_id}.status.json` 与内存 `_active_tasks` 是双事实源、无对齐：
+    用户看到失败卡片（读磁盘），点重试却被内存登记拦回（读内存）。
+    内存命中但磁盘已是终态（SUCCESS/FAILED）→ 登记是僵尸，清掉并返回 True
+    （调用方放行走正常重试流程）；否则返回 False（调用方保持 400 拦截）。
+
+    磁盘文件缺失/损坏时保守返回 False——宁可多拦一次，不放行覆盖真在跑的任务。
+    """
+    if not task_id or not is_task_active(task_id):
+        return False
+    data = _read_status_file(NOTE_OUTPUT_DIR / f"{task_id}.status.json")
+    if not data:
+        return False
+    if data.get("status") in TERMINAL_STATUSES:
+        logger.warning(
+            "清理僵尸任务登记：内存仍登记但磁盘已是终态 "
+            f"(task_id={task_id}, disk_status={data.get('status')})，放行重试"
+        )
+        mark_task_done(task_id)
+        return True
+    return False
+
+
 # ---------------- 任务删除 / 中断收敛 ----------------
 
 _TASK_ARTIFACT_SUFFIXES = (
