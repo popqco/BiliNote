@@ -24,7 +24,7 @@ import {
   askQuestion,
   backfillGlobalIndex,
   getChatStatus,
-  getIndexedTaskIds,
+  getIndexCoverage,
   indexTask,
   type ChatScope,
   type ChatSource,
@@ -130,7 +130,10 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null)
-  const [indexedCount, setIndexedCount] = useState<number | null>(null)
+  // 覆盖率：已索引数 / 笔记总数。之前只拿 /chat/indexed 默认 limit=50 的
+  // 列表长度当"已覆盖 N 篇"，笔记一多数字就对不上（用户实拍：只显示 9 篇）。
+  // 现在走 /chat/coverage 的真实统计，补建按钮按缺失数提示。
+  const [coverage, setCoverage] = useState<{ indexed: number; total: number } | null>(null)
   const [backfilling, setBackfilling] = useState(false)
 
   const scope = useChatStore(state => state.scope)
@@ -163,8 +166,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     }
   }, [modelList, chatModelName, setChatModelName])
 
-  // 检查索引状态，未索引时自动触发，indexing 时轮询
-  // 全部笔记模式额外拉取全局已索引数；若历史笔记缺全局索引则自动补建
+  // 检查索引状态，未索引时自动触发，indexing 时轮询。
+  // 全部笔记模式：覆盖率走 /chat/coverage 真实统计；若当前笔记已索引但
+  // 全局缺口大（缺失>0 且已索引<=1），自动补建一次历史索引。
+  // 注意轮询只跟当前 taskId 走：切笔记会重跑本 effect，先查新笔记的
+  // 单篇状态（idle→自动索引→转圈），这是切笔记后转圈的来源，属正常；
+  // 覆盖率与补建只在 scope==='all' 时跑，不阻塞单篇问答。
   useEffect(() => {
     if (!taskId) return
     let cancelled = false
@@ -172,13 +179,15 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
 
     const poll = async () => {
       try {
-        const [res, ids] = await Promise.all([
+        const [res, cov] = await Promise.all([
           getChatStatus(taskId),
-          getIndexedTaskIds().catch(() => [] as string[]),
+          scope === 'all'
+            ? getIndexCoverage().catch(() => null)
+            : Promise.resolve(null),
         ])
         if (cancelled) return
         setIndexStatus(res.status)
-        setIndexedCount(ids.length)
+        if (cov) setCoverage({ indexed: cov.indexed, total: cov.total_notes })
 
         if (res.status === 'idle') {
           // 未索引，触发后台索引
@@ -186,8 +195,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           if (!cancelled) setIndexStatus('indexing')
         }
 
-        // 当前笔记已索引、但全局索引为空：历史笔记缺全局索引，自动补建一次
-        if (scope === 'all' && res.status === 'indexed' && ids.length <= 1) {
+        // 当前笔记已索引、但全局几乎是空的：历史笔记缺全局索引，自动补建一次
+        if (scope === 'all' && res.status === 'indexed' && cov && cov.missing.length > 0 && cov.indexed <= 1) {
           try {
             setBackfilling(true)
             await backfillGlobalIndex()
@@ -196,9 +205,9 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           } finally {
             if (!cancelled) {
               setBackfilling(false)
-              getIndexedTaskIds()
+              getIndexCoverage()
                 .then(next => {
-                  if (!cancelled) setIndexedCount(next.length)
+                  if (!cancelled && next) setCoverage({ indexed: next.indexed, total: next.total_notes })
                 })
                 .catch(() => {})
             }
@@ -430,16 +439,45 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           )}
         </div>
       </div>
-      {/* 范围提示条 */}
+      {/* 范围提示条：覆盖率来自 /chat/coverage 真实统计（已索引/笔记总数）。
+          数字对不上时的三种正常原因：① 刚装好/刚升级，历史笔记还没建过索引，
+          点"补建索引"即可；② 笔记很多时补建是后台逐个跑，数字会慢慢涨；
+          ③ 已删除笔记的索引会被清理。补建不阻塞提问，单篇索引仍可用。 */}
       {scope === 'all' && (
         <div className="border-b px-3 py-1 text-xs text-muted-foreground">
           {backfilling
-            ? '正在为历史笔记补建索引…'
-            : indexedCount === null
+            ? '正在为历史笔记补建索引…（可在后台慢慢跑，不影响提问）'
+            : coverage === null
               ? '正在统计已索引笔记…'
-              : indexedCount <= 1
-                ? '暂无其他已索引笔记，可先提问，历史笔记会自动补索引'
-                : `已覆盖 ${indexedCount} 篇笔记（含当前）`}
+              : coverage.total === 0
+                ? '暂无笔记可索引'
+                : coverage.indexed >= coverage.total
+                  ? `已覆盖全部 ${coverage.total} 篇笔记`
+                  : (
+                    <span>
+                      {`已索引 ${coverage.indexed} / 共 ${coverage.total} 篇笔记`}
+                      <button
+                        className="ml-2 underline hover:text-foreground"
+                        onClick={async () => {
+                          try {
+                            setBackfilling(true)
+                            await backfillGlobalIndex()
+                          } catch {
+                            /* 补索引失败不阻塞问答 */
+                          } finally {
+                            setBackfilling(false)
+                            getIndexCoverage()
+                              .then(next => {
+                                if (next) setCoverage({ indexed: next.indexed, total: next.total_notes })
+                              })
+                              .catch(() => {})
+                          }
+                        }}
+                      >
+                        补建索引
+                      </button>
+                    </span>
+                  )}
         </div>
       )}
 

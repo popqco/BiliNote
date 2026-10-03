@@ -48,9 +48,20 @@ export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse>
   return await request.get(`/chat/status?task_id=${taskId}`)
 }
 
-export const getIndexedTaskIds = async (): Promise<string[]> => {
-  const res = await request.get('/chat/indexed')
+export const getIndexedTaskIds = async (limit = 200): Promise<string[]> => {
+  const res = await request.get(`/chat/indexed?limit=${limit}`)
   return (res?.task_ids ?? []) as string[]
+}
+
+export interface IndexCoverage {
+  indexed: number
+  total_notes: number
+  missing: string[]
+}
+
+/** 覆盖率统计：已索引数 / 笔记总数 / 缺失 task_id（供提示条展示）。 */
+export const getIndexCoverage = async (): Promise<IndexCoverage> => {
+  return await request.get('/chat/coverage')
 }
 
 export const backfillGlobalIndex = async (): Promise<void> => {

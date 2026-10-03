@@ -144,7 +144,11 @@ def ask_question(data: AskRequest):
 
 @router.get("/chat/indexed")
 def indexed_tasks(limit: int = 50):
-    """返回全局索引中已建索引的 task_id 列表（供跨笔记范围提示）。"""
+    """返回全局索引中已建索引的 task_id 列表（供跨笔记范围提示）。
+
+    注意默认 limit=50 是历史值：笔记超过 50 篇时前端拿到的列表不全，
+    覆盖数显示会偏小。前端应传 limit=200（上限）拿全量。
+    """
     try:
         limit = max(1, min(int(limit), 200))
     except Exception:
@@ -155,6 +159,31 @@ def indexed_tasks(limit: int = 50):
     except Exception as e:
         logger.error(f"查询全局索引失败: {e}")
         return R.success(data={"task_ids": []})
+
+
+@router.get("/chat/coverage")
+def index_coverage():
+    """覆盖率统计：已索引数 / 笔记总数 / 缺失 task_id（供前端提示条展示）。
+
+    total_notes 扫 note_results/*.json（结果文件在即笔记在）；
+    indexed 读全局 all_notes 的 task_id 去重。缺失的由前端一键补建。
+    """
+    try:
+        store = VectorStoreManager()
+        indexed = set(store.indexed_task_ids(limit=200))
+    except Exception as e:
+        logger.error(f"查询全局索引失败: {e}")
+        indexed = set()
+    try:
+        all_ids = set(store._local_note_task_ids())
+    except Exception:
+        all_ids = set()
+    missing = sorted(all_ids - indexed)
+    return R.success(data={
+        "indexed": len(indexed & all_ids),
+        "total_notes": len(all_ids),
+        "missing": missing,
+    })
 
 
 @router.post("/chat/backfill")
