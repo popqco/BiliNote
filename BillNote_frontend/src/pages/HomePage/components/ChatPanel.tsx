@@ -251,8 +251,10 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           content: res.answer,
           sources: res.sources,
         })
-      } catch {
-        toast.error('问答请求失败')
+      } catch (e: any) {
+        // 后端 R.error 透出的 msg（含模型/供应商/上游原话）优先展示，
+        // 否则用户看到的永远是“问答请求失败”，无法定位是哪一环坏了。
+        toast.error(e?.msg || e?.message || '问答请求失败')
       } finally {
         setLoading(false)
       }

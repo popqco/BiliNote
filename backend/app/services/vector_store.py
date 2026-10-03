@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from typing import Optional
@@ -12,6 +13,12 @@ logger = get_logger(__name__)
 
 NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 VECTOR_DB_DIR = os.getenv("VECTOR_DB_DIR", "vector_db")
+
+# 同一进程内复用 PersistentClient：之前每次请求 new 一个 client，
+# 多实例并发读写同一 sqlite 会间歇性报
+# "HNSW segment reader: Nothing found on disk"，问答直接变 0 来源。
+# 复用单例后 contention 消失；即使仍抛错，query_cross 也会回退到单篇集合。
+_SHARED_CLIENTS: dict[str, object] = {}
 
 
 def _clean_section_title(title: str) -> str:
@@ -123,6 +130,84 @@ def _build_meta_chunk(audio_meta: dict) -> list[dict]:
     }]
 
 
+# 价格/费用类同义词：检索前统一成“价格”，否则 embedding 容易把
+# “售价/定价/多少钱”问法与“价格”正文错开，无关笔记趁机挤进 Top-K。
+_PRICE_SYNONYMS = ["售价", "定价", "报价", "费用", "多少钱", "价位", "价钱"]
+
+
+def _normalize_query_text(query_text: str) -> str:
+    """把价格类问法统一成“价格”，提升跨笔记向量召回的稳定性。"""
+    for variant in _PRICE_SYNONYMS:
+        query_text = query_text.replace(variant, "价格")
+    return query_text
+
+
+def _bigrams(text: str) -> list[str]:
+    """中文按字切二元组（纯标点/空白分段丢弃），用于候选内的关键词重排。"""
+    out: list[str] = []
+    for span in re.findall(r"[一-鿿0-9a-zA-Z]+", text):
+        if len(span) < 2:
+            continue
+        for i in range(len(span) - 1):
+            out.append(span[i : i + 2])
+    return out
+
+
+def _query_bigrams(query_text: str) -> list[str]:
+    """从问题中提取有区分度的二元组：去掉“是多少/是什么”等疑问尾巴；
+    剩下按字切，单字段直接丢弃（无区分度）。"""
+    cleaned = re.sub(r"(是多少|是什么|有哪些|怎么样|如何)$", "", query_text.strip())
+    if len(cleaned) < 2:
+        return []
+    return [cleaned[i : i + 2] for i in range(len(cleaned) - 1)]
+
+
+def _lexical_rerank(
+    query_text: str, candidates: list[dict], top_k: int
+) -> list[dict]:
+    """候选内 IDF 加权二元组重排：关键词命中的候选优先，
+    词面完全不沾边的候选直接丢弃。
+
+    （2026-10-03 实测：同样 30 候选，“监视器的价格是多少”经同义词归一后，
+    “5. 专业剧组与租赁商价值”（含 8999 元定价）lex 排第一，而香水笔记
+    的邻苯价格片段因二元组不命中被压到后面；纯 embedding 距离则把两者
+    混在一起 0.5391 vs 0.5393 无法区分。）
+    截断规则：只在最佳命中足够强（>= _LEX_MIN_BEST）时启用，
+    保留 lex >= 最佳 * _LEX_RATIO 的候选；泛问（lex 普遍低）保持
+    原 embedding 顺序，避免误杀。
+    其余问题（同义词外）保持原 embedding 顺序。
+    """
+    query_text = _normalize_query_text(query_text)
+    q_bigrams = set(_query_bigrams(query_text))
+    if not q_bigrams or not candidates:
+        return candidates[:top_k]
+    n = len(candidates)
+    doc_sets = [set(_bigrams(_normalize_query_text(c.get("text", "")))) for c in candidates]
+    df: dict[str, int] = {}
+    for s in doc_sets:
+        for b in s:
+            df[b] = df.get(b, 0) + 1
+    idf = {b: math.log(1 + n / c) for b, c in df.items()}
+    scored = []
+    for cand, s in zip(candidates, doc_sets):
+        lex = sum(idf.get(b, 0.0) for b in q_bigrams if b in s)
+        scored.append((lex, cand))
+    best_lex = max(s for s, _ in scored)
+    if best_lex < _LEX_MIN_BEST:
+        return candidates[:top_k]
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            item[1].get("distance")
+            if item[1].get("distance") is not None
+            else float("inf"),
+        )
+    )
+    cutoff = best_lex * _LEX_RATIO
+    filtered = [c for lex, c in scored if lex >= cutoff]
+    return (filtered or [scored[0][1]])[:top_k]
+
+
 GLOBAL_COLLECTION_NAME = "all_notes"
 
 # 跨查全局召回规模：一次查多少候选，再按距离截断取 Top。
@@ -138,6 +223,12 @@ CROSS_MARGIN = 0.1
 
 # 单次跨查最多覆盖的笔记数（防 token 爆炸：配额按篇累加，上限兜底）
 MAX_CROSS_NOTES = 50
+
+# 词面重排的启用门限与截断比例（2026-10-03 按两篇验证笔记调参）：
+# 最佳命中 < 2.0 视为泛问（各候选词面都弱），不启用重排，保持 embedding 顺序；
+# 截断只保留 lex >= 最佳 * 0.5 的候选，词面不沾边的直接丢弃。
+_LEX_MIN_BEST = 2.0
+_LEX_RATIO = 0.5
 
 
 def _note_title(note_data: dict, task_id: str) -> str:
@@ -171,10 +262,17 @@ class VectorStoreManager:
 
     def __init__(self):
         os.makedirs(VECTOR_DB_DIR, exist_ok=True)
-        self._client = chromadb.PersistentClient(
-            path=VECTOR_DB_DIR,
-            settings=Settings(anonymized_telemetry=False),
-        )
+        # 同一进程复用 client：多实例并发读写同一 sqlite 会间歇性
+        # “HNSW segment reader: Nothing found on disk”。
+        abs_dir = os.path.abspath(VECTOR_DB_DIR)
+        client = _SHARED_CLIENTS.get(abs_dir)
+        if client is None:
+            client = chromadb.PersistentClient(
+                path=VECTOR_DB_DIR,
+                settings=Settings(anonymized_telemetry=False),
+            )
+            _SHARED_CLIENTS[abs_dir] = client
+        self._client = client
 
     def _collection_name(self, task_id: str) -> str:
         """ChromaDB collection 名称：直接使用 task_id（UUID 格式合法）。"""
@@ -331,6 +429,8 @@ class VectorStoreManager:
         ``task_ids`` 为空/None 时查全部已索引笔记；否则只查给定笔记。
         候选按 distance 升序截断 + 弱相关丢弃：无关笔记的片段不会被
         硬塞进上下文，来源数量即实际被引用的片段数。
+        全局集合读失败（多写者并发的 HNSW 瞬态错）时回退到各单篇集合
+        的配额召回，保证问答仍有来源而不是直接 0 条。
         """
         try:
             collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)
@@ -347,13 +447,13 @@ class VectorStoreManager:
 
         try:
             results = collection.query(
-                query_texts=[query_text],
+                query_texts=[_normalize_query_text(query_text)],
                 n_results=CROSS_CANDIDATES,
                 where=where,
             )
         except Exception as e:
-            logger.warning(f"跨笔记检索失败: {e}")
-            return []
+            logger.warning(f"跨笔记检索失败，回退单篇集合: {e}")
+            return self._query_cross_fallback(query_text, task_ids)
 
         chunks = self._parse_results(results)
         if not chunks:
@@ -366,13 +466,91 @@ class VectorStoreManager:
         )
         best = ranked[0].get("distance")
         if best is None:
-            return ranked[:CROSS_TOP_K]
+            return _lexical_rerank(query_text, ranked, CROSS_TOP_K)
         kept = [
             c
             for c in ranked
             if c.get("distance") is None or c["distance"] - best <= CROSS_MARGIN
         ]
-        return kept[:CROSS_TOP_K]
+        return _lexical_rerank(query_text, kept, CROSS_TOP_K)
+
+    def _local_note_task_ids(self) -> list:
+        """扫描笔记目录兜底拿 task_id（全局集合不可读、indexed 为空时用）。"""
+        try:
+            names = sorted(
+                f for f in os.listdir(NOTE_OUTPUT_DIR) if f.endswith(".json")
+            )
+        except OSError:
+            return []
+        out = []
+        for name in names:
+            if name.endswith(".status.json"):
+                continue
+            if "_transcript.json" in name or "_audio.json" in name:
+                continue
+            task_id = name[: -len(".json")]
+            if "_" in task_id:
+                continue
+            out.append(task_id)
+        return out
+
+    def _fallback_note_title(self, task_id: str, cache: dict) -> str:
+        """降级路径的标题查询：读笔记文件取标题，失败回 task_id 短写。"""
+        if task_id in cache:
+            return cache[task_id]
+        title = task_id[:8]
+        try:
+            with open(
+                os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"),
+                "r",
+                encoding="utf-8",
+            ) as f:
+                title = _note_title(json.load(f), task_id)
+        except Exception:
+            pass
+        cache[task_id] = title
+        return title
+
+    def _query_cross_fallback(
+        self, query_text: str, task_ids: Optional[list]
+    ) -> list[dict]:
+        """全局集合不可读时的降级：逐篇查单篇集合，按原配额召回。
+
+        单篇集合的 metadata 没有 task_id/note_title（历史行为），这里补上，
+        否则来源 badge 丢跨篇标记、点击跳转无目标——这就是“引用直接没了”
+        的第二层成因。全局集合本身不可读时 indexed_task_ids 同样不可信，
+        再退一层直接扫描笔记目录拿 task_id。
+        """
+        if task_ids is None:
+            task_ids = []
+            try:
+                task_ids = self.indexed_task_ids()
+            except Exception:
+                task_ids = []
+            if not task_ids:
+                task_ids = self._local_note_task_ids()
+        title_cache: dict[str, str] = {}
+        per_note: list[list[dict]] = []
+        for tid in (task_ids or [])[:MAX_CROSS_NOTES]:
+            chunks = self.query(tid, _normalize_query_text(query_text), n_results=6)
+            if chunks:
+                for c in chunks:
+                    meta = c.setdefault("metadata", {})
+                    meta.setdefault("task_id", tid)
+                    if not meta.get("note_title"):
+                        meta["note_title"] = self._fallback_note_title(
+                            tid, title_cache
+                        )
+                per_note.append(chunks)
+        # 按篇轮取，保证多篇都有代表且总数不超过 Top-K
+        merged: list[dict] = []
+        for i in range(CROSS_TOP_K):
+            for chunks in per_note:
+                if i < len(chunks):
+                    merged.append(chunks[i])
+                if len(merged) >= CROSS_TOP_K:
+                    return merged
+        return merged
 
     def indexed_task_ids(self, limit: int = MAX_CROSS_NOTES) -> list:
         """返回全局索引中已建索引的 task_id 列表（按写入顺序去重）。"""

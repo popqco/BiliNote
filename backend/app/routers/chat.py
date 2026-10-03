@@ -120,8 +120,9 @@ def ask_question(data: AskRequest):
     except Exception as e:
         # 模型调用失败时把“哪个模型 + 哪个供应商 + 上游原话”透给前端，
         # 否则用户只看到“问答失败”，无法区分是 key 没配、余额不足、
-        # 模型名不对还是上游 500（muse-spark-1.3-contributor-free
-        # 经实测就是上游通道问题：同一 key 无 tools 直调同样 502）。
+        # 模型名不对还是上游 500。注意 502 这类错误专指“App 经 OpenCode
+        # Free 本地代理（127.0.0.1:8787）调上游”的返回——ZCode 走的是它
+        # 自己的渠道，与这条链路无关，不能互相证明对方好坏。
         logger.error(f"Chat 问答失败: {e}", exc_info=True)
         try:
             from app.services.provider import ProviderService
