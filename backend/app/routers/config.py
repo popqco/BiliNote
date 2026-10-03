@@ -3,7 +3,7 @@ import os
 import platform
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from typing import Optional
 from app.utils.response import ResponseWrapper as R
@@ -11,6 +11,7 @@ from app.utils.logger import get_logger
 from app.utils.path_helper import get_model_dir
 
 from app.services.cookie_manager import CookieConfigManager
+from app.services.pairing_manager import PairingManager
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.transcriber import model_download_state as dl_state
 from ffmpeg_helper import ensure_ffmpeg_or_raise
@@ -19,6 +20,7 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 cookie_manager = CookieConfigManager()
+pairing_manager = PairingManager()
 transcriber_config_manager = TranscriberConfigManager()
 
 
@@ -514,6 +516,77 @@ async def sys_health():
         "db": db_status,
         "whisper_model": whisper_info,
     })
+
+
+class PairingVerifyRequest(BaseModel):
+    token: str
+
+
+@router.get("/pairing_status")
+def pairing_status():
+    """Viewer 配对页用：是否已有 token（免鉴，供配对前探测）。
+
+    只返回布尔值，绝不回显 token 本身。
+    """
+    return R.success(data={"paired": pairing_manager.has_custom_token()})
+
+
+class RemoteConfigRequest(BaseModel):
+    allow_remote: bool
+
+
+@router.get("/remote_config")
+def get_remote_config():
+    """远控总开关当前值（需鉴权；配对页/设置页展示用，不含敏感信息）。"""
+    return R.success(data={"allow_remote": pairing_manager.get_allow_remote()})
+
+
+@router.post("/remote_config")
+def set_remote_config(data: RemoteConfigRequest, request: Request):
+    """设置远控总开关（需鉴权）。
+
+    守卫：关闭操作（allow_remote=False）仅允许本机回环发起——远端 Viewer
+    不能把远控关掉（否则主人出门在外只能干瞪眼，还得分不清是网络问题
+    还是被关了）。开启操作允许已配对远端发起（主人出门在外可重开）。
+    """
+    client = request.client
+    is_loopback = client is not None and client.host in ("127.0.0.1", "::1")
+    if not data.allow_remote and not is_loopback:
+        return R.error(msg="关闭远控请到 Worker 本机操作（防远端误锁）", code=403)
+    return R.success(data={"allow_remote": pairing_manager.set_allow_remote(data.allow_remote)})
+
+
+@router.post("/pairing_verify")
+def pairing_verify(data: PairingVerifyRequest):
+    """Viewer 配对页用：校验用户填写的 token 是否正确（免鉴）。
+
+    只返回是否通过，不泄露任何信息； brute force 由组网隔离 + 长 token 兜底。
+    """
+    return R.success(data={"ok": pairing_manager.verify(data.token)})
+
+
+@router.get("/pairing_token")
+def pairing_token():
+    """Worker 本机查看配对 token（需鉴权：远端未配对调不通，本机回环免鉴）。
+
+    本机 All-in-One 持有者即 Worker 持有者，返回完整 token 供其抄到 Viewer 上配对。
+    绝不在 pairing_status/verify 中回显。
+    """
+    token = pairing_manager.get_token()
+    return R.success(data={"masked": f"{token[:4]}***{token[-4:]}", "token": token})
+
+
+@router.post("/pairing_regenerate")
+def pairing_regenerate():
+    """Worker 本机重新生成配对 token（需鉴权，同上）。
+
+    环境变量覆盖时拒绝（需改变量本身）；重生成后旧 Viewer 全部失效，需重新配对。
+    """
+    try:
+        token = pairing_manager.regenerate()
+    except RuntimeError as e:
+        return R.error(msg=str(e))
+    return R.success(data={"token": token})
 
 
 @router.get("/sys_check")

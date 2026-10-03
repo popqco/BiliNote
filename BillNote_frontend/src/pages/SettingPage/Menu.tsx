@@ -7,11 +7,18 @@ import {
   Palette,
   AlarmClock,
   Settings2,
+  Link2,
 } from 'lucide-react'
 import MenuBar, { IMenuProps } from '@/pages/SettingPage/components/menuBar.tsx'
 
 const Menu = () => {
   const menuList: IMenuProps[] = [
+    {
+      id: 'connection',
+      name: '连接 Worker',
+      icon: <Link2 />,
+      path: '/settings/connection',
+    },
     {
       id: 'general',
       name: '通用',

@@ -129,6 +129,22 @@ CORS_ORIGIN_REGEX = (
     r"|^https?://tauri\.localhost$"
 )
 
+
+def _cors_extra_origin_patterns() -> list[str]:
+    """Viewer 跨网直连：允许用户自报的 Viewer 来源（环境变量 CORS_EXTRA_ORIGINS，逗号分隔）。
+
+    默认全开：自用场景下 Viewer 的来源是 Tailscale / ZeroTier 分配的动态地址或
+    局域网 IP，逐个登记不现实；真正的访问控制由配对 token 承担，CORS 只防浏览器误读。
+    需要收紧时设 CORS_EXTRA_ORIGINS 为允许的正则（逗号分隔）。
+    """
+    raw = os.getenv("CORS_EXTRA_ORIGINS", "").strip()
+    if not raw:
+        return [r"^https?://.+$", r"^[a-z][a-z0-9+.-]*://.+$"]
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+CORS_ORIGIN_REGEX = CORS_ORIGIN_REGEX + "".join(f"|{p}" for p in _cors_extra_origin_patterns())
+
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=CORS_ORIGIN_REGEX,
@@ -140,6 +156,15 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 register_exception_handlers(app)
 app.mount(static_path, StaticFiles(directory=static_dir), name="static")
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
+# Viewer 直服：手机浏览器打开 Worker 根地址即完整前端。
+# 最后挂载，只接前面路由都没命中的 GET；dist 缺失时跳过，不影响 /api。
+# 注意：桌面 Tauri 包不带 dist（frontendDist=../dist 指向空），此挂载自动跳过。
+try:
+    from app.frontend_dist import mount_frontend_dist
+    mount_frontend_dist(app)
+except Exception as e:
+    logger.warning(f"Viewer 直服挂载跳过: {e}")
 
 
 

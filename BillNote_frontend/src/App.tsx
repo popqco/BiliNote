@@ -33,6 +33,7 @@ const TranscriberPage = lazy(() => import('@/pages/SettingPage/transcriber.tsx')
 const AppearancePage = lazy(() => import('@/pages/SettingPage/appearance.tsx'))
 const AutomationPage = lazy(() => import('@/pages/SettingPage/automation.tsx'))
 const GeneralPage = lazy(() => import('@/pages/SettingPage/general.tsx'))
+const ConnectionPage = lazy(() => import('@/pages/SettingPage/connection.tsx'))
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'))
 const GlobalClipboardWatcher = lazy(() => import('@/components/GlobalClipboardWatcher.tsx'))
 
@@ -93,6 +94,7 @@ function App() {
                 <Route path="appearance" element={<AppearancePage />} />
                 <Route path="automation" element={<AutomationPage />} />
                 <Route path="general" element={<GeneralPage />} />
+                <Route path="connection" element={<ConnectionPage />} />
                 <Route path="monitor" element={<Monitor />}></Route>
                 <Route path="about" element={<AboutPage />}></Route>
                 <Route path="*" element={<NotFoundPage />} />
