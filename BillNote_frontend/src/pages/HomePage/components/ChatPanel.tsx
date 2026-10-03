@@ -41,9 +41,13 @@ interface ChatPanelProps {
 
 function SourceBadges({
   sources,
+  /** 锚定“提问时”的笔记：标签的本篇/跨篇判定用它，不随浏览位置漂移 */
+  anchorTaskId,
+  /** 实时当前笔记：点击跳转时判断要不要先切笔记用它 */
   currentTaskId,
 }: {
   sources: ChatSource[]
+  anchorTaskId: string
   currentTaskId: string
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -61,8 +65,8 @@ function SourceBadges({
 
   const labelOf = (s: ChatSource) => {
     const detail = detailOf(s)
-    // 跨笔记来源带《标题》前缀；本篇来源保持原样
-    if (s.note_title && s.task_id && s.task_id !== currentTaskId) {
+    // 跨笔记来源带《标题》前缀；提问笔记本篇的来源保持原样
+    if (s.note_title && s.task_id && s.task_id !== anchorTaskId) {
       return `《${s.note_title}》 ${detail}`
     }
     return detail
@@ -80,6 +84,7 @@ function SourceBadges({
 
   const handleJump = (s: ChatSource) => {
     if (!s.task_id) return
+    // 用实时当前笔记判断是否需要切换（锚点只管标签显示）
     if (s.task_id !== currentTaskId) setCurrentTask(s.task_id)
     requestJump({
       task_id: s.task_id,
@@ -246,11 +251,13 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           model_name: modelName,
           scope,
         })
-        addMessage(key, {
-          role: 'assistant',
-          content: res.answer,
-          sources: res.sources,
-        })
+      addMessage(key, {
+        role: 'assistant',
+        content: res.answer,
+        sources: res.sources,
+        // 锚定提问时的笔记：徽章标签的本篇/跨篇判定不再随浏览漂移
+        ask_task_id: taskId,
+      })
       } catch (e: any) {
         // 后端 R.error 透出的 msg（含模型/供应商/上游原话）优先展示，
         // 否则用户看到的永远是“问答请求失败”，无法定位是哪一环坏了。
@@ -270,7 +277,11 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       content: msg.content,
       footer:
         msg.role === 'assistant' && msg.sources ? (
-          <SourceBadges sources={msg.sources} currentTaskId={taskId} />
+          <SourceBadges
+            sources={msg.sources}
+            anchorTaskId={msg.ask_task_id ?? taskId}
+            currentTaskId={taskId}
+          />
         ) : undefined,
     }))
 

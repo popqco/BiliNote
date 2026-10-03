@@ -6,6 +6,10 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   sources?: ChatSource[]
+  /** 提问时所在的笔记：来源徽章“本篇/跨篇”的判定锚点。
+   *  不锚定的话，用户点徽章跳走或手动切笔记后，同一条消息的徽章标签
+   *  会随当前笔记漂移（前缀忽有忽无，2026-10-03 用户实拍反馈）。 */
+  ask_task_id?: string
 }
 
 export type ChatScope = 'current' | 'all'

@@ -30,7 +30,9 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
     setTask(getCurrentTask())
   }, [currentTaskId, getCurrentTask])
 
-  // 问答来源跳转：按时间定位到最接近的转录片段并高亮滚动
+  // 问答来源跳转：按时间定位到最接近的转录片段并高亮滚动。
+  // 面板刚挂载时布局未稳（外层列宽/滚动容器高度在变），一次
+  // scrollIntoView 经常落空——轮询重试直到目标片段真正滚进视野。
   useEffect(() => {
     if (focusTime == null) return
     const segments = task?.transcript?.segments
@@ -42,10 +44,31 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
       }
     }
     setActiveSegment(best)
-    // 等一帧让高亮先生效再滚动
-    requestAnimationFrame(() => {
-      segmentRefs.current[best]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    })
+    let tries = 0
+    const timer = window.setInterval(() => {
+      tries += 1
+      const el = segmentRefs.current[best]
+      const vp = el?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null
+      if (el && vp) {
+        const er = el.getBoundingClientRect()
+        const vr = vp.getBoundingClientRect()
+        const inside = er.top >= vr.top && er.bottom <= vr.bottom
+        if (inside) {
+          window.clearInterval(timer)
+          return
+        }
+        // 平滑滚动约 300ms，校验间隔只有 150ms：每轮都 smooth 会不停
+        // 重启动画、位置永远到不了目标（与章节跳转同款坑）。前两次
+        // smooth，之后一律瞬时补滚。
+        const behavior = tries >= 3 ? 'auto' : 'smooth'
+        vp.scrollTo({
+          top: vp.scrollTop + (er.top - vr.top) - vr.height / 2 + er.height / 2,
+          behavior,
+        })
+      }
+      if (tries >= 15) window.clearInterval(timer)
+    }, 150)
+    return () => window.clearInterval(timer)
   }, [focusTime, task])
 
   const formatTime = (seconds: number): string => {
@@ -79,7 +102,11 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
                 <div>时间</div>
                 <div>内容</div>
               </div>
-            <ScrollArea className="w-full overflow-y-auto">
+            {/* min-h-0 + flex-1：外层是 flex-col，不限高的话片段列表会把
+                面板撑到整篇转写的高度，scrollIntoView 找不到自身滚动容器
+                就去滚笔记主视口——点时间徽章时整个阅读区被拽走（2026-10-03
+                用户反馈“时间戳跳转不直观”的元凶之一）。 */}
+            <ScrollArea className="min-h-0 w-full flex-1">
 
               <div className="space-y-1">
                 {task.transcript.segments.map((segment, index) => (

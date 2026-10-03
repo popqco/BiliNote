@@ -164,33 +164,20 @@ function createMarkdownComponents(baseURL: string) {
       if (href?.startsWith('#')) {
         const handleAnchorClick = (e: React.MouseEvent) => {
           e.preventDefault()
-          const id = decodeURIComponent(href.slice(1))
-
-          // 1. 优先精确匹配 id
-          let target = document.getElementById(id)
-
-          // 2. 精确失败时按 heading 文本模糊匹配
-          // LLM 生成的目录锚点可能和 heading 实际文本不完全一致
-          //（例如 heading 带 *Content-[00:00]* 后缀，目录链接里没有）
-          if (!target) {
-            const normalize = (s: string) =>
-              s.replace(/[-：:\s*\[\]]/g, '').toLowerCase()
-            const search = normalize(id)
-            const headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6')
-            for (const h of headings) {
-              const text = h.textContent || ''
-              if (normalize(text).includes(search) || search.includes(normalize(text))) {
-                target = h
-                break
-              }
-            }
-          }
-
-          if (target) {
-            target.scrollIntoView({ behavior: 'smooth', block: 'start' })
-          } else {
+          // 目录锚点的 id 带 content-XXXX 后缀，而渲染后的 heading 根本
+          // 没有 id——旧实现的精确/模糊匹配全部落空，目录点击毫无反应
+          // （2026-10-03 browser-use 实测确认）。改走与问答来源徽章同一套
+          // 定位机制：按链接文本找章节，顺带自动关掉原文面板并高亮。
+          const text = (e.currentTarget.textContent || '').trim()
+          const tid = useTaskStore.getState().currentTaskId
+          if (!tid || !text) {
             toast.error('未找到对应章节')
+            return
           }
+          useChatJumpStore.getState().requestJump({
+            task_id: tid,
+            section_title: text,
+          })
         }
 
         return (
@@ -455,31 +442,65 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     setJumpSignal(s => s + 1)
   }, [jumpTarget, consumeJump])
 
+  // 从笔记 DOM 推断“覆盖某时间点”的章节标题：每个 H2/H3 的文本里带
+  // 原片（MM:SS）时间戳，取 ≤ start_time 的最大者。找不到（正文尚未
+  // 渲染/全屏问答模式）返回 null，退化为只开转写面板不定位正文。
+  const findSectionTitleForTime = (seconds: number): string | null => {
+    const root = contentCaptureRef.current
+    if (!root) return null
+    let best: { el: HTMLElement; time: number } | null = null
+    for (const h of root.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+      const m = (h.textContent || '').match(/原片[（(](\d{1,2}):(\d{2})[）)]/)
+      if (!m) continue
+      const t = parseInt(m[1], 10) * 60 + parseInt(m[2], 10)
+      if (t <= seconds + 1 && (!best || t > best.time)) {
+        best = { el: h as HTMLElement, time: t }
+      }
+    }
+    if (!best) return null
+    // 去掉“原片（04:00）”后缀再当 section_title 用，避免匹配串过长
+    const title = best.el.textContent || ''
+    const cleaned = title.split('原片')[0].replace(/[\s*]+$/, '').trim()
+    return cleaned || null
+  }
+
   useEffect(() => {
     const target = activeJumpRef.current
     if (!target) return
     // 跨笔记跳转：目标笔记还没切过来时先等（切过来后依赖触发重跑）
     if (target.task_id !== currentTask?.id) return
-    // transcript 来源：打开原文面板并定位时间
-    if (target.start_time != null && !target.section_title) {
-      activeJumpRef.current = null
+    let sectionTitle = target.section_title || ''
+    if (target.start_time != null) {
+      // transcript 来源：打开原文面板并定位时间。用户反馈只开转写
+      // “不直观”——同时把正文定位到覆盖该时间点的章节，两处一起看。
       setShowTranscribe(true)
       setTranscriptFocusTime(target.start_time)
-      return
-    }
-    const title = (target.section_title || '').trim()
-    if (!title) {
-      activeJumpRef.current = null
+      if (!sectionTitle) {
+        sectionTitle = findSectionTitleForTime(target.start_time) || ''
+      }
+      if (!sectionTitle) {
+        activeJumpRef.current = null
+        return
+      }
+    } else {
+      // 章节来源（引用徽章/目录）：正文定位时原文面板让位，否则用户
+      // 看不出笔记滚到哪了（2026-10-03 用户实拍反馈：不自动关原文）。
+      setShowTranscribe(false)
       setTranscriptFocusTime(null)
+    }
+    if (!sectionTitle.trim()) {
+      activeJumpRef.current = null
       return
     }
     const normalize = (s: string) => s.replace(/[-：:\s*[\]]/g, '').toLowerCase()
-    const search = normalize(title)
+    const search = normalize(sectionTitle)
     if (!search) return
     // 找到 heading 后不能一滚了之：跨笔记跳转时笔记内容异步加载会
     // 中途重挂载阅读区（scrollTop 清零），一次 scrollTo 会被冲掉。
     // 这里持续校验目标位置，被冲掉就补滚，连续两轮稳定才算完成。
-    let tries = 0
+    // tries 从负数起步：时间徽章会新开转写面板，三列布局要几百毫秒
+    // 才稳定，先等布局落定再开始计数，避免重试预算被布局抖动耗光。
+    let tries = -4
     let stableTicks = 0
     const timer = window.setInterval(() => {
       tries += 1
@@ -503,18 +524,24 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         return
       }
       // 阅读区滚的是 Radix ScrollArea 内层 viewport（window 不滚）。
-      // readerViewportRef 透传到 Radix Viewport 偶发为 null（ref 合并时机），
-      // 优先用 ref，拿不到就从目标 heading 就近找 viewport，保证能滚。
+      // viewport 一律从命中标题就近取——readerViewportRef 可能指向
+      // 重挂载前的旧节点，对它 scrollTo 是无声 no-op，定位会卡死在
+      // 错误位置（browser-use 实测：转写面板开/关引发的布局变化期间）。
       const vp =
-        readerViewportRef.current ||
-        (hit.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null)
+        (hit.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ||
+        readerViewportRef.current
       const vpRect = vp ? vp.getBoundingClientRect() : null
       const offset = vpRect
         ? (hit as HTMLElement).getBoundingClientRect().top - vpRect.top
         : (hit as HTMLElement).getBoundingClientRect().top
-      if (Math.abs(offset - 16) <= 48) {
+      // 稳定判定加最短时长：转写面板开合会让列宽/内容高度连变几帧，
+      // 过早判定“已稳定”会把定位留在错误位置。
+      if (Math.abs(offset - 16) <= 48 && tries >= 6) {
         stableTicks += 1
-        if (stableTicks >= 2) {
+        // 连续 6 tick（约 720ms）都稳才算完成：关转写/开面板会让列宽
+        // 连变几帧，2 tick 的判定会撞上布局收缩过渡、把定位留在半路
+        // （browser-use 实测偶发停在目标上方 ~2900px）。
+        if (stableTicks >= 6) {
           window.clearInterval(timer)
           activeJumpRef.current = null
           // 高亮目标章节 2s：直接操作 DOM class，避免重建 markdown components
@@ -531,7 +558,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         return
       }
       stableTicks = 0
-      if (tries >= 50) {
+      if (tries >= 60) {
         window.clearInterval(timer)
         activeJumpRef.current = null
         return
@@ -878,13 +905,19 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               </ScrollArea>
               {showTranscribe && (
-                <div className={'ml-2 w-2/4'}>
+                // w-1/3：转写+问答同开时三列并排（笔记 flex-1 / 转写 1/3 /
+                // 问答 1/3）。旧值 w-2/4 与问答 w-1/2 相加占满 100%，笔记
+                // 阅读区被挤成 0 宽度直接消失——点时间徽章后“整屏都是
+                // 转写墙”，用户完全失去笔记上下文（2026-10-03 实拍反馈：
+                // 时间戳跳转不直观）。
+                <div className="ml-2 w-1/3 shrink-0">
                   <TranscriptViewer focusTime={transcriptFocusTime} />
                 </div>
               )}
-              {/* 侧边问答模式：markdown + ChatPanel 各占一半 */}
+              {/* 侧边问答模式：markdown + ChatPanel 各占一半；原文面板
+                  同开时压缩到 1/3 给笔记让位 */}
               {showChat === 'half' && currentTask && (
-                <div className="ml-2 h-full w-1/2 shrink-0">
+                <div className={`ml-2 h-full shrink-0 ${showTranscribe ? 'w-1/3' : 'w-1/2'}`}>
                   <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
                 </div>
               )}
