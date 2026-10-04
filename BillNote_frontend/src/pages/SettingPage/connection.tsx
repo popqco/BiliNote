@@ -32,6 +32,15 @@ export default function ConnectionPage() {
       setBaseUrl(saved.baseUrl)
       setConnected(true)
     }
+    // 一键配对链接：支持 #pair=<token> 自动填充 token（地址栏随即清除，
+    // token 不留痕不进服务器日志）。手机上手动抄 43 位 token 极易错，
+    // 从 Worker 本机页面复制完整链接在手机打开即可。
+    const m = window.location.hash.match(/pair=([A-Za-z0-9_-]+)/)
+    if (m) {
+      setToken(m[1])
+      window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      toast.success('已从链接填入配对 token，点击「配对并连接/更新配对」完成配对')
+    }
   }, [])
 
   const normalizeBase = (raw: string) =>
