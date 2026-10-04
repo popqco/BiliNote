@@ -391,7 +391,10 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
   // 手动补建：后端是后台逐个跑（几十篇笔记要几分钟），之前只调一次接口
   // 就收尾，按钮"闪一下就没下文"（用户实拍）。这里发完后每 3s 轮询一次
   // /chat/coverage，直到缺口补满或 5 分钟超时；数字实时涨，跑完给 toast。
-  const handleBackfill = useCallback(async () => {
+  // 注意：这里不能用 useCallback——它在下面两个 early return 之后，
+  // status 从 indexing 切到 indexed 时 hook 数量变化会整页白屏（2026-10-04
+  // 手机实拍）。用普通函数，身份变化不影响 onClick 使用。
+  const handleBackfill = async () => {
     if (backfilling) return
     setBackfilling(true)
     toast.success('已开始补建索引：后台逐个处理，数字会慢慢涨，不影响提问')
@@ -419,7 +422,7 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       }
     }
     setBackfilling(false)
-  }, [backfilling])
+  }
 
   return (
     <div className="flex h-full flex-col sm:border-l">

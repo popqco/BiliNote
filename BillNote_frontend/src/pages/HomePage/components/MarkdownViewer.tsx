@@ -936,6 +936,38 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               ) : (
               <>
+              {/* 窄屏替换式面板：问答 / 原文直接替换阅读区滚动内容（与 ScrollArea
+                  互斥二选一，不再同级并排）。之前面板与 ScrollArea 同级，被
+                  flex-1 overflow-hidden 裁成左右两条缝；fixed 全屏又盖掉底部
+                  Tab 导致无法返回（2026-10-04 白屏死机实拍）。替换式面板占满
+                  阅读区但保留底部 Tab，随时可切走。桌面端走下面的并排逻辑。 */}
+              {isNarrow && (showChat === 'half' || showTranscribe) && currentTask ? (
+                <div className="bg-background min-w-0 flex-1 overflow-y-auto pb-6">
+                  <div className="border-border bg-card flex h-10 shrink-0 items-center gap-2 border-b px-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowChat(false)
+                        setShowTranscribe(false)
+                      }}
+                      className="text-primary text-sm font-medium"
+                    >
+                      ← 返回笔记
+                    </button>
+                    <div className="flex-1" />
+                    <span className="text-muted-foreground text-xs">
+                      {showChat === 'half' ? 'AI 问答' : '原文参照'}
+                    </span>
+                  </div>
+                  <div className="min-h-[60vh]">
+                    {showChat === 'half' ? (
+                      <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
+                    ) : (
+                      <TranscriptViewer focusTime={transcriptFocusTime} />
+                    )}
+                  </div>
+                </div>
+              ) : (
               <ScrollArea viewportRef={readerViewportRef} className="min-w-0 flex-1">
                 {/* 导出长图的截图根：视频信息条 + 正文都包进来 */}
                 <div ref={contentCaptureRef} className="bg-background pb-6">
@@ -961,7 +993,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
                 </div>
               </ScrollArea>
-              {/* 桌面端并排逻辑保持不变。窄屏走下方全屏浮层，这里只在非窄屏渲染。 */}
+              )}
+              {/* 桌面端并排逻辑保持不变。窄屏走上面的替换式面板，这里只在非窄屏渲染。 */}
               {!isNarrow && showTranscribe && (
                 // w-1/3：转写+问答同开时三列并排（笔记 flex-1 / 转写 1/3 /
                 // 问答 1/3）。旧值 w-2/4 与问答 w-1/2 相加占满 100%，笔记
@@ -993,35 +1026,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               </div>
             </div>
           )}
-        </div>
-      )}
-      {/* 窄屏全屏浮层：原文 / 问答（二选一，问答优先）盖住正文，
-          带顶部关闭条，关掉回到笔记。桌面端不受影响。 */}
-      {isNarrow && (showChat === 'half' || showTranscribe) && currentTask && (
-        <div className="bg-background fixed inset-0 z-40 flex flex-col">
-          <div className="border-border bg-card flex h-12 shrink-0 items-center gap-2 border-b px-3">
-            <button
-              type="button"
-              onClick={() => {
-                setShowChat(false)
-                setShowTranscribe(false)
-              }}
-              className="text-primary text-sm font-medium"
-            >
-              ← 返回笔记
-            </button>
-            <div className="flex-1" />
-            <span className="text-muted-foreground text-sm">
-              {showChat === 'half' ? 'AI 问答' : '原文参照'}
-            </span>
-          </div>
-          <div className="min-h-0 flex-1">
-            {showChat === 'half' ? (
-              <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
-            ) : (
-              <TranscriptViewer focusTime={transcriptFocusTime} />
-            )}
-          </div>
         </div>
       )}
       {/* 摘要海报的屏幕外挂载点：仅导出期间渲染，截图由 effect 负责 */}
