@@ -89,11 +89,59 @@ interface TaskStore {
   mergeTaskAudioMeta: (id: string, meta: Partial<AudioMeta>) => void
   /** 把后端发现的任务（如自动化任务）补进本地列表 */
   addBackendTask: (bt: any, result?: any) => void
+  /** 历史全量回填：/tasks/recent 概要批量并入（只带概要，正文点开时懒加载） */
+  backfillBackendTasks: (list: any[]) => void
   removeTask: (id: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
   retryTask: (id: string) => void
+}
+
+/** markdown 字段（string | Markdown[]）是否已有可展示正文 */
+const hasMarkdownContent = (md: any): boolean =>
+  typeof md === 'string'
+    ? !!md.trim()
+    : !!(Array.isArray(md) && md.some((v: any) => !!v?.content?.trim()))
+
+/** 后端 /tasks/recent 概要（+可选结果）→ 本地 Task。
+ *  徽标数据源优先级：结果文件（model_name/provider_id/style）＞ 概要 ＞ 空。
+ *  addBackendTask（增量）与 backfillBackendTasks（全量回填）共用一份映射。 */
+const backendTaskToTask = (bt: any, result?: any, createdAt?: string): Task => {
+  const formData = {
+    video_url: result?.video_url || bt.video_url || '',
+    platform: result?.platform || bt.platform || '',
+    quality: result?.quality || bt.quality || 'medium',
+    model_name: result?.model_name || bt.model_name || '',
+    provider_id: result?.provider_id || bt.provider_id || '',
+    style: result?.style || bt.style || '',
+    format: result?.format || bt.format || [],
+    extras: result?.extras || bt.extras || '',
+    video_understanding: result?.video_understanding ?? bt.video_understanding ?? false,
+    video_interval: result?.video_interval ?? bt.video_interval ?? 6,
+    grid_size: result?.grid_size || bt.grid_size || [2, 2],
+    link: result?.link ?? bt.link ?? undefined,
+    screenshot: result?.screenshot ?? bt.screenshot ?? undefined,
+  }
+  return {
+    id: bt.task_id,
+    status: bt.status,
+    message: bt.message || undefined,
+    origin: bt.origin || 'manual',
+    markdown: result?.markdown || '',
+    transcript: result?.transcript || { full_text: '', language: '', raw: null, segments: [] },
+    audioMeta: result?.audio_meta || {
+      cover_url: bt.cover_url || '',
+      duration: bt.duration || 0,
+      file_path: '',
+      platform: bt.platform || '',
+      raw_info: null,
+      title: bt.title || '',
+      video_id: bt.video_id || '',
+    },
+    createdAt: createdAt ?? new Date().toISOString(),
+    formData,
+  }
 }
 
 export const useTaskStore = create<TaskStore>()(
@@ -139,7 +187,15 @@ export const useTaskStore = create<TaskStore>()(
             tasks: state.tasks.map(task => {
               if (task.id !== id) return task
 
-              if (task.status === 'SUCCESS' && data.status === 'SUCCESS') return task
+              // SUCCESS→SUCCESS 且本地已有正文时短路：防止轮询/同步冲掉用户
+              // 已有的版本列表。回填的历史概要（SUCCESS 但无正文）要放行——
+              // 懒加载正文靠这条路径写进来。
+              if (
+                task.status === 'SUCCESS' &&
+                data.status === 'SUCCESS' &&
+                hasMarkdownContent(task.markdown)
+              )
+                return task
 
               // 如果是 markdown 字符串，封装为版本
               if (typeof data.markdown === 'string') {
@@ -195,44 +251,31 @@ export const useTaskStore = create<TaskStore>()(
       addBackendTask: (bt: any, result?: any) =>
         set(state => {
           if (state.tasks.some(t => t.id === bt.task_id)) return state
-          // 徽标数据源优先级：结果文件（model_name/provider_id/style）
-          // ＞ /tasks/recent 概要（status 文件 PENDING 时写入）
-          // ＞ 空。任何一层缺失都继续往下一层找，不再写死 ''。
-          const formData = {
-            video_url: result?.video_url || bt.video_url || '',
-            platform: result?.platform || bt.platform || '',
-            quality: result?.quality || bt.quality || 'medium',
-            model_name: result?.model_name || bt.model_name || '',
-            provider_id: result?.provider_id || bt.provider_id || '',
-            style: result?.style || bt.style || '',
-            format: result?.format || bt.format || [],
-            extras: result?.extras || bt.extras || '',
-            video_understanding: result?.video_understanding ?? bt.video_understanding ?? false,
-            video_interval: result?.video_interval ?? bt.video_interval ?? 6,
-            grid_size: result?.grid_size || bt.grid_size || [2, 2],
-            link: result?.link ?? bt.link ?? undefined,
-            screenshot: result?.screenshot ?? bt.screenshot ?? undefined,
+          return { tasks: [backendTaskToTask(bt, result), ...state.tasks] }
+        }),
+
+      // 历史全量回填：手机 Viewer 首次打开也能看到 Worker 全部笔记——
+      // 之前只有 24h 内更新的增量会进列表，更早的历史永远同步不到
+      // （2026-10-04 用户反馈：手机只能加载 12 篇）。只并入概要不拉正文，
+      // 几十篇正文一次灌进 IndexedDB 太重；正文在点开笔记时懒加载。
+      backfillBackendTasks: (list: any[]) =>
+        set(state => {
+          if (!Array.isArray(list) || list.length === 0) return state
+          const known = new Set(state.tasks.map(t => t.id))
+          const incoming: Task[] = []
+          for (const bt of list) {
+            if (!bt?.task_id || known.has(bt.task_id)) continue
+            known.add(bt.task_id)
+            // createdAt 取后端更新时间，老笔记才能在历史列表里排对位置
+            incoming.push(
+              backendTaskToTask(bt, undefined, new Date((bt.updated_at || 0) * 1000).toISOString()),
+            )
           }
-          const task: Task = {
-            id: bt.task_id,
-            status: bt.status,
-            message: bt.message || undefined,
-            origin: bt.origin || 'manual',
-            markdown: result?.markdown || '',
-            transcript: result?.transcript || { full_text: '', language: '', raw: null, segments: [] },
-            audioMeta: result?.audio_meta || {
-              cover_url: bt.cover_url || '',
-              duration: bt.duration || 0,
-              file_path: '',
-              platform: bt.platform || '',
-              raw_info: null,
-              title: bt.title || '',
-              video_id: bt.video_id || '',
-            },
-            createdAt: new Date().toISOString(),
-            formData,
-          }
-          return { tasks: [task, ...state.tasks] }
+          if (incoming.length === 0) return state
+          const tasks = [...state.tasks, ...incoming].sort((a, b) =>
+            (b.createdAt || '').localeCompare(a.createdAt || ''),
+          )
+          return { tasks }
         }),
 
       getCurrentTask: () => {

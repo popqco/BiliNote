@@ -6,14 +6,29 @@ const ACTIVE = ['PENDING', 'PARSING', 'DOWNLOADING', 'TRANSCRIBING', 'SUMMARIZIN
 const DAY_MS = 24 * 3600 * 1000
 
 /**
- * 与后端 /tasks/recent 增量同步：
- * - 后端有、本地没有的活跃任务（如自动化检查轮创建的）→ 补进生成历史；
+ * 与后端 /tasks/recent 同步：
+ * - 进页/配对成功时全量回填一次历史概要（不带正文，点开时懒加载）——
+ *   否则手机 Viewer 只能看到 24h 内的增量，更早的历史永远同步不到；
+ * - 每 30s 增量：后端有、本地没有的活跃任务（如自动化检查轮创建的）→ 补进生成历史；
  * - 后端已 SUCCESS 而本地仍是旧状态（如应用重启打断轮询，或自动化跑完）→ 拉结果修正。
- * 只处理最近 24 小时内有更新的任务，避免把陈年历史灌进界面。
+ * 增量只处理最近 24 小时内有更新的任务，避免把陈年状态变化反复拉结果。
  */
 export const useTasksSync = (interval = 30000) => {
   useEffect(() => {
     let stopped = false
+
+    // 历史全量回填（每会话一次）：只并入概要，正文在点开笔记时懒加载。
+    // 失败（如未配对 401）不锁标志——配对成功事件到来时可以重试。
+    let backfilled = false
+    const backfill = async () => {
+      if (backfilled) return
+      const data: any = await get_recent_tasks(300)
+      if (stopped || !Array.isArray(data?.tasks)) return
+      backfilled = true
+      useTaskStore.getState().backfillBackendTasks(data.tasks)
+    }
+    // 刚配完对立刻回填，手机不用等下一个轮询周期
+    window.addEventListener('bilinote:worker-paired', backfill)
 
     const run = async () => {
       // 拦截器已解包，直接是 { tasks: [...] }
@@ -71,11 +86,13 @@ export const useTasksSync = (interval = 30000) => {
       }
     }
 
+    backfill()
     run()
     const timer = setInterval(run, interval)
     return () => {
       stopped = true
       clearInterval(timer)
+      window.removeEventListener('bilinote:worker-paired', backfill)
     }
   }, [interval])
 }

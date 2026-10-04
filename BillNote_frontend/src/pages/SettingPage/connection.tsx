@@ -43,14 +43,28 @@ export default function ConnectionPage() {
     }
   }, [])
 
-  const normalizeBase = (raw: string) =>
-    raw.trim().replace(/\/+$/, '').replace(/\/api$/, '')
+  // 地址规整：只输 IP[:端口] 也能连——自动补 http:// 前缀、省略端口补默认
+  // 8483、去掉尾部斜杠与误贴的 /api 后缀（2026-10-04 用户反馈：不想手输前缀）。
+  const normalizeBase = (raw: string) => {
+    let v = raw.trim()
+    if (!v) return ''
+    if (!/^https?:\/\//i.test(v)) v = `http://${v}`
+    v = v.replace(/\/+$/, '').replace(/\/api$/, '')
+    try {
+      const u = new URL(v)
+      // 只给「纯主机名」补默认端口；带了路径的怪地址原样交给校验去报错
+      if (u.protocol === 'http:' && !u.port && !u.pathname) v = `${v}:8483`
+    } catch {
+      // 解析不了就原样返回，由 sys_check 校验报连接失败
+    }
+    return v
+  }
 
   const handleVerifyAndSave = async () => {
     const base = normalizeBase(baseUrl)
     const t = token.trim()
     if (!base) {
-      toast.error('请填写 Worker 地址，例如 http://100.64.0.5:8483')
+      toast.error('请填写 Worker 地址，例如 100.64.0.5:8483')
       return
     }
     if (!t) {
@@ -128,12 +142,17 @@ export default function ConnectionPage() {
           <div>
             <div className="mb-1 text-sm">Worker 地址</div>
             <Input
-              placeholder="例如 http://100.64.0.5:8483（Tailscale / 局域网地址）"
+              placeholder="例如 100.64.0.5:8483（可省略 http:// 和端口）"
               value={baseUrl}
               onChange={e => setBaseUrl(e.target.value)}
             />
+            {baseUrl.trim() && (
+              <div className="text-muted-foreground mt-1 text-xs">
+                保存时将连接：<span className="font-mono">{normalizeBase(baseUrl)}</span>
+              </div>
+            )}
             <div className="text-muted-foreground mt-1 text-xs">
-              不带 /api 后缀；手机浏览器直连 Worker 时可直接用 Worker 根地址，自动同源。
+              可不带 http:// 前缀与 /api 后缀；省略端口时默认 8483。
             </div>
           </div>
           <div>
@@ -166,6 +185,15 @@ export default function ConnectionPage() {
       </div>
     </div>
   )
+}
+
+/**
+ * raw fetch 不走 axios 拦截器，配对 token 要手动带上——否则远端 Viewer
+ * （明明已配对）调这些接口也会 401，「远端配置总开关」就永远卡在「读取中…」。
+ */
+const pairingHeaders = (): Record<string, string> => {
+  const token = loadWorkerConnection()?.token
+  return token ? { 'X-Pairing-Token': token } : {}
 }
 
 /**
@@ -299,7 +327,24 @@ function WorkerAddressPanel() {
         const j = await r.json().catch(() => null)
         if (j?.code === 0 && j.data?.token) setToken(j.data.token)
       })
-      .catch(() => setHidden(true))
+      .catch(() => {
+        // 兜底：部署的后端还没有 /worker_info（404）时，本机打开此页也能
+        // 从地址栏拿到端口——前端就是后端 serve 的，location.port 即端口。
+        if (/^(localhost|127\.0\.0\.1)$/.test(window.location.hostname) && window.location.port) {
+          setInfo({
+            port: Number(window.location.port),
+            addresses: [
+              {
+                ip: window.location.hostname,
+                url: window.location.origin,
+                label: '本机自用',
+              },
+            ],
+          })
+        } else {
+          setHidden(true)
+        }
+      })
   }, [])
 
   if (hidden || !info) return null
@@ -371,15 +416,26 @@ function WorkerAddressPanel() {
  */
 function RemoteControlPanel() {
   const [allowRemote, setAllowRemote] = useState<boolean | null>(null)
+  const [loadError, setLoadError] = useState(false)
   const [saving, setSaving] = useState(false)
 
+  const loadRemoteConfig = async () => {
+    setLoadError(false)
+    try {
+      const r = await fetch(`${resolveApiBaseUrl()}/remote_config`, { headers: pairingHeaders() })
+      if (r.status === 401) throw new Error('未配对')
+      const j = await r.json().catch(() => null)
+      if (j?.code !== 0) throw new Error(j?.msg || '读取失败')
+      setAllowRemote(!!j.data.allow_remote)
+    } catch {
+      // 不许永远停在「读取中…」：给出可重试的失败态
+      setAllowRemote(null)
+      setLoadError(true)
+    }
+  }
+
   useEffect(() => {
-    fetch(`${resolveApiBaseUrl()}/remote_config`)
-      .then(r => (r.status === 401 ? null : r.json().catch(() => null)))
-      .then(j => {
-        if (j?.code === 0) setAllowRemote(!!j.data.allow_remote)
-      })
-      .catch(() => {})
+    loadRemoteConfig()
   }, [])
 
   const handleToggle = async (next: boolean) => {
@@ -387,17 +443,24 @@ function RemoteControlPanel() {
     try {
       const res = await fetch(`${resolveApiBaseUrl()}/remote_config`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...pairingHeaders() },
         body: JSON.stringify({ allow_remote: next }),
       })
       const json = await res.json().catch(() => null)
       if (!res.ok || json?.code !== 0) {
-        toast.error(json?.msg || (res.status === 403 ? '关闭远控请到 Worker 本机操作' : '保存失败'))
+        toast.error(
+          json?.msg ||
+            (res.status === 401
+              ? '未配对：请先完成配对'
+              : res.status === 403
+                ? '关闭远控请到 Worker 本机操作'
+                : '保存失败'),
+        )
         return
       }
       setAllowRemote(!!json.data.allow_remote)
       toast.success(next ? '已允许远端配置' : '已禁止远端配置：Viewer 仅可提交与查看任务')
-    } catch (e: any) {
+    } catch {
       toast.error('保存失败，请检查网络')
     } finally {
       setSaving(false)
@@ -417,10 +480,18 @@ function RemoteControlPanel() {
         <Button
           size="sm"
           variant={allowRemote === false ? 'default' : 'outline'}
-          disabled={saving || allowRemote === null}
-          onClick={() => handleToggle(!allowRemote)}
+          disabled={saving}
+          onClick={() => (allowRemote === null ? loadRemoteConfig() : handleToggle(!allowRemote))}
         >
-          {saving ? '保存中…' : allowRemote === null ? '读取中…' : allowRemote ? '禁止远端配置' : '允许远端配置'}
+          {saving
+            ? '保存中…'
+            : allowRemote === null
+              ? loadError
+                ? '读取失败，点击重试'
+                : '读取中…'
+              : allowRemote
+                ? '禁止远端配置'
+                : '允许远端配置'}
         </Button>
         {allowRemote !== null && (
           <span className="text-muted-foreground text-xs">
