@@ -143,16 +143,16 @@ def ask_question(data: AskRequest):
 
 
 @router.get("/chat/indexed")
-def indexed_tasks(limit: int = 50):
+def indexed_tasks(limit: int = 500):
     """返回全局索引中已建索引的 task_id 列表（供跨笔记范围提示）。
 
     注意默认 limit=50 是历史值：笔记超过 50 篇时前端拿到的列表不全，
-    覆盖数显示会偏小。前端应传 limit=200（上限）拿全量。
+    覆盖数显示会偏小。indexed_task_ids 已改为分页拉全量，上限提到 500。
     """
     try:
-        limit = max(1, min(int(limit), 200))
+        limit = max(1, min(int(limit), 500))
     except Exception:
-        limit = 50
+        limit = 500
     try:
         store = VectorStoreManager()
         return R.success(data={"task_ids": store.indexed_task_ids(limit=limit)})
@@ -170,7 +170,10 @@ def index_coverage():
     """
     try:
         store = VectorStoreManager()
-        indexed = set(store.indexed_task_ids(limit=200))
+        # 传 500 拿全量：indexed_task_ids 已分页拉取，limit 只做截断保护。
+        # 之前 limit=200 配旧的"取 1200 行截断"实现，96 篇只看到 29 个，
+        # 补建永远"零增长"（2026-10-04 实测）。
+        indexed = set(store.indexed_task_ids(limit=500))
     except Exception as e:
         logger.error(f"查询全局索引失败: {e}")
         indexed = set()

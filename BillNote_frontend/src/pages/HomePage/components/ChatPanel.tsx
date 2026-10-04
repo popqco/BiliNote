@@ -424,12 +424,44 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     setBackfilling(false)
   }
 
+  // 窄屏替换式面板里 ChatPanel 被包在 min-h-[60vh] 的滚动容器中：
+  // h-full 会按内容撑高，输入区被顶到页面最底下（用户实拍：回答一长，
+  // 输入框和模型选择跑到最下面）。这里只占内容高度，滚动交给外层容器。
   return (
-    <div className="flex h-full flex-col sm:border-l">
-      {/* 头部：窄屏允许换行，范围切换按钮不再把标题挤掉 */}
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-b px-3 py-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="shrink-0 text-sm font-medium">AI 问答</span>
+    <div className="flex flex-col sm:h-full sm:border-l">
+      {/* 头部：标题独占一行，范围切换另起一行左对齐（之前挤一行导致
+          "AI 问答"被压扁、按钮换行错位，用户红框实拍）。操作按钮右上。 */}
+      <div className="border-b px-3 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium">AI 问答</span>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-muted-foreground hover:text-foreground"
+              onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
+              title={mode === 'half' ? '全屏' : '半屏'}
+            >
+              {mode === 'half' ? (
+                <Maximize2 className="h-3.5 w-3.5" />
+              ) : (
+                <Minimize2 className="h-3.5 w-3.5" />
+              )}
+            </Button>
+            {messages.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-muted-foreground hover:text-red-500"
+                onClick={() => clearChat(key)}
+                title="清空当前范围的问答记录"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+          </div>
+        </div>
+        <div className="mt-1.5 flex items-center gap-2">
           {/* 范围切换：全部笔记（默认）/ 当前笔记 */}
           <div className="flex items-center rounded-md bg-muted p-0.5 text-xs">
             <button
@@ -447,32 +479,6 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
               当前笔记
             </button>
           </div>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-muted-foreground hover:text-foreground"
-            onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
-            title={mode === 'half' ? '全屏' : '半屏'}
-          >
-            {mode === 'half' ? (
-              <Maximize2 className="h-3.5 w-3.5" />
-            ) : (
-              <Minimize2 className="h-3.5 w-3.5" />
-            )}
-          </Button>
-          {messages.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-muted-foreground hover:text-red-500"
-              onClick={() => clearChat(key)}
-              title="清空当前范围的问答记录"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          )}
         </div>
       </div>
       {/* 范围提示条：覆盖率来自 /chat/coverage 真实统计（已索引/笔记总数）。
@@ -510,10 +516,12 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         </div>
       )}
 
-      {/* 消息列表 */}
-      <div className="flex-1 overflow-hidden">
+      {/* 消息列表：回答再长也只在这个区域内滚动，输入区固定在底下不动
+          （之前 flex-1 按内容撑高，输入框被顶到页面最底下，用户实拍）。
+          窄屏替换式面板里外层已是滚动容器，这里给最小高度保证可用。 */}
+      <div className="min-h-[200px] flex-1 overflow-hidden sm:min-h-0">
         {messages.length === 0 && !loading ? (
-          <div className="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
+          <div className="flex h-full min-h-[200px] items-center justify-center text-center text-sm text-muted-foreground">
             <div>
               <p>{scope === 'all' ? '可跨全部历史笔记提问' : '针对当前笔记内容提问'}</p>
               <p className="mt-1 text-xs">例如：这个视频的核心观点是什么？</p>
@@ -528,8 +536,9 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         )}
       </div>
 
-      {/* 输入区域 */}
-      <div className="border-t px-3 py-2">
+      {/* 输入区域：sticky 吸底，消息再长也不被顶跑（用户实拍主诉）。
+          窄屏下面就是底部 Tab，吸底即停在 Tab 上方。 */}
+      <div className="border-t px-3 py-2 sticky bottom-0 bg-background z-10">
         {/* 问答模型选择：与左侧生成表单解耦，选过即记住（随 chat store 持久化） */}
         <div className="mb-2 flex items-center gap-2">
           <span className="shrink-0 text-xs text-muted-foreground">问答模型</span>

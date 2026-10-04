@@ -130,10 +130,11 @@ const CheckboxGroup = ({
   onChange: (v: string[]) => void
   disabledMap: Record<string, boolean>
 }) => (
-  // 手机窄屏上四个选项不再挤成一行（space-x 在换行时还会错位），改 gap 自动换行。
-  <div className="flex flex-wrap gap-x-5 gap-y-3">
+  // 手机窄屏 2×2 网格：之前 flex 换行时"AI总结"单独占一行还被红框标出
+  // （用户实拍）。网格保证两两对齐，复选框+文字不换行散开。
+  <div className="grid grid-cols-2 gap-x-4 gap-y-3">
     {noteFormats.map(({ label, value: v }) => (
-      <label key={v} className="flex items-center space-x-2">
+      <label key={v} className="flex items-center gap-2 whitespace-nowrap">
         <Checkbox
           checked={value.includes(v)}
           disabled={disabledMap[v]}

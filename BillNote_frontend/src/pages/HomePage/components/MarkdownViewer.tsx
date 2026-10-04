@@ -942,7 +942,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                   Tab 导致无法返回（2026-10-04 白屏死机实拍）。替换式面板占满
                   阅读区但保留底部 Tab，随时可切走。桌面端走下面的并排逻辑。 */}
               {isNarrow && (showChat === 'half' || showTranscribe) && currentTask ? (
-                <div className="bg-background min-w-0 flex-1 overflow-y-auto pb-6">
+                <div className="bg-background flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                   <div className="border-border bg-card flex h-10 shrink-0 items-center gap-2 border-b px-3">
                     <button
                       type="button"
@@ -959,7 +959,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                       {showChat === 'half' ? 'AI 问答' : '原文参照'}
                     </span>
                   </div>
-                  <div className="min-h-[60vh]">
+                  {/* flex-1 + min-h-0 + overflow-y-auto：面板占满阅读区剩余高度，
+                      内部滚动；之前 min-h-[60vh] 无上限，ChatPanel 的 h-full 按
+                      内容撑高，输入区被顶到页面最底下（用户实拍主诉）。 */}
+                  <div className="min-h-0 flex-1 overflow-y-auto pb-6">
                     {showChat === 'half' ? (
                       <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
                     ) : (
