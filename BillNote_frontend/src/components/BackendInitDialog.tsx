@@ -86,7 +86,7 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
               <p>常见原因：</p>
               <ul className="list-disc list-inside space-y-0.5 pl-1">
                 <li>安装路径含中文 / 空格（PyInstaller 在这种路径下经常起不来）</li>
-                <li>没装 ffmpeg / 端口 8483 被占用</li>
+                <li>没装 ffmpeg / 端口 8483 被占用（后端启动日志会写明占用者是谁；也可在「设置 → 连接 Worker」页看当前端口状态）</li>
                 <li>首次启动时 whisper 模型下载未完成</li>
               </ul>
             </div>

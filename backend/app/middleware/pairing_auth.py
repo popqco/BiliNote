@@ -11,6 +11,7 @@ _PUBLIC_PATHS = (
     "/api/sys_check",
     "/api/pairing_status",
     "/api/pairing_verify",
+    "/api/port_check",
 )
 
 # 远控关闭时远端 Viewer 仍可用的"任务白名单"（票 5）：

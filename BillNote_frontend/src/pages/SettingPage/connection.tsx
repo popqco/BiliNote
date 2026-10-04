@@ -45,6 +45,9 @@ export default function ConnectionPage() {
 
   // 地址规整：只输 IP[:端口] 也能连——自动补 http:// 前缀、省略端口补默认
   // 8483、去掉尾部斜杠与误贴的 /api 后缀（2026-10-04 用户反馈：不想手输前缀）。
+  // 注意 new URL("http://host").pathname 恒为 "/"（WHATWG 规定），所以不能用
+  // !u.pathname 判断“裸主机”——之前这个分支永远走不到，“省略端口默认 8483”
+  // 只是文案上说说而已（2026-10-04 端口健壮度复查发现）。
   const normalizeBase = (raw: string) => {
     let v = raw.trim()
     if (!v) return ''
@@ -52,8 +55,10 @@ export default function ConnectionPage() {
     v = v.replace(/\/+$/, '').replace(/\/api$/, '')
     try {
       const u = new URL(v)
-      // 只给「纯主机名」补默认端口；带了路径的怪地址原样交给校验去报错
-      if (u.protocol === 'http:' && !u.port && !u.pathname) v = `${v}:8483`
+      // 纯主机名（pathname 只剩 "/"）且没写端口 → 补默认 8483
+      if (u.protocol === 'http:' && !u.port && (u.pathname === '' || u.pathname === '/')) {
+        v = `${v}:8483`
+      }
     } catch {
       // 解析不了就原样返回，由 sys_check 校验报连接失败
     }
@@ -73,6 +78,23 @@ export default function ConnectionPage() {
     }
     setChecking(true)
     try {
+      // 先验目标端口在 Worker 本机是否被占用（免鉴 /port_check，打 Worker 自己）：
+      // 端口被别的程序占了，sys_check 会连到一个“能通但不是 Worker”的服务，
+      // pairing_verify 再报 token 不对——用户会误以为 token 抄错了。
+      // 先把“端口对不对”这件事单独说清楚。
+      try {
+        const u = new URL(base)
+        if (u.port) {
+          const pc = await fetch(`${base}/api/port_check?port=${u.port}`)
+          const pj = await pc.json().catch(() => null)
+          if (pc.ok && pj?.code === 0 && pj?.data?.taken === false) {
+            throw new Error(`Worker 本机上端口 ${u.port} 没有程序在监听：地址或端口写错了？`)
+          }
+        }
+      } catch (e: any) {
+        // 上面主动抛出的“端口空闲”要继续往外抛；纯网络异常才吞掉走正常校验
+        if (typeof e?.message === 'string' && e.message.includes('没有程序在监听')) throw e
+      }
       // 免鉴接口：先验连通性（/sys_check），再验 token（/pairing_verify）
       const sysRes = await fetch(`${base}/api/sys_check`)
       if (!sysRes.ok) throw new Error('Worker 无响应')
@@ -311,6 +333,11 @@ function WorkerAddressPanel() {
   } | null>(null)
   const [hidden, setHidden] = useState(false)
   const [token, setToken] = useState<string | null>(null)
+  // 端口自检：本机 8483（或当前端口）是否真的是我们的后端在监听。
+  const [portProbe, setPortProbe] = useState<{
+    state: 'ok' | 'foreign' | 'idle'
+    detail: string
+  }>({ state: 'idle', detail: '' })
 
   useEffect(() => {
     // 仅本机可见：worker_info 对远端 401，整块隐藏，token 也不必再取
@@ -320,6 +347,12 @@ function WorkerAddressPanel() {
         const j = await r.json().catch(() => null)
         if (j?.code !== 0) throw new Error('bad payload')
         setInfo(j.data)
+        // 端口自检：/worker_info 能通说明本端口就是后端自己，直接标正常；
+        // 通不过（旧后端 404）才需要 port_check 区分“空闲/被别人占”。
+        setPortProbe({
+          state: 'ok',
+          detail: `端口 ${j.data.port} 由本 Worker 后端监听，一切正常。`,
+        })
         return fetch(`${resolveApiBaseUrl()}/pairing_token`)
       })
       .then(async r => {
@@ -366,6 +399,19 @@ function WorkerAddressPanel() {
           其他设备（手机 Viewer）配对时填写的地址；端口由 Worker 的 BACKEND_PORT
           配置决定，当前 <span className="font-mono">{info.port}</span>。
         </div>
+        {/* 端口占用自检状态行 */}
+        {portProbe.state !== 'idle' && (
+          <div
+            className={
+              portProbe.state === 'ok'
+                ? 'mt-1 text-xs text-green-600 dark:text-green-400'
+                : 'mt-1 text-xs text-red-500'
+            }
+          >
+            {portProbe.state === 'ok' ? '● ' : '● '}
+            {portProbe.detail}
+          </div>
+        )}
       </div>
       <div className="mt-3 space-y-3">
         {info.addresses.map(a => (

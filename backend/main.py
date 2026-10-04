@@ -174,8 +174,93 @@ except Exception as e:
 
 
 
+def _resolve_port() -> int:
+    """解析 BACKEND_PORT：缺省 8483；非法值（非数字/越界）记警告并回退 8483。
+
+    之前这里是裸 int(...)：用户把 .env 的端口写错一个字母，后端连一行中文
+    日志都不留就 traceback 退出，前端只看到「后端启动失败」（2026-10-04 用户
+    反馈端口健壮度）。现在非法值也不崩，用默认端口起，日志里写清楚。
+    """
+    raw = os.getenv("BACKEND_PORT", "8483")
+    try:
+        port = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(f"BACKEND_PORT 非法（{raw!r}），回退默认端口 8483")
+        return 8483
+    if not 1 <= port <= 65535:
+        logger.warning(f"BACKEND_PORT 越界（{port}），回退默认端口 8483")
+        return 8483
+    return port
+
+
+def _fail_if_port_taken(host: str, port: int) -> None:
+    """启动前预检：端口已被占用时直接报错退出，不进 uvicorn。
+
+    之前是裸 uvicorn.run bind 失败抛 OSError，PyInstaller sidecar 秒退，
+    前端只能看到「后端启动失败」、日志里翻 WinError 10048（2026-10-04 用户
+    反馈：不知道端口被占用时会发生什么）。现在启动日志第一行就写清楚
+    谁占了端口，用户照着提示杀进程或换 BACKEND_PORT 即可。
+    """
+    import socket
+
+    probe_hosts = ["127.0.0.1"]
+    if host not in ("127.0.0.1", "localhost"):
+        # 0.0.0.0 监听所有网卡：任一回环能连上即视为已被占用
+        probe_hosts = ["127.0.0.1"]
+    for h in probe_hosts:
+        try:
+            with socket.create_connection((h, port), timeout=1.0):
+                pass
+        except OSError:
+            return  # 连不上 = 端口空闲，正常继续
+        holder = _describe_port_holder(port)
+        logger.error(
+            f"端口 {port} 已被占用{holder}，后端无法启动。"
+            f"请关闭占用该端口的程序，或在 .env 里把 BACKEND_PORT 改成其他空闲端口后重启。"
+        )
+        raise SystemExit(f"端口 {port} 已被占用，启动中止{holder}")
+
+
+def _describe_port_holder(port: int) -> str:
+    """尽力说出占端口的是谁（Windows 下用 netstat 找 PID + 进程名），找不到就空串。"""
+    import re
+    import subprocess
+
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
+            pids = {
+                m.group(1)
+                for line in out.splitlines()
+                if f":{port}" in line and "LISTENING" in line
+                for m in [re.search(r"(\d+)\s*$", line.strip())]
+                if m
+            }
+            names = set()
+            for pid in pids:
+                try:
+                    t = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                        capture_output=True, text=True, timeout=5,
+                    ).stdout
+                    first = t.strip().splitlines()[0] if t.strip() else ""
+                    name = first.strip('"').split('","')[0] if first else ""
+                    names.add(f"{name}(PID {pid})" if name else f"PID {pid}")
+                except Exception:
+                    names.add(f"PID {pid}")
+            if names:
+                return f"（占用者：{'、'.join(sorted(names))}）"
+    except Exception:
+        pass
+    return ""
+
+
 if __name__ == "__main__":
-    port = int(os.getenv("BACKEND_PORT", 8483))
+    port = _resolve_port()
     host = os.getenv("BACKEND_HOST", "0.0.0.0")
     logger.info(f"Starting server on {host}:{port}")
+    _fail_if_port_taken(host, port)
     uvicorn.run(app, host=host, port=port, reload=False)

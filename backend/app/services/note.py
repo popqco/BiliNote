@@ -1041,6 +1041,39 @@ def find_active_task_by_video(video_id: str) -> Optional[dict]:
     return None
 
 
+def _result_file_meta(stem: str) -> dict:
+    """从 {stem}.json 结果文件（或 {stem}_audio.json 缓存）补标题/封面等元信息。
+
+    背景：3 天前的老任务状态文件里只有 {"status": ...}（早期元数据写入是
+    10-01 才加的，见 5044da5），/tasks/recent 只读状态文件，于是 64 篇老笔记
+    在手机上全显示「未命名笔记」（2026-10-04 用户反馈）。结果文件和音频缓存里
+    的 audio_meta 完好，直接拿来用——纯读文件，不改任何状态，安全。
+    """
+    try:
+        p = NOTE_OUTPUT_DIR / f"{stem}.json"
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                am = d.get("audio_meta")
+                if isinstance(am, dict) and (am.get("title") or am.get("cover_url")):
+                    return am
+                # 有些结果文件顶层也带标题字段，顺手收下
+                alt = {k: d.get(k) for k in ("title", "cover_url", "duration", "video_id", "platform") if d.get(k)}
+                if alt.get("title"):
+                    return alt
+    except Exception:
+        pass
+    try:
+        p = NOTE_OUTPUT_DIR / f"{stem}_audio.json"
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(d, dict) and (d.get("title") or d.get("cover_url")):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
 def list_recent_tasks(limit: int = 80) -> List[dict]:
     """按最近更新倒序返回任务概要列表（供 /tasks/recent 增量同步）。
 
@@ -1064,6 +1097,12 @@ def list_recent_tasks(limit: int = 80) -> List[dict]:
         except Exception:
             continue
         meta = data.get("audio_meta") or {}
+        # 老任务状态文件里只有 status（标题封面全丢）：从结果文件/_audio 缓存补，
+        # 否则手机历史列表里全是「未命名笔记」。
+        if not meta.get("title"):
+            fb = _result_file_meta(stem)
+            if fb:
+                meta = {**fb, **{k: v for k, v in meta.items() if v}}
         try:
             updated_at = int(f.stat().st_mtime)
         except OSError:

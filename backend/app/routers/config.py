@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+import socket
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
@@ -520,6 +521,27 @@ async def sys_health():
 
 class PairingVerifyRequest(BaseModel):
     token: str
+
+
+@router.get("/port_check")
+def port_check(port: int = 8483):
+    """免鉴：判断指定端口是否已被占用（连接页配对前的连通性自检用）。
+
+    只回答“占用/空闲”，不暴露占用者是谁（netstat 进程名只写进后端自己的
+    启动日志，不出网）。后端启动入口 main.py 有同样的预检（_fail_if_port_taken），
+    那里会在日志里写明占用者进程名。
+    """
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return R.error(msg="端口号非法", code=400)
+    if not 1 <= port <= 65535:
+        return R.error(msg="端口号非法", code=400)
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1.5):
+            return R.success(data={"port": port, "taken": True})
+    except OSError:
+        return R.success(data={"port": port, "taken": False})
 
 
 @router.get("/pairing_status")
