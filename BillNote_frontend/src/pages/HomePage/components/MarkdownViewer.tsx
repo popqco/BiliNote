@@ -893,6 +893,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     )
   }
 
+  // 面板接管阅读区（窄屏工作台 / 全屏问答）时，容器去掉 py-2 上下留白并
+  // 把背景拉平成 bg-background：面板与上方工具栏、下方底部 Tab 完全贴合，
+  // 消除 2026-10-04 用户圈出的两条空隙。阅读/导图模式维持原样。
+  const panelTakeover =
+    showChat === 'full' || (isNarrow && (showChat === 'half' || showTranscribe))
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
       <MarkdownHeader
@@ -927,7 +933,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 overflow-hidden bg-card py-2">
+        <div className={`flex flex-1 overflow-hidden ${panelTakeover ? 'bg-background' : 'bg-card py-2'}`}>
           {selectedContent && selectedContent !== 'loading' && selectedContent !== 'empty' ? (
             <>
               {showChat === 'full' && currentTask ? (
@@ -947,7 +953,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                     <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
                   </div>
                 ) : (
-                  <div className="min-h-0 min-w-0 flex-1">
+                  // 原文面板自带圆角边框卡片，留 8px 内边距避免贴死屏幕边
+                  <div className="min-h-0 min-w-0 flex-1 p-2">
                     <TranscriptViewer focusTime={transcriptFocusTime} />
                   </div>
                 )
