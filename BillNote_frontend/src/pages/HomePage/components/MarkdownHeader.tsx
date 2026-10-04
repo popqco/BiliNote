@@ -99,9 +99,9 @@ export function MarkdownHeader({
   }
 
   return (
-    <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur-sm">
-      {/* 左侧区域：版本 + 标签 + 创建时间 */}
-      <div className="flex flex-wrap items-center gap-3">
+    <div className="sticky top-0 z-10 flex flex-col gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur-sm sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3 sm:px-4">
+      {/* 左侧区域：版本 + 标签 + 创建时间（手机上允许换行，徽章过长截断） */}
+      <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
         {isMultiVersion && (
           <Select value={currentVerId} onValueChange={setCurrentVerId}>
             <SelectTrigger className="h-8 w-[160px] text-sm">
@@ -126,7 +126,7 @@ export function MarkdownHeader({
           </Select>
         )}
 
-        <Badge variant="secondary" className="bg-pink-100 text-pink-700 hover:bg-pink-200 dark:bg-pink-500/15 dark:text-pink-300 dark:hover:bg-pink-500/25">
+        <Badge variant="secondary" className="max-w-[45vw] truncate bg-pink-100 text-pink-700 hover:bg-pink-200 sm:max-w-none dark:bg-pink-500/15 dark:text-pink-300 dark:hover:bg-pink-500/25">
           {modelName}
         </Badge>
         <Badge variant="secondary" className="bg-cyan-100 text-cyan-700 hover:bg-cyan-200 dark:bg-cyan-500/15 dark:text-cyan-300 dark:hover:bg-cyan-500/25">
@@ -138,8 +138,9 @@ export function MarkdownHeader({
         )}
       </div>
 
-      {/* 右侧操作按钮 */}
-      <div className="flex items-center gap-1">
+      {/* 右侧操作按钮：手机窄屏横向滚动不裁剪（之前整条被撑出视口，
+          最右侧的 AI 问答按钮点不到）。滚动条隐藏但保留滑动手势。 */}
+      <div className="-mx-1 flex items-center gap-1 overflow-x-auto px-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -151,8 +152,8 @@ export function MarkdownHeader({
                 size="sm"
                 className="h-8 px-2"
               >
-                <BrainCircuit className="mr-1.5 h-4 w-4" />
-                <span className="text-sm">{viewMode == 'preview' ? '思维导图' : 'markdown'}</span>
+                <BrainCircuit className="h-4 w-4 sm:mr-1.5" />
+                <span className="hidden text-sm min-[420px]:inline">{viewMode == 'preview' ? '思维导图' : 'markdown'}</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>思维导图</TooltipContent>
@@ -161,9 +162,9 @@ export function MarkdownHeader({
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button onClick={handleCopy} variant="ghost" size="sm" className="h-8 px-2">
-                <Copy className="mr-1.5 h-4 w-4" />
-                <span className="text-sm">{copied ? '已复制' : '复制'}</span>
+              <Button onClick={handleCopy} variant="ghost" size="sm" className="h-8 shrink-0 px-2">
+                <Copy className="h-4 w-4 sm:mr-1.5" />
+                <span className="hidden text-sm min-[420px]:inline">{copied ? '已复制' : '复制'}</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>复制内容</TooltipContent>
@@ -172,10 +173,10 @@ export function MarkdownHeader({
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className="h-8 px-2" disabled={!!exporting}>
-              <Download className="mr-1.5 h-4 w-4" />
-              <span className="text-sm">{exporting ? '导出中…' : '导出'}</span>
-              <ChevronDown className="ml-0.5 h-3.5 w-3.5 opacity-60" />
+            <Button variant="ghost" size="sm" className="h-8 shrink-0 px-2" disabled={!!exporting}>
+              <Download className="h-4 w-4 sm:mr-1.5" />
+              <span className="hidden text-sm min-[420px]:inline">{exporting ? '导出中…' : '导出'}</span>
+              <ChevronDown className="hidden h-3.5 w-3.5 opacity-60 min-[420px]:inline" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-44">
@@ -206,10 +207,10 @@ export function MarkdownHeader({
                 }}
                 variant="ghost"
                 size="sm"
-                className="h-8 px-2"
+                className="h-8 shrink-0 px-2"
               >
                 {/*<Download className="mr-1.5 h-4 w-4" />*/}
-                <span className="text-sm">原文参照</span>
+                <span className="text-sm whitespace-nowrap">原文参照</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>原文参照</TooltipContent>
@@ -223,10 +224,10 @@ export function MarkdownHeader({
                   onClick={() => setShowChat(showChat ? false : 'half')}
                   variant={showChat ? 'default' : 'ghost'}
                   size="sm"
-                  className="h-8 px-2"
+                  className="h-8 shrink-0 px-2"
                 >
-                  <MessageSquare className="mr-1.5 h-4 w-4" />
-                  <span className="text-sm">AI 问答</span>
+                  <MessageSquare className="h-4 w-4 sm:mr-1.5" />
+                  <span className="text-sm whitespace-nowrap">AI 问答</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent>基于笔记内容的 AI 问答</TooltipContent>

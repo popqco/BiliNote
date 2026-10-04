@@ -130,7 +130,8 @@ const CheckboxGroup = ({
   onChange: (v: string[]) => void
   disabledMap: Record<string, boolean>
 }) => (
-  <div className="flex flex-wrap space-x-1.5">
+  // 手机窄屏上四个选项不再挤成一行（space-x 在换行时还会错位），改 gap 自动换行。
+  <div className="flex flex-wrap gap-x-5 gap-y-3">
     {noteFormats.map(({ label, value: v }) => (
       <label key={v} className="flex items-center space-x-2">
         <Checkbox
@@ -726,7 +727,8 @@ const NoteForm = () => {
               </FormItem>
             )}
           />
-          <div className="grid grid-cols-2 gap-2">
+          {/* 手机窄屏上模型/风格上下排：grid-cols-2 会把长模型名与下拉都压成半宽。 */}
+          <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2">
             {/* 模型选择 */}
             {
 

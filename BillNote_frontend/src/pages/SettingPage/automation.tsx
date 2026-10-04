@@ -42,12 +42,13 @@ const Section = ({ title, desc, children }: any) => (
 )
 
 const Row = ({ label, desc, children }: any) => (
-  <div className="flex items-center justify-between gap-4">
-    <div className="text-sm">
+  // 手机窄屏上下排：之前左右排把右侧输入框压成细条
+  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+    <div className="min-w-0 text-sm">
       {label}
       {desc && <div className="text-muted-foreground text-xs">{desc}</div>}
     </div>
-    <div className="flex items-center gap-2">{children}</div>
+    <div className="flex flex-wrap items-center gap-2">{children}</div>
   </div>
 )
 
@@ -341,7 +342,7 @@ const Automation = () => {
         <Row label="微信推送（WxPusher）" desc="免费，微信里直接收推送，推荐">
           <Checkbox checked={!!wx.enabled} onCheckedChange={v => upd(['notify', 'wxpusher', 'enabled'], !!v)} />
         </Row>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Input
             placeholder="appToken（wxpusher.zjiecode.com 创建应用获取）"
             value={wx.app_token}
@@ -356,7 +357,7 @@ const Automation = () => {
         <Row label="邮箱（SMTP）" desc="需要邮箱服务商给的「授权码」，不是登录密码">
           <Checkbox checked={!!smtp.enabled} onCheckedChange={v => upd(['notify', 'smtp', 'enabled'], !!v)} />
         </Row>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Input placeholder="SMTP 服务器（如 smtp.qq.com）" value={smtp.host} onChange={e => upd(['notify', 'smtp', 'host'], e.target.value)} />
           <Input placeholder="端口（465 = SSL，587 = STARTTLS）" value={smtp.port} onChange={e => upd(['notify', 'smtp', 'port'], Number(e.target.value) || 465)} />
           <Input placeholder="邮箱账号" value={smtp.username} onChange={e => upd(['notify', 'smtp', 'username'], e.target.value)} />
