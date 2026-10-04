@@ -424,97 +424,103 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     setBackfilling(false)
   }
 
-  // 窄屏替换式面板里 ChatPanel 被包在 min-h-[60vh] 的滚动容器中：
-  // h-full 会按内容撑高，输入区被顶到页面最底下（用户实拍：回答一长，
-  // 输入框和模型选择跑到最下面）。这里只占内容高度，滚动交给外层容器。
+  // 工作台（C 方案，用户 2026-10-04 选定）：状态胶囊行——覆盖胶囊 +
+  // 模型下拉 + 补建按钮同行，一行只占 32px。之前"AI 问答"标题、范围切换、
+  // 覆盖长文本三层叠起来占 120px+（用户红框：高度太高、标题多余、括号废话）。
+  // 窄屏面板里 ChatPanel 被包在滚动容器中：只占内容高度，滚动交给外层。
   return (
     <div className="flex flex-col sm:h-full sm:border-l">
-      {/* 头部：标题独占一行，范围切换另起一行左对齐（之前挤一行导致
-          "AI 问答"被压扁、按钮换行错位，用户红框实拍）。操作按钮右上。 */}
-      <div className="border-b px-3 py-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">AI 问答</span>
-          <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-muted-foreground hover:text-foreground"
-              onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
-              title={mode === 'half' ? '全屏' : '半屏'}
-            >
-              {mode === 'half' ? (
-                <Maximize2 className="h-3.5 w-3.5" />
-              ) : (
-                <Minimize2 className="h-3.5 w-3.5" />
-              )}
-            </Button>
-            {messages.length > 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-muted-foreground hover:text-red-500"
-                onClick={() => clearChat(key)}
-                title="清空当前范围的问答记录"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
-            )}
-          </div>
+      <div className="flex items-center gap-1.5 border-b px-3 py-1.5">
+        {/* 范围切换：全部 / 当前，二段胶囊 */}
+        <div className="flex shrink-0 items-center rounded-full bg-muted p-0.5 text-xs">
+          <button
+            className={`rounded-full px-2.5 py-1 whitespace-nowrap ${scope === 'all' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
+            onClick={() => handleScopeChange('all')}
+            title="跨全部历史笔记检索"
+          >
+            全部
+          </button>
+          <button
+            className={`rounded-full px-2.5 py-1 whitespace-nowrap ${scope === 'current' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
+            onClick={() => handleScopeChange('current')}
+            title="只检索当前笔记"
+          >
+            当前
+          </button>
         </div>
-        <div className="mt-1.5 flex items-center gap-2">
-          {/* 范围切换：全部笔记（默认）/ 当前笔记 */}
-          <div className="flex items-center rounded-md bg-muted p-0.5 text-xs">
-            <button
-              className={`rounded px-2 py-0.5 whitespace-nowrap ${scope === 'all' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
-              onClick={() => handleScopeChange('all')}
-              title="跨全部历史笔记检索"
-            >
-              全部笔记
-            </button>
-            <button
-              className={`rounded px-2 py-0.5 whitespace-nowrap ${scope === 'current' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
-              onClick={() => handleScopeChange('current')}
-              title="只检索当前笔记"
-            >
-              当前笔记
-            </button>
-          </div>
-        </div>
-      </div>
-      {/* 范围提示条：覆盖率来自 /chat/coverage 真实统计（已索引/笔记总数）。
-          数字对不上时的三种正常原因：① 刚装好/刚升级，历史笔记还没建过索引，
-          点"补建索引"即可；② 笔记很多时补建是后台逐个跑，数字会慢慢涨；
-          ③ 已删除笔记的索引会被清理。补建不阻塞提问，单篇索引仍可用。 */}
-      {scope === 'all' && (
-        <div className="border-b px-3 py-1 text-xs text-muted-foreground">
-          {backfilling
-            ? (
-              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {coverage
-                  ? `正在补建索引…已索引 ${coverage.indexed} / 共 ${coverage.total} 篇（后台逐个跑，不影响提问）`
-                  : '正在补建索引…（后台逐个跑，不影响提问）'}
+        {/* 覆盖胶囊：绿=全量，灰=缺口；缺口时右边出现补建按钮 */}
+        {scope === 'all' && (
+          coverage !== null && coverage.total > 0 && (
+            coverage.indexed >= coverage.total ? (
+              <span className="shrink-0 rounded-full border border-green-800 px-2 py-0.5 text-[11px] text-green-400">
+                ● 已覆盖 {coverage.total}/{coverage.total}
+              </span>
+            ) : backfilling ? (
+              <span className="flex shrink-0 items-center gap-1 rounded-full border border-amber-800 px-2 py-0.5 text-[11px] text-amber-300">
+                <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                {coverage.indexed}/{coverage.total}
+              </span>
+            ) : (
+              <span className="flex shrink-0 items-center gap-1">
+                <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-[11px] text-muted-foreground">
+                  {coverage.indexed}/{coverage.total}
+                </span>
+                <button
+                  className="shrink-0 rounded-full border border-zinc-600 px-2 py-0.5 text-[11px] hover:text-foreground"
+                  onClick={handleBackfill}
+                  title="为缺失的历史笔记补建索引（后台逐个跑，不影响提问）"
+                >
+                  补建
+                </button>
               </span>
             )
-            : coverage === null
-              ? '正在统计已索引笔记…'
-              : coverage.total === 0
-                ? '暂无笔记可索引'
-                : coverage.indexed >= coverage.total
-                  ? `已覆盖全部 ${coverage.total} 篇笔记`
-                  : (
-                    <span className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
-                      <span>{`已索引 ${coverage.indexed} / 共 ${coverage.total} 篇笔记`}</span>
-                      <button
-                        className="ml-1 shrink-0 rounded border px-1.5 py-0.5 underline hover:text-foreground"
-                        onClick={handleBackfill}
-                      >
-                        补建索引
-                      </button>
-                    </span>
-                  )}
-        </div>
-      )}
+          )
+        )}
+        <div className="flex-1" />
+        {/* 模型：只显示短名，完整名放 title；之前整行"问答模型：xxx"占一行 */}
+        <Select
+          value={chatModelName}
+          onValueChange={setChatModelName}
+          onOpenChange={open => {
+            if (open) loadEnabledModels()
+          }}
+        >
+          <SelectTrigger className="h-7 w-28 truncate border-0 bg-transparent px-1 text-[11px] text-muted-foreground" title={chatModelName || '选择问答模型'}>
+            <SelectValue placeholder="模型" />
+          </SelectTrigger>
+          <SelectContent>
+            {modelList.map(m => (
+              <SelectItem key={m.id} value={m.model_name}>
+                {m.model_name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 shrink-0 px-1.5 text-muted-foreground hover:text-foreground"
+          onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
+          title={mode === 'half' ? '全屏' : '半屏'}
+        >
+          {mode === 'half' ? (
+            <Maximize2 className="h-3.5 w-3.5" />
+          ) : (
+            <Minimize2 className="h-3.5 w-3.5" />
+          )}
+        </Button>
+        {messages.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 shrink-0 px-1.5 text-muted-foreground hover:text-red-500"
+            onClick={() => clearChat(key)}
+            title="清空当前范围的问答记录"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        )}
+      </div>
 
       {/* 消息列表：回答再长也只在这个区域内滚动，输入区固定在底下不动
           （之前 flex-1 按内容撑高，输入框被顶到页面最底下，用户实拍）。
@@ -537,30 +543,9 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       </div>
 
       {/* 输入区域：sticky 吸底，消息再长也不被顶跑（用户实拍主诉）。
+          模型已收到状态胶囊行（短名下拉），这里只剩输入框一行。
           窄屏下面就是底部 Tab，吸底即停在 Tab 上方。 */}
       <div className="border-t px-3 py-2 sticky bottom-0 bg-background z-10">
-        {/* 问答模型选择：与左侧生成表单解耦，选过即记住（随 chat store 持久化） */}
-        <div className="mb-2 flex items-center gap-2">
-          <span className="shrink-0 text-xs text-muted-foreground">问答模型</span>
-          <Select
-            value={chatModelName}
-            onValueChange={setChatModelName}
-            onOpenChange={open => {
-              if (open) loadEnabledModels()
-            }}
-          >
-            <SelectTrigger className="h-7 min-w-0 flex-1 truncate text-xs">
-              <SelectValue placeholder="选择问答模型" />
-            </SelectTrigger>
-            <SelectContent>
-              {modelList.map(m => (
-                <SelectItem key={m.id} value={m.model_name}>
-                  {m.model_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
         <Sender
           value={input}
           onChange={setInput}

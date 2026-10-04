@@ -936,28 +936,51 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               ) : (
               <>
-              {/* 窄屏替换式面板：问答 / 原文直接替换阅读区滚动内容（与 ScrollArea
-                  互斥二选一，不再同级并排）。之前面板与 ScrollArea 同级，被
-                  flex-1 overflow-hidden 裁成左右两条缝；fixed 全屏又盖掉底部
-                  Tab 导致无法返回（2026-10-04 白屏死机实拍）。替换式面板占满
-                  阅读区但保留底部 Tab，随时可切走。桌面端走下面的并排逻辑。 */}
+              {/* 窄屏工作台（C 方案，用户 2026-10-04 选定）：笔记 / 问答 / 原文
+                  三 Tab 顶栏切换，与 ScrollArea 互斥二选一。问答 Tab 内再分
+                  状态胶囊行 + 消息区 + 吸底输入（见 ChatPanel）。之前面板与
+                  ScrollArea 同级被裁成左右两条缝；fixed 全屏又盖掉底部 Tab
+                  导致无法返回（白屏死机实拍）。工作台占满阅读区但保留底部
+                  Tab，随时可切走。桌面端走下面的并排逻辑。 */}
               {isNarrow && (showChat === 'half' || showTranscribe) && currentTask ? (
                 <div className="bg-background flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                  <div className="border-border bg-card flex h-10 shrink-0 items-center gap-2 border-b px-3">
+                  <div className="border-border bg-card flex shrink-0 items-stretch border-b" role="tablist">
                     <button
                       type="button"
+                      role="tab"
+                      aria-selected={showChat !== 'half' && !showTranscribe}
                       onClick={() => {
                         setShowChat(false)
                         setShowTranscribe(false)
                       }}
-                      className="text-primary text-sm font-medium"
+                      className={`flex-1 border-b-2 px-2 py-2.5 text-sm ${showChat !== 'half' && !showTranscribe ? 'border-primary text-foreground font-semibold' : 'text-muted-foreground border-transparent'}`}
                     >
-                      ← 返回笔记
+                      笔记
                     </button>
-                    <div className="flex-1" />
-                    <span className="text-muted-foreground text-xs">
-                      {showChat === 'half' ? 'AI 问答' : '原文参照'}
-                    </span>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={showChat === 'half'}
+                      onClick={() => {
+                        setShowChat('half')
+                        setShowTranscribe(false)
+                      }}
+                      className={`flex-1 border-b-2 px-2 py-2.5 text-sm ${showChat === 'half' ? 'border-primary text-foreground font-semibold' : 'text-muted-foreground border-transparent'}`}
+                    >
+                      问答
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={showTranscribe && showChat !== 'half'}
+                      onClick={() => {
+                        setShowChat(false)
+                        setShowTranscribe(true)
+                      }}
+                      className={`flex-1 border-b-2 px-2 py-2.5 text-sm ${showTranscribe && showChat !== 'half' ? 'border-primary text-foreground font-semibold' : 'text-muted-foreground border-transparent'}`}
+                    >
+                      原文
+                    </button>
                   </div>
                   {/* flex-1 + min-h-0 + overflow-y-auto：面板占满阅读区剩余高度，
                       内部滚动；之前 min-h-[60vh] 无上限，ChatPanel 的 h-full 按
