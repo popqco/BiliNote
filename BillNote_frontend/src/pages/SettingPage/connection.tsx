@@ -156,6 +156,8 @@ export default function ConnectionPage() {
 
       <WorkerTokenPanel />
 
+      <WorkerAddressPanel />
+
       <RemoteControlPanel />
 
       <div className="text-muted-foreground mt-4 max-w-3xl text-xs">
@@ -263,6 +265,100 @@ function WorkerTokenPanel() {
         <pre className="mt-2 max-w-full overflow-x-auto rounded bg-zinc-900 px-2 py-1.5 font-mono text-[11px] leading-snug text-green-200">
           {revealed}
         </pre>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 本机 Worker 地址面板：直接告诉用户"手机/其他设备上该填什么地址"——
+ * 端口与可达 IP 由后端 /worker_info 返回（仅本机回环可查；远端 Viewer
+ * 打开此页时 401 → 整块自动隐藏）。token 可读时附一键配对链接
+ * （#pair=，手机浏览器打开自动填 token，见页面顶部 hash 填充逻辑）。
+ */
+function WorkerAddressPanel() {
+  const [info, setInfo] = useState<{
+    port: number
+    addresses: Array<{ ip: string; url: string; label: string }>
+  } | null>(null)
+  const [hidden, setHidden] = useState(false)
+  const [token, setToken] = useState<string | null>(null)
+
+  useEffect(() => {
+    // 仅本机可见：worker_info 对远端 401，整块隐藏，token 也不必再取
+    fetch(`${resolveApiBaseUrl()}/worker_info`)
+      .then(async r => {
+        if (!r.ok) throw new Error(String(r.status))
+        const j = await r.json().catch(() => null)
+        if (j?.code !== 0) throw new Error('bad payload')
+        setInfo(j.data)
+        return fetch(`${resolveApiBaseUrl()}/pairing_token`)
+      })
+      .then(async r => {
+        if (!r || !r.ok) return
+        const j = await r.json().catch(() => null)
+        if (j?.code === 0 && j.data?.token) setToken(j.data.token)
+      })
+      .catch(() => setHidden(true))
+  }, [])
+
+  if (hidden || !info) return null
+
+  const copy = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      toast.success(`已复制${what}`)
+    } catch {
+      toast.error('复制失败，请手动选择复制')
+    }
+  }
+
+  return (
+    <div className="border-border mt-6 max-w-3xl rounded-lg border p-4">
+      <div className="text-sm">
+        本机 Worker 地址
+        <div className="text-muted-foreground text-xs">
+          其他设备（手机 Viewer）配对时填写的地址；端口由 Worker 的 BACKEND_PORT
+          配置决定，当前 <span className="font-mono">{info.port}</span>。
+        </div>
+      </div>
+      <div className="mt-3 space-y-3">
+        {info.addresses.map(a => (
+          <div key={a.ip} className="border-border rounded-md border p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="bg-primary-light text-primary rounded px-1.5 py-0.5 text-[10px]">
+                {a.label}
+              </span>
+              <code className="min-w-0 flex-1 break-all font-mono text-xs">{a.url}</code>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => copy(a.url, '地址')}
+              >
+                复制地址
+              </Button>
+              {token && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    copy(`${a.url}/settings/connection#pair=${token}`, '一键配对链接')
+                  }
+                >
+                  复制一键配对链接
+                </Button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {token && (
+        <div className="text-muted-foreground mt-2 text-xs">
+          一键配对链接 = 地址 + 连接页 + 已填好的 token；发到手机浏览器打开，
+          token 自动填好，点「配对并连接」即完成。
+        </div>
       )}
     </div>
   )

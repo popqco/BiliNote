@@ -576,6 +576,69 @@ def pairing_token():
     return R.success(data={"masked": f"{token[:4]}***{token[-4:]}", "token": token})
 
 
+def _classify_ip(ip: str) -> str:
+    import ipaddress
+
+    try:
+        a = ipaddress.ip_address(ip)
+        if a.is_loopback:
+            return "本机自用"
+        if ip.startswith("100."):
+            # 100.64.0.0/10 是运营商级 NAT 段：Tailscale / ZeroTier 组网地址
+            return "组网（Tailscale / ZeroTier）"
+        if a.is_private:
+            return "局域网"
+    except ValueError:
+        pass
+    return "其他"
+
+
+def _local_ipv4s() -> list:
+    """枚举本机 IPv4：默认路由地址优先，其次 hostname 解析出的各网卡地址。"""
+    import socket
+
+    ips: list = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("223.5.5.5", 80))  # 不实际发包，只为取默认路由的本机地址
+        ips.append(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    return ips
+
+
+@router.get("/worker_info")
+def worker_info(request: Request):
+    """本机 Worker 的监听端口与可达地址（仅限本机回环查看，远端一律 401）。
+
+    配对页直接给出"手机该填什么地址"的答案，用户不再需要自己猜端口、查 IP
+    （2026-10-04 用户反馈：不知道 Worker 跑在哪个端口）。网络拓扑不外泄。
+    """
+    client = request.client
+    if client is None or client.host not in ("127.0.0.1", "::1"):
+        return R.error(msg="仅限 Worker 本机查看", code=401)
+    try:
+        port = int(os.getenv("BACKEND_PORT", "8483"))
+    except ValueError:
+        port = 8483
+    # 排序：组网/局域网（可用于配对）在前，本机自用垫底
+    addresses = [
+        {"ip": ip, "url": f"http://{ip}:{port}", "label": _classify_ip(ip)}
+        for ip in _local_ipv4s()
+    ]
+    addresses.sort(key=lambda a: 0 if a["label"].startswith("组网") else (1 if a["label"] == "局域网" else 2))
+    return R.success(data={"port": port, "addresses": addresses})
+
+
 @router.post("/pairing_regenerate")
 def pairing_regenerate():
     """Worker 本机重新生成配对 token（需鉴权，同上）。
