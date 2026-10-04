@@ -6,7 +6,7 @@ const History = () => {
   const setCurrentTask = useTaskStore(state => state.setCurrentTask)
   return (
     <>
-      <div className={'flex h-full w-full flex-col gap-4 px-2.5 py-1.5'}>
+      <div className={'flex w-full flex-col gap-4 px-2.5 py-1.5'}>
         {/*生成历史    */}
         <div className="my-4 flex h-[40px] shrink-0 items-center gap-2">
           <Clock className="h-4 w-4 text-muted-foreground" />
