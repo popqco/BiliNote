@@ -48,7 +48,7 @@ export const getChatStatus = async (taskId: string): Promise<ChatStatusResponse>
   return await request.get(`/chat/status?task_id=${taskId}`)
 }
 
-export const getIndexedTaskIds = async (limit = 200): Promise<string[]> => {
+export const getIndexedTaskIds = async (limit = 500): Promise<string[]> => {
   const res = await request.get(`/chat/indexed?limit=${limit}`)
   return (res?.task_ids ?? []) as string[]
 }

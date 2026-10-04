@@ -664,23 +664,44 @@ class VectorStoreManager:
         return _select_cross_top(query_text, merged, CROSS_TOP_K)
 
     def indexed_task_ids(self, limit: int = MAX_CROSS_NOTES) -> list:
-        """返回全局索引中已建索引的 task_id 列表（按写入顺序去重）。"""
+        """返回全局索引中已建索引的 task_id 列表（按写入顺序去重）。
+
+        注意不能"取 limit*6 行再去重截断"：每篇笔记约 10~50 个 chunk，
+        取 200*6=1200 行时只覆盖前几十篇，96 篇的库只能看到 29 个
+        （2026-10-04 实测：sqlite 里 96 个 distinct task，API 只返回 29）。
+        这里分页拉全量去重后再按 limit 截断；调用方传大 limit 即拿全量。
+        """
         try:
             collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)
         except Exception:
             return []
+        seen: list[str] = []
+        seen_set: set[str] = set()
+        offset = 0
+        page = 2000
         try:
-            rows = collection.get(limit=min(max(limit * 6, 6), 10000))
+            while True:
+                rows = collection.get(
+                    limit=page,
+                    offset=offset,
+                    include=["metadatas"],
+                )
+                metas = rows.get("metadatas") or []
+                if not metas:
+                    break
+                for meta in metas:
+                    tid = (meta or {}).get("task_id")
+                    if tid and tid not in seen_set:
+                        seen_set.add(tid)
+                        seen.append(tid)
+                    if len(seen) >= limit:
+                        return seen[:limit]
+                if len(metas) < page:
+                    break
+                offset += page
         except Exception:
-            return []
-        seen = []
-        for meta in rows.get("metadatas") or []:
-            tid = (meta or {}).get("task_id")
-            if tid and tid not in seen:
-                seen.append(tid)
-            if len(seen) >= limit:
-                break
-        return seen
+            pass
+        return seen[:limit]
 
     def is_indexed_global(self, task_id: str) -> bool:
         """检查该笔记在全局索引中是否存在。"""
