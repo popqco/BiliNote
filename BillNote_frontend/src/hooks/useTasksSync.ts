@@ -3,6 +3,16 @@ import { useTaskStore } from '@/store/taskStore'
 import { get_recent_tasks, get_task_status } from '@/services/note.ts'
 
 const ACTIVE = ['PENDING', 'PARSING', 'DOWNLOADING', 'TRANSCRIBING', 'SUMMARIZING', 'SAVING']
+
+/** 本地任务是否有正文（任一形态）：孤儿清理只动“无正文”的失败卡，有内容的失败卡保留 */
+const hasTaskContent = (t: any): boolean => {
+  const md = t?.markdown
+  if (typeof md === 'string' ? md.trim() : md?.[0]?.content) return true
+  const tr = t?.transcript
+  if (typeof tr === 'string' ? tr.trim() : tr?.full_text?.trim() || tr?.segments?.length) return true
+  return false
+}
+
 const DAY_MS = 24 * 3600 * 1000
 
 /**
@@ -19,13 +29,35 @@ export const useTasksSync = (interval = 30000) => {
 
     // 历史全量回填（每会话一次）：只并入概要，正文在点开笔记时懒加载。
     // 失败（如未配对 401）不锁标志——配对成功事件到来时可以重试。
+    // 顺带清本地孤儿：后端没这个任务了（磁盘文件已删/从无此任务），但本地
+    // persist 里还留着卡——多见于 10-01 前后调试期写进来的脏数据（如三张
+    // 「重复任务」失败卡，磁盘无文件、后端无记录，留着永远是未命名）。
+    // 只清同时满足的：后端全量里没有 + 磁盘无结果 + 本地无正文 + FAILED/FAILD。
     let backfilled = false
     const backfill = async () => {
       if (backfilled) return
       const data: any = await get_recent_tasks(300)
       if (stopped || !Array.isArray(data?.tasks)) return
       backfilled = true
+      const serverIds = new Set(data.tasks.map((t: any) => t?.task_id).filter(Boolean))
+      const orphans = useTaskStore
+        .getState()
+        .tasks.filter(
+          t =>
+            t &&
+            !serverIds.has(t.id) &&
+            (t.status === 'FAILED' || t.status === 'FAILD') &&
+            !hasTaskContent(t),
+        )
+        .map(t => t.id)
       useTaskStore.getState().backfillBackendTasks(data.tasks)
+      for (const id of orphans) {
+        try {
+          await useTaskStore.getState().removeTask(id)
+        } catch {
+          /* 删后端 404 也没关系：本来就是孤儿，本地已清 */
+        }
+      }
     }
     // 刚配完对立刻回填，手机不用等下一个轮询周期
     window.addEventListener('bilinote:worker-paired', backfill)

@@ -258,24 +258,51 @@ export const useTaskStore = create<TaskStore>()(
       // 之前只有 24h 内更新的增量会进列表，更早的历史永远同步不到
       // （2026-10-04 用户反馈：手机只能加载 12 篇）。只并入概要不拉正文，
       // 几十篇正文一次灌进 IndexedDB 太重；正文在点开笔记时懒加载。
+      // 注意用概要刷新已存在的任务：后端会自愈补标题（老任务状态文件只有
+      // status），本地 persist 里存的仍是旧的「无标题」快照，不刷新就永远
+      // 显示「未命名笔记」（2026-10-04 端口/标题复查发现）。
       backfillBackendTasks: (list: any[]) =>
         set(state => {
           if (!Array.isArray(list) || list.length === 0) return state
-          const known = new Set(state.tasks.map(t => t.id))
+          const byId = new Map(list.filter(bt => bt?.task_id).map(bt => [bt.task_id, bt]))
+          let touched = false
+          const tasks = state.tasks.map(t => {
+            const bt = byId.get(t.id)
+            if (!bt) return t
+            byId.delete(t.id)
+            // 标题/封面/时长：后端自愈后的值优先，本地已有值次之
+            const meta = {
+              ...t.audioMeta,
+              title: (bt as any).title || t.audioMeta?.title || '',
+              cover_url: (bt as any).cover_url || t.audioMeta?.cover_url || '',
+              duration: (bt as any).duration ?? t.audioMeta?.duration ?? 0,
+              video_id: (bt as any).video_id || t.audioMeta?.video_id || '',
+              platform: (bt as any).platform || t.audioMeta?.platform || '',
+            }
+            // status/message 跟随后端终态走（失败原因等），正文/版本不碰
+            if (
+              meta.title === t.audioMeta?.title &&
+              meta.cover_url === t.audioMeta?.cover_url &&
+              (bt as any).status === t.status &&
+              ((bt as any).message || undefined) === t.message
+            )
+              return t
+            touched = true
+            return { ...t, status: (bt as any).status ?? t.status, message: (bt as any).message || undefined, audioMeta: meta }
+          })
           const incoming: Task[] = []
-          for (const bt of list) {
-            if (!bt?.task_id || known.has(bt.task_id)) continue
-            known.add(bt.task_id)
+          for (const bt of byId.values()) {
             // createdAt 取后端更新时间，老笔记才能在历史列表里排对位置
             incoming.push(
               backendTaskToTask(bt, undefined, new Date((bt.updated_at || 0) * 1000).toISOString()),
             )
           }
-          if (incoming.length === 0) return state
-          const tasks = [...state.tasks, ...incoming].sort((a, b) =>
-            (b.createdAt || '').localeCompare(a.createdAt || ''),
-          )
-          return { tasks }
+          if (incoming.length === 0 && !touched) return state
+          return {
+            tasks: [...tasks, ...incoming].sort((a, b) =>
+              (b.createdAt || '').localeCompare(a.createdAt || ''),
+            ),
+          }
         }),
 
       getCurrentTask: () => {
