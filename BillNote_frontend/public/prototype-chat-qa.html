@@ -1,0 +1,170 @@
+<!-- PROTOTYPE — throwaway, not production. AI问答手机UI三版评审原型。
+  Three variants of 手机AI问答, switchable via ?variant=, on /prototype-chat-qa.html.
+  纯静态单文件：假数据演示布局与交互，不调任何后端（只读?variant，不写存储）。
+  跑法：后端已直服viewer-dist，手机/电脑浏览器打开 http://Worker地址:8483/prototype-chat-qa.html?variant=A/B/C -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI问答原型 A/B/C 评审</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #101014; color: #f4f4f5; min-height: 100dvh; }
+  .phone { max-width: 430px; margin: 0 auto; min-height: 100dvh; display: flex; flex-direction: column; background: #101014; }
+  /* —— 顶部切换条（原型部件，非评审对象） —— */
+  .switcher { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 99;
+    display: flex; align-items: center; gap: 14px; background: #ffd60a; color: #111; border-radius: 999px; padding: 8px 16px;
+    font-weight: 700; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+  .switcher button { border: none; background: #111; color: #ffd60a; width: 30px; height: 30px; border-radius: 50%; font-size: 16px; cursor: pointer; }
+  .switcher small { font-weight: 400; font-size: 11px; }
+  .bubble-user { background: #2f7cf6; color: #fff; border-radius: 16px 16px 4px 16px; padding: 10px 14px; max-width: 82%; margin-left: auto; font-size: 14px; line-height: 1.6; }
+  .bubble-ai { background: #1c1c22; border: 1px solid #2c2c35; border-radius: 4px 16px 16px 16px; padding: 10px 14px; font-size: 14px; line-height: 1.7; }
+  .bubble-ai b { color: #fff; }
+  .src { margin-top: 8px; font-size: 12px; color: #a1a1aa; }
+  .src span { border: 1px solid #3f3f46; border-radius: 8px; padding: 2px 8px; margin-right: 6px; }
+  .modelrow select { background: #1c1c22; color: #f4f4f5; border: 1px solid #3f3f46; border-radius: 10px; padding: 7px 10px; font-size: 13px; max-width: 100%; }
+  .askrow { display: flex; gap: 8px; align-items: flex-end; }
+  .askrow textarea { flex: 1; background: #1c1c22; border: 1px solid #3f3f46; border-radius: 14px; color: #fff; padding: 10px 12px; font-size: 14px; resize: none; min-height: 44px; max-height: 110px; }
+  .send { width: 44px; height: 44px; border-radius: 50%; border: none; background: #2f7cf6; color: #fff; font-size: 18px; flex-shrink: 0; cursor: pointer; }
+  .send:disabled { opacity: .45; }
+  .thinking { color: #a1a1aa; font-size: 13px; display: flex; gap: 4px; align-items: center; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: #2f7cf6; animation: blink 1s infinite; }
+  .dot:nth-child(2) { animation-delay: .2s; } .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 50% { opacity: .2; } }
+  /* ===== A：极简整页 ===== */
+  .a-head { padding: 12px 14px 8px; border-bottom: 1px solid #26262e; position: sticky; top: 0; background: #101014; z-index: 5; }
+  .a-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
+  .a-title button { background: none; border: none; color: #5b8cff; font-size: 14px; }
+  .a-scope { display: flex; gap: 8px; margin-top: 8px; }
+  .a-scope button { flex: 1; border: 1px solid #3f3f46; background: #1c1c22; color: #d4d4d8; border-radius: 10px; padding: 8px 0; font-size: 13px; }
+  .a-scope button.on { background: #2f7cf6; border-color: #2f7cf6; color: #fff; font-weight: 700; }
+  .a-idx { margin-top: 8px; font-size: 12px; color: #a1a1aa; display: flex; justify-content: space-between; align-items: center; }
+  .a-idx button { background: none; border: 1px solid #52525b; color: #e4e4e7; border-radius: 8px; font-size: 12px; padding: 3px 10px; }
+  .a-list { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+  .a-foot { border-top: 1px solid #26262e; padding: 8px 12px calc(64px + env(safe-area-inset-bottom)); background: #101014; position: sticky; bottom: 0; }
+  .a-foot .modelrow { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #a1a1aa; margin-bottom: 8px; }
+  /* ===== B：胶囊悬浮 ===== */
+  .b-fake-note { padding: 14px; font-size: 14px; line-height: 1.8; color: #d4d4d8; }
+  .b-fake-note h2 { color: #fff; font-size: 18px; margin: 6px 0 10px; }
+  .b-bar { margin: 0 12px; background: #1c1c22; border: 1px solid #3f3f46; border-radius: 999px; display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 14px; position: sticky; top: 8px; z-index: 5; }
+  .b-bar input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: #fff; font-size: 14px; }
+  .b-bar .go { width: 36px; height: 36px; border-radius: 50%; border: none; background: #2f7cf6; color: #fff; font-size: 16px; flex-shrink: 0; }
+  .b-scope { display: flex; gap: 6px; padding: 8px 14px 0; font-size: 12px; }
+  .b-scope button { border-radius: 999px; border: 1px solid #3f3f46; background: transparent; color: #d4d4d8; padding: 4px 12px; font-size: 12px; }
+  .b-scope button.on { background: #2f7cf6; border-color: #2f7cf6; color: #fff; }
+  .b-sheet { margin-top: 10px; border-top: 2px solid #2f7cf6; background: #141419; border-radius: 16px 16px 0 0; padding: 10px 14px calc(90px); }
+  .b-idxline { font-size: 11px; color: #71717a; margin: 2px 0 8px; }
+  .b-idxline button { background: none; border: none; color: #5b8cff; font-size: 11px; text-decoration: underline; }
+  /* ===== C：工作台 ===== */
+  .c-tabs { display: flex; border-bottom: 1px solid #26262e; position: sticky; top: 0; background: #101014; z-index: 5; }
+  .c-tabs button { flex: 1; background: none; border: none; color: #a1a1aa; font-size: 14px; padding: 12px 0 10px; border-bottom: 2px solid transparent; }
+  .c-tabs button.on { color: #fff; font-weight: 700; border-bottom-color: #2f7cf6; }
+  .c-meta { display: flex; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid #26262e; font-size: 11px; color: #a1a1aa; }
+  .c-meta .pill { border: 1px solid #3f3f46; border-radius: 999px; padding: 2px 10px; }
+  .c-meta .pill.ok { color: #4ade80; border-color: #166534; }
+  .c-meta button { margin-left: auto; background: #1c1c22; border: 1px solid #52525b; color: #e4e4e7; border-radius: 8px; font-size: 11px; padding: 4px 10px; }
+  .c-list { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+  .c-foot { border-top: 1px solid #26262e; padding: 8px 12px calc(64px + env(safe-area-inset-bottom)); background: #101014; position: sticky; bottom: 0; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="phone" id="phone"></div>
+<div class="switcher">
+  <button id="prev">←</button>
+  <div><span id="vlabel">A</span> <small id="vname"></small></div>
+  <button id="next">→</button>
+</div>
+<script>
+(function () {
+  var NAMES = { A: "极简整页", B: "胶囊悬浮", C: "工作台" };
+  var VARS = ["A", "B", "C"];
+  function cur() { var m = /[?&]variant=([ABC])/i.exec(location.search); return m ? m[1].toUpperCase() : "A"; }
+  function go(v) { var u = new URL(location.href); u.searchParams.set("variant", v); location.href = u.toString(); }
+  document.getElementById("prev").onclick = function () { var i = VARS.indexOf(cur()); go(VARS[(i + 2) % 3]); };
+  document.getElementById("next").onclick = function () { var i = VARS.indexOf(cur()); go(VARS[(i + 1) % 3]); };
+  document.addEventListener("keydown", function (e) {
+    if (/INPUT|TEXTAREA/.test((document.activeElement || {}).tagName || "")) return;
+    if (e.key === "ArrowLeft") document.getElementById("prev").click();
+    if (e.key === "ArrowRight") document.getElementById("next").click();
+  });
+  var v = cur();
+  document.getElementById("vlabel").textContent = v;
+  document.getElementById("vname").textContent = "— " + NAMES[v];
+
+  var AI_HTML = '<div class="bubble-ai"><b>手机（消费电子）里的 MEMS 陀螺仪</b>，飞机/火箭只是历史背景。'
+    + '<br><br>主线落点是<b>手机</b>：演进到 MEMS 阶段后，把陀螺仪和加速度计集成到毫米级硅芯片，形成<b>六轴 IMU</b>。'
+    + '<div class="src"><span>《陀螺仪》原理段</span><span>06:24 科里奥利</span><span>视频信息</span></div></div>';
+
+  function scopeRow(idp) {
+    return '<div class="a-scope" id="' + idp + '">'
+      + '<button data-s="all" class="on">全部笔记 96</button>'
+      + '<button data-s="cur">当前笔记</button></div>';
+  }
+  function bindScope(idp) {
+    var el = document.getElementById(idp);
+    el.addEventListener("click", function (e) {
+      var b = e.target.closest("button"); if (!b) return;
+      el.querySelectorAll("button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+    });
+  }
+  function bindAsk(listId, inputId, sendId) {
+    var list = document.getElementById(listId), input = document.getElementById(inputId), send = document.getElementById(sendId);
+    function ask() {
+      var q = input.value.trim(); if (!q) return;
+      var u = document.createElement("div"); u.className = "bubble-user"; u.textContent = q; list.appendChild(u);
+      input.value = ""; input.style.height = "44px";
+      var t = document.createElement("div"); t.className = "thinking"; t.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span> 思考中…';
+      list.appendChild(t); list.scrollTop = list.scrollHeight;
+      setTimeout(function () { t.remove(); var a = document.createElement("div"); a.innerHTML = AI_HTML; list.appendChild(a.firstChild); list.scrollTop = list.scrollHeight; }, 1200);
+    }
+    send.onclick = ask;
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+    input.addEventListener("input", function () { input.style.height = "44px"; input.style.height = Math.min(110, input.scrollHeight) + "px"; });
+  }
+
+  var phone = document.getElementById("phone");
+  if (v === "A") {
+    phone.innerHTML =
+      '<div class="a-head"><div class="a-title"><button onclick="history.back()">‹ 返回</button> AI 问答</div>'
+      + scopeRow("sa")
+      + '<div class="a-idx"><span>● 已覆盖全部 96 篇</span><button>换模型 ▾ space-bunny</button></div></div>'
+      + '<div class="a-list" id="la">'
+      + '<div class="bubble-user">本文提到的陀螺仪主要是用在什么产品上？</div>' + AI_HTML
+      + '</div>'
+      + '<div class="a-foot"><div class="modelrow">问答模型：<b style="color:#fff">space-bunny-free</b>（点右上可换，记住选择）</div>'
+      + '<div class="askrow"><textarea id="ia" placeholder="输入你的问题…"></textarea><button class="send" id="sd">↑</button></div></div>';
+    bindScope("sa"); bindAsk("la", "ia", "sd");
+  } else if (v === "B") {
+    phone.innerHTML =
+      '<div class="b-fake-note"><h2>【熟肉】陀螺仪是如何变得如此微小的</h2>来源：Primal Space｜核心主题：陀螺仪从机械飞轮发展为毫米级 MEMS 芯片的百年演进。<br><br>1. 从飞行演示到自动驾驶仪（00:00）<br>2. 机械陀螺仪的基本原理（01:14）<br>3. V-2 火箭中的陀螺仪（01:54）<br>…正文节选，问答以悬浮条呼出…</div>'
+      + '<div class="b-bar"><input id="ib" placeholder="问一问这篇笔记…"><button class="go" id="gb">↑</button></div>'
+      + '<div class="b-scope" id="sb"><button data-s="all" class="on">全部 96</button><button data-s="cur">当前</button></div>'
+      + '<div class="b-sheet"><div class="b-idxline">● 已覆盖全部 96 篇 · 模型 space-bunny-free ▾</div>'
+      + '<div class="a-list" id="lb" style="padding:0;max-height:46vh">'
+      + '<div class="bubble-user">本文提到的陀螺仪主要是用在什么产品上？</div>' + AI_HTML
+      + '</div>'
+      + '<div class="askrow" style="margin-top:8px"><textarea id="ib2" placeholder="继续追问…"></textarea><button class="send" id="gb2">↑</button></div></div>';
+    bindScope("sb");
+    document.getElementById("gb").onclick = function () {
+      var q = document.getElementById("ib").value.trim(); if (q) { document.getElementById("ib2").value = q; }
+      document.querySelector(".b-sheet").scrollIntoView({ behavior: "smooth" });
+    };
+    bindAsk("lb", "ib2", "gb2");
+  } else {
+    phone.innerHTML =
+      '<div class="c-tabs"><button>笔记</button><button class="on">问答</button><button>原文</button></div>'
+      + '<div class="c-meta"><span class="pill ok">● 已覆盖 96/96</span><span>模型 space-bunny-free ▾</span><button>补建索引</button></div>'
+      + '<div class="c-list" id="lc">'
+      + '<div class="bubble-user">本文提到的陀螺仪主要是用在什么产品上？</div>' + AI_HTML
+      + '</div>'
+      + '<div class="c-foot"><div class="askrow"><textarea id="ic" placeholder="输入你的问题…"></textarea><button class="send" id="sc">↑</button></div></div>';
+    bindAsk("lc", "ic", "sc");
+  }
+})();
+</script>
+</body>
+</html>
