@@ -81,11 +81,16 @@ const MobileLayout: FC<IProps> = ({ NewForm, HistoryList, NoteView, defaultTab =
 
       {/* 三个 Tab 常驻保活、只显隐：切 Tab 不卸载表单，填一半的链接/选项不丢。
           之前条件渲染每次切走就 unmount，NoteForm 的 useEffect(no currentTask→清空)
-          把刚填的链接清掉——即"每次切回来就清空"。 */}
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        <div className={active === 'new' ? 'p-4 pb-8' : 'hidden'}>{NewForm}</div>
-        <div className={active === 'history' ? 'p-4 pb-8' : 'hidden'}>{HistoryList}</div>
-        <div className={active === 'note' ? 'p-4 pb-8' : 'hidden'}>{NoteView}</div>
+          把刚填的链接清掉——即"每次切回来就清空"。
+          main 不再整体滚动（2026-10-04 用户五连拍：问答状态行/输入框跟着内容
+          一起滚跑，sticky 在滚动祖先链上全部失效）。改为每个 pane 自己管滚动：
+          新建/历史 pane 自带 overflow-y-auto；笔记 pane 定高不滚，滚动交给
+          MarkdownViewer 内部（阅读区/问答消息区），这样问答头部与输入区
+          是真·固定，不随内容滑动。 */}
+      <main className="min-h-0 flex-1 overflow-hidden">
+        <div className={active === 'new' ? 'h-full overflow-y-auto p-4 pb-8' : 'hidden'}>{NewForm}</div>
+        <div className={active === 'history' ? 'h-full overflow-y-auto p-4 pb-8' : 'hidden'}>{HistoryList}</div>
+        <div className={active === 'note' ? 'h-full overflow-hidden' : 'hidden'}>{NoteView}</div>
       </main>
 
       <nav className="border-border bg-card grid shrink-0 grid-cols-4 border-t pb-[env(safe-area-inset-bottom)]">

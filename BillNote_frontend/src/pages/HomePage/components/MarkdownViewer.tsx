@@ -809,7 +809,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-4 text-muted-foreground">
+      <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-muted-foreground">
         <StepBar steps={steps} currentStep={taskStatus} />
         <Loading className="h-5 w-5" />
         <div className="text-center text-sm">
@@ -826,7 +826,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   if (status === 'idle') {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center space-y-3 text-muted-foreground">
+      <div className="flex h-full w-full flex-col items-center justify-center space-y-3 text-muted-foreground">
         <Idle />
         <div className="text-center">
           <p className="text-lg font-bold">输入视频链接并点击"生成笔记"</p>
@@ -877,7 +877,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       }
     }
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center gap-4 space-y-3">
+      <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
         <Error />
         <div className="text-center">
           <p className="text-lg font-bold text-red-500">笔记生成失败</p>
@@ -894,7 +894,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   }
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden">
+    <div className="flex h-full w-full flex-col overflow-hidden">
       <MarkdownHeader
         currentTask={currentTask}
         isMultiVersion={isMultiVersion}
@@ -936,63 +936,21 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               ) : (
               <>
-              {/* 窄屏工作台（C 方案，用户 2026-10-04 选定）：笔记 / 问答 / 原文
-                  三 Tab 顶栏切换，与 ScrollArea 互斥二选一。问答 Tab 内再分
-                  状态胶囊行 + 消息区 + 吸底输入（见 ChatPanel）。之前面板与
-                  ScrollArea 同级被裁成左右两条缝；fixed 全屏又盖掉底部 Tab
-                  导致无法返回（白屏死机实拍）。工作台占满阅读区但保留底部
-                  Tab，随时可切走。桌面端走下面的并排逻辑。 */}
+              {/* 窄屏工作台（C 方案）：问答 / 原文替换阅读区（与 ScrollArea 互斥）。
+                  容器只定高不滚（overflow-hidden），滚动全部交给 ChatPanel /
+                  TranscriptViewer 内部——状态行与输入区因此是真·固定，
+                  不随内容滑动（2026-10-04 用户五连拍根因：外层 main 整体滚动，
+                  一切 sticky 都失效）。桌面端走下面的并排逻辑。 */}
               {isNarrow && (showChat === 'half' || showTranscribe) && currentTask ? (
-                <div className="bg-background flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                  <div className="border-border bg-card flex shrink-0 items-stretch border-b" role="tablist">
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={showChat !== 'half' && !showTranscribe}
-                      onClick={() => {
-                        setShowChat(false)
-                        setShowTranscribe(false)
-                      }}
-                      className={`flex-1 border-b-2 px-2 py-2.5 text-sm ${showChat !== 'half' && !showTranscribe ? 'border-primary text-foreground font-semibold' : 'text-muted-foreground border-transparent'}`}
-                    >
-                      笔记
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={showChat === 'half'}
-                      onClick={() => {
-                        setShowChat('half')
-                        setShowTranscribe(false)
-                      }}
-                      className={`flex-1 border-b-2 px-2 py-2.5 text-sm ${showChat === 'half' ? 'border-primary text-foreground font-semibold' : 'text-muted-foreground border-transparent'}`}
-                    >
-                      问答
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={showTranscribe && showChat !== 'half'}
-                      onClick={() => {
-                        setShowChat(false)
-                        setShowTranscribe(true)
-                      }}
-                      className={`flex-1 border-b-2 px-2 py-2.5 text-sm ${showTranscribe && showChat !== 'half' ? 'border-primary text-foreground font-semibold' : 'text-muted-foreground border-transparent'}`}
-                    >
-                      原文
-                    </button>
+                showChat === 'half' ? (
+                  <div className="min-h-0 min-w-0 flex-1">
+                    <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
                   </div>
-                  {/* flex-1 + min-h-0 + overflow-y-auto：面板占满阅读区剩余高度，
-                      内部滚动；之前 min-h-[60vh] 无上限，ChatPanel 的 h-full 按
-                      内容撑高，输入区被顶到页面最底下（用户实拍主诉）。 */}
-                  <div className="min-h-0 flex-1 overflow-y-auto pb-6">
-                    {showChat === 'half' ? (
-                      <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
-                    ) : (
-                      <TranscriptViewer focusTime={transcriptFocusTime} />
-                    )}
+                ) : (
+                  <div className="min-h-0 min-w-0 flex-1">
+                    <TranscriptViewer focusTime={transcriptFocusTime} />
                   </div>
-                </div>
+                )
               ) : (
               <ScrollArea viewportRef={readerViewportRef} className="min-w-0 flex-1">
                 {/* 导出长图的截图根：视频信息条 + 正文都包进来 */}

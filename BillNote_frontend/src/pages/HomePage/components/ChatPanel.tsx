@@ -424,13 +424,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     setBackfilling(false)
   }
 
-  // 工作台（C 方案，用户 2026-10-04 选定）：状态胶囊行——覆盖胶囊 +
-  // 模型下拉 + 补建按钮同行，一行只占 32px。之前"AI 问答"标题、范围切换、
-  // 覆盖长文本三层叠起来占 120px+（用户红框：高度太高、标题多余、括号废话）。
-  // 窄屏面板里 ChatPanel 被包在滚动容器中：只占内容高度，滚动交给外层。
+  // 工作台（C 方案）：三段式定高布局——状态行 shrink-0 钉在顶、消息区
+  // min-h-0 flex-1 是唯一滚动区、输入区 shrink-0 钉在底。之前窄屏靠
+  // sticky 吸底，但外层 main 整体滚动时 sticky 全部失效（2026-10-04
+  // 用户五连拍：状态行滚跑、输入框悬在内容中间）。现在 MobileLayout 的
+  // note pane 定高不滚，这里的 h-full 有确定值，三段真的钉死不动。
   return (
-    <div className="flex flex-col sm:h-full sm:border-l">
-      <div className="flex items-center gap-1.5 border-b px-3 py-1.5">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden sm:border-l">
+      <div className="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5">
         {/* 范围切换：全部 / 当前，二段胶囊 */}
         <div className="flex shrink-0 items-center rounded-full bg-muted p-0.5 text-xs">
           <button
@@ -522,10 +523,9 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         )}
       </div>
 
-      {/* 消息列表：回答再长也只在这个区域内滚动，输入区固定在底下不动
-          （之前 flex-1 按内容撑高，输入框被顶到页面最底下，用户实拍）。
-          窄屏替换式面板里外层已是滚动容器，这里给最小高度保证可用。 */}
-      <div className="min-h-[200px] flex-1 overflow-hidden sm:min-h-0">
+      {/* 消息列表：唯一的滚动区。回答再长只在区域内滚，状态行与输入区
+          钉死不动（用户实拍主诉，2026-10-04 五连拍）。 */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {messages.length === 0 && !loading ? (
           <div className="flex h-full min-h-[200px] items-center justify-center text-center text-sm text-muted-foreground">
             <div>
@@ -542,10 +542,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         )}
       </div>
 
-      {/* 输入区域：sticky 吸底，消息再长也不被顶跑（用户实拍主诉）。
-          模型已收到状态胶囊行（短名下拉），这里只剩输入框一行。
-          窄屏下面就是底部 Tab，吸底即停在 Tab 上方。 */}
-      <div className="border-t px-3 py-2 sticky bottom-0 bg-background z-10">
+      {/* 输入区域：shrink-0 钉在底部（滚动区外，物理固定，不再用 sticky）。 */}
+      <div className="shrink-0 border-t bg-background px-3 py-2">
         <Sender
           value={input}
           onChange={setInput}
