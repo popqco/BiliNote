@@ -414,7 +414,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setCurrentVerId(latestVersion.ver_id)
       }
     }
-  }, [currentTask?.id, taskStatus])
+    // 依赖必须含 markdown 本体：回填的老笔记点开时先是空概要，
+    // 正文由 Home 懒加载后写入 store（string→版本数组形态会变），
+    // id/taskStatus 都不变，不监听 markdown 就永远显示旧的空态
+    // （2026-10-04 手机实机：老笔记点开一片空白，新笔记正常）。
+  }, [currentTask?.id, taskStatus, currentTask?.markdown, isMultiVersion])
   useEffect(() => {
     if (!currentTask || !isMultiVersion) return
 
@@ -425,7 +429,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       setCreateTime(currentVer.created_at || '')
       setSelectedContent(currentVer.content)
     }
-  }, [currentVerId, currentTask?.id])
+  }, [currentVerId, currentTask?.id, currentTask?.markdown])
   // 切换笔记/版本时把阅读区拉回顶部：
   // ScrollArea 的 Viewport 是常驻复用的（Radix 结构），切笔记只换里面的 markdown，
   // 滚动位置会原样保留——长文切短文直接停在半山腰，用户还得手动拉回去。
