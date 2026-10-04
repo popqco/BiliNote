@@ -13,13 +13,7 @@ import { toast } from 'react-hot-toast'
 import { chatKey, useChatJumpStore, useChatStore } from '@/store/chatStore'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select.tsx'
+import { getProviderList } from '@/services/model'
 import {
   askQuestion,
   backfillGlobalIndex,
@@ -135,6 +129,10 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
   // 现在走 /chat/coverage 的真实统计，补建按钮按缺失数提示。
   const [coverage, setCoverage] = useState<{ indexed: number; total: number } | null>(null)
   const [backfilling, setBackfilling] = useState(false)
+  // 方案 B 模型选择弹层（2026-10-04 用户评审选定）：状态行不再放模型下拉，
+  // 模型独占输入框上方一行（完整名可见），点击弹出底部弹层选择。
+  const [modelSheetOpen, setModelSheetOpen] = useState(false)
+  const [providerNames, setProviderNames] = useState<Record<string, string>>({})
 
   const scope = useChatStore(state => state.scope)
   const setScope = useChatStore(state => state.setScope)
@@ -424,13 +422,30 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     setBackfilling(false)
   }
 
+  // 模型弹层：打开时刷新模型列表，并拉一次供应商 id→名称映射（弹层里
+  // 展示归属，如 OpenCode Go / OpenCode Free）。普通函数，非 hook。
+  const openModelSheet = () => {
+    setModelSheetOpen(true)
+    loadEnabledModels()
+    getProviderList({ silent: true })
+      .then((list: any) => {
+        const map: Record<string, string> = {}
+        ;(Array.isArray(list) ? list : []).forEach((p: any) => {
+          if (p?.id) map[p.id] = p.name
+        })
+        setProviderNames(map)
+      })
+      .catch(() => {})
+  }
+  const closeModelSheet = () => setModelSheetOpen(false)
+
   // 工作台（C 方案）：三段式定高布局——状态行 shrink-0 钉在顶、消息区
   // min-h-0 flex-1 是唯一滚动区、输入区 shrink-0 钉在底。之前窄屏靠
   // sticky 吸底，但外层 main 整体滚动时 sticky 全部失效（2026-10-04
   // 用户五连拍：状态行滚跑、输入框悬在内容中间）。现在 MobileLayout 的
   // note pane 定高不滚，这里的 h-full 有确定值，三段真的钉死不动。
   return (
-    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden sm:border-l">
+    <div className="relative flex h-full min-h-0 w-full flex-col overflow-hidden sm:border-l">
       <div className="flex shrink-0 items-center gap-1.5 border-b px-3 py-1.5">
         {/* 范围切换：全部 / 当前，二段胶囊 */}
         <div className="flex shrink-0 items-center rounded-full bg-muted p-0.5 text-xs">
@@ -478,25 +493,8 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           )
         )}
         <div className="flex-1" />
-        {/* 模型：只显示短名，完整名放 title；之前整行"问答模型：xxx"占一行 */}
-        <Select
-          value={chatModelName}
-          onValueChange={setChatModelName}
-          onOpenChange={open => {
-            if (open) loadEnabledModels()
-          }}
-        >
-          <SelectTrigger className="h-7 w-28 truncate border-0 bg-transparent px-1 text-[11px] text-muted-foreground" title={chatModelName || '选择问答模型'}>
-            <SelectValue placeholder="模型" />
-          </SelectTrigger>
-          <SelectContent>
-            {modelList.map(m => (
-              <SelectItem key={m.id} value={m.model_name}>
-                {m.model_name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        {/* 模型选择已移到输入框上方一行（方案 B，见底部弹层），状态行只留
+            范围 / 覆盖率 / 操作，长模型名不再挤在这里截断 */}
         <Button
           variant="ghost"
           size="sm"
@@ -544,6 +542,18 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
 
       {/* 输入区域：shrink-0 钉在底部（滚动区外，物理固定，不再用 sticky）。 */}
       <div className="shrink-0 border-t bg-background px-3 py-2">
+        {/* 方案 B：模型独占输入框上方一行，任意长度模型名完整可见
+            （状态行下拉框 w-28 会把 31 字符的模型名截成"space-bu"，
+            用户 2026-10-04 实拍不满；truncate 仅作超长兜底）。 */}
+        <button
+          type="button"
+          onClick={openModelSheet}
+          className="mb-2 flex max-w-full items-center gap-1.5 rounded-full border bg-muted/40 px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <Bot className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 truncate">{chatModelName || '选择问答模型'}</span>
+          <ChevronDown className="h-3 w-3 shrink-0" />
+        </button>
         <Sender
           value={input}
           onChange={setInput}
@@ -552,6 +562,76 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
           placeholder="输入你的问题..."
         />
       </div>
+
+      {/* 模型选择底部弹层：挂在面板内（root relative），手机上盖住阅读区、
+          停在底栏上方；桌面端盖住侧栏面板，行为一致。列表展示完整模型名
+          与供应商，单选即生效（chatModelName 随 chatStore 持久化）。 */}
+      {modelSheetOpen && (
+        <div className="absolute inset-0 z-40">
+          <style>{`@keyframes chatSheetUp{from{transform:translateY(60%)}to{transform:translateY(0)}}.chat-sheet{animation:chatSheetUp .22s cubic-bezier(.32,.72,.24,1)}`}</style>
+          <div className="absolute inset-0 bg-black/55" onClick={closeModelSheet} />
+          <div
+            className="chat-sheet absolute inset-x-0 bottom-0 rounded-t-2xl border-t bg-card px-4 pt-2"
+            style={{ paddingBottom: 'calc(14px + env(safe-area-inset-bottom))' }}
+          >
+            <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-muted-foreground/40" />
+            <div className="mb-1 flex items-baseline justify-between gap-3">
+              <span className="text-[15px] font-semibold">问答模型</span>
+              <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+                当前：{chatModelName || '未选择'}
+              </span>
+            </div>
+            <p className="mb-3 text-[11px] text-muted-foreground">
+              与笔记生成表单的模型相互独立；选择后立即生效并记住。
+            </p>
+            <div className="max-h-[46vh] overflow-y-auto">
+              {modelList.length === 0 ? (
+                <p className="py-6 text-center text-xs text-muted-foreground">
+                  暂无可用模型，请到「设置 → AI模型设置」添加并启用
+                </p>
+              ) : (
+                modelList.map(m => {
+                  const sel = m.model_name === chatModelName
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => {
+                        setChatModelName(m.model_name)
+                        closeModelSheet()
+                      }}
+                      className={`mb-2 flex w-full items-center gap-2.5 rounded-xl border px-3 py-3 text-left ${sel ? 'border-primary bg-primary/10' : 'border-border bg-muted/30'}`}
+                    >
+                      <span
+                        className={`relative h-4 w-4 shrink-0 rounded-full border-2 ${sel ? 'border-primary' : 'border-muted-foreground/50'}`}
+                      >
+                        {sel && <span className="absolute inset-[3px] rounded-full bg-primary" />}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block break-all text-[13px] leading-snug text-foreground">
+                          {m.model_name}
+                        </span>
+                        {providerNames[m.provider_id] && (
+                          <span className="mt-0.5 block text-[10.5px] text-muted-foreground">
+                            {providerNames[m.provider_id]}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={closeModelSheet}
+              className="mt-1 w-full rounded-xl bg-primary py-2.5 text-sm font-semibold text-primary-foreground"
+            >
+              完成
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
