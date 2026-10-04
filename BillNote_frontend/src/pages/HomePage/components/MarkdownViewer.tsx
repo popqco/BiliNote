@@ -364,6 +364,23 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const isMultiVersion = Array.isArray(currentTask?.markdown)
   const [showTranscribe, setShowTranscribe] = useState(false)
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
+  // 手机窄视口（<768px，与 useIsMobile 同断点）：问答/原文走全屏浮层，
+  // 不再与正文并排挤成“左右两条缝”（用户第三张实拍）。
+  // 用 matchMedia 监听而非只读一次，横竖屏/分屏切换时自动跟随。
+  const [isNarrow, setIsNarrow] = useState<boolean>(
+    () =>
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia !== 'undefined' &&
+      window.matchMedia('(max-width: 767px)').matches,
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia === 'undefined') return
+    const mq = window.matchMedia('(max-width: 767px)')
+    const onChange = (e: MediaQueryListEvent) => setIsNarrow(e.matches)
+    setIsNarrow(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   const svgRef = useRef<SVGSVGElement>(null)
   // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
@@ -944,7 +961,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
                 </div>
               </ScrollArea>
-              {showTranscribe && (
+              {/* 桌面端并排逻辑保持不变。窄屏走下方全屏浮层，这里只在非窄屏渲染。 */}
+              {!isNarrow && showTranscribe && (
                 // w-1/3：转写+问答同开时三列并排（笔记 flex-1 / 转写 1/3 /
                 // 问答 1/3）。旧值 w-2/4 与问答 w-1/2 相加占满 100%，笔记
                 // 阅读区被挤成 0 宽度直接消失——点时间徽章后“整屏都是
@@ -956,7 +974,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               )}
               {/* 侧边问答模式：markdown + ChatPanel 各占一半；原文面板
                   同开时压缩到 1/3 给笔记让位 */}
-              {showChat === 'half' && currentTask && (
+              {!isNarrow && showChat === 'half' && currentTask && (
                 <div className={`ml-2 h-full shrink-0 ${showTranscribe ? 'w-1/3' : 'w-1/2'}`}>
                   <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
                 </div>
@@ -975,6 +993,35 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               </div>
             </div>
           )}
+        </div>
+      )}
+      {/* 窄屏全屏浮层：原文 / 问答（二选一，问答优先）盖住正文，
+          带顶部关闭条，关掉回到笔记。桌面端不受影响。 */}
+      {isNarrow && (showChat === 'half' || showTranscribe) && currentTask && (
+        <div className="bg-background fixed inset-0 z-40 flex flex-col">
+          <div className="border-border bg-card flex h-12 shrink-0 items-center gap-2 border-b px-3">
+            <button
+              type="button"
+              onClick={() => {
+                setShowChat(false)
+                setShowTranscribe(false)
+              }}
+              className="text-primary text-sm font-medium"
+            >
+              ← 返回笔记
+            </button>
+            <div className="flex-1" />
+            <span className="text-muted-foreground text-sm">
+              {showChat === 'half' ? 'AI 问答' : '原文参照'}
+            </span>
+          </div>
+          <div className="min-h-0 flex-1">
+            {showChat === 'half' ? (
+              <ChatPanel taskId={currentTask.id} mode="half" onModeChange={setShowChat} />
+            ) : (
+              <TranscriptViewer focusTime={transcriptFocusTime} />
+            )}
+          </div>
         </div>
       )}
       {/* 摘要海报的屏幕外挂载点：仅导出期间渲染，截图由 effect 负责 */}

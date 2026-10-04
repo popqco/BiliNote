@@ -32,13 +32,14 @@ const Appearance = () => {
   const { theme, setTheme } = useTheme()
 
   return (
-    <div className="bg-card h-full overflow-auto p-8">
+    <div className="bg-card h-full overflow-auto p-4 sm:p-8">
       <div className="text-2xl font-medium">外观</div>
       <div className="text-muted-foreground mt-1 text-sm">
         选择主题外观。夜间使用暗色模式，屏幕不再刺眼。
       </div>
 
-      <div className="mt-6 grid max-w-3xl grid-cols-3 gap-4">
+      {/* 手机上三列会被压成竖条，改单列上下排 */}
+      <div className="mt-6 grid max-w-3xl grid-cols-1 gap-4 min-[420px]:grid-cols-3">
         {OPTIONS.map(o => (
           <button
             key={o.key}

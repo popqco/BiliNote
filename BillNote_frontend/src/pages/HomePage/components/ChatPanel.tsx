@@ -388,23 +388,56 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     if (next !== scope) setScope(next)
   }
 
+  // 手动补建：后端是后台逐个跑（几十篇笔记要几分钟），之前只调一次接口
+  // 就收尾，按钮"闪一下就没下文"（用户实拍）。这里发完后每 3s 轮询一次
+  // /chat/coverage，直到缺口补满或 5 分钟超时；数字实时涨，跑完给 toast。
+  const handleBackfill = useCallback(async () => {
+    if (backfilling) return
+    setBackfilling(true)
+    toast.success('已开始补建索引：后台逐个处理，数字会慢慢涨，不影响提问')
+    try {
+      await backfillGlobalIndex()
+    } catch {
+      toast.error('补建请求失败，请稍后重试')
+      setBackfilling(false)
+      return
+    }
+    for (let round = 0; round < 100; round += 1) {
+      await new Promise(r => setTimeout(r, 3000))
+      try {
+        const next = await getIndexCoverage()
+        setCoverage({ indexed: next.indexed, total: next.total_notes })
+        if (next.missing.length === 0 || next.indexed >= next.total_notes) {
+          toast.success(`补建完成：已覆盖全部 ${next.total_notes} 篇笔记`)
+          break
+        }
+        if (round === 99) {
+          toast('补建仍在后台继续，稍后数字会继续涨', { duration: 5000 })
+        }
+      } catch {
+        /* 轮询失败继续下一轮 */
+      }
+    }
+    setBackfilling(false)
+  }, [backfilling])
+
   return (
-    <div className="flex h-full flex-col border-l">
-      {/* 头部 */}
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">AI 问答</span>
+    <div className="flex h-full flex-col sm:border-l">
+      {/* 头部：窄屏允许换行，范围切换按钮不再把标题挤掉 */}
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 border-b px-3 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="shrink-0 text-sm font-medium">AI 问答</span>
           {/* 范围切换：全部笔记（默认）/ 当前笔记 */}
           <div className="flex items-center rounded-md bg-muted p-0.5 text-xs">
             <button
-              className={`rounded px-2 py-0.5 ${scope === 'all' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
+              className={`rounded px-2 py-0.5 whitespace-nowrap ${scope === 'all' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
               onClick={() => handleScopeChange('all')}
               title="跨全部历史笔记检索"
             >
               全部笔记
             </button>
             <button
-              className={`rounded px-2 py-0.5 ${scope === 'current' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
+              className={`rounded px-2 py-0.5 whitespace-nowrap ${scope === 'current' ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}
               onClick={() => handleScopeChange('current')}
               title="只检索当前笔记"
             >
@@ -446,7 +479,14 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       {scope === 'all' && (
         <div className="border-b px-3 py-1 text-xs text-muted-foreground">
           {backfilling
-            ? '正在为历史笔记补建索引…（可在后台慢慢跑，不影响提问）'
+            ? (
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {coverage
+                  ? `正在补建索引…已索引 ${coverage.indexed} / 共 ${coverage.total} 篇（后台逐个跑，不影响提问）`
+                  : '正在补建索引…（后台逐个跑，不影响提问）'}
+              </span>
+            )
             : coverage === null
               ? '正在统计已索引笔记…'
               : coverage.total === 0
@@ -454,25 +494,11 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
                 : coverage.indexed >= coverage.total
                   ? `已覆盖全部 ${coverage.total} 篇笔记`
                   : (
-                    <span>
-                      {`已索引 ${coverage.indexed} / 共 ${coverage.total} 篇笔记`}
+                    <span className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                      <span>{`已索引 ${coverage.indexed} / 共 ${coverage.total} 篇笔记`}</span>
                       <button
-                        className="ml-2 underline hover:text-foreground"
-                        onClick={async () => {
-                          try {
-                            setBackfilling(true)
-                            await backfillGlobalIndex()
-                          } catch {
-                            /* 补索引失败不阻塞问答 */
-                          } finally {
-                            setBackfilling(false)
-                            getIndexCoverage()
-                              .then(next => {
-                                if (next) setCoverage({ indexed: next.indexed, total: next.total_notes })
-                              })
-                              .catch(() => {})
-                          }
-                        }}
+                        className="ml-1 shrink-0 rounded border px-1.5 py-0.5 underline hover:text-foreground"
+                        onClick={handleBackfill}
                       >
                         补建索引
                       </button>
