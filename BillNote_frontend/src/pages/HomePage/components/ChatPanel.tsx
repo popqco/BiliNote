@@ -13,6 +13,7 @@ import { toast } from 'react-hot-toast'
 import { chatKey, useChatJumpStore, useChatStore } from '@/store/chatStore'
 import { useTaskStore } from '@/store/taskStore'
 import { useModelStore } from '@/store/modelStore'
+import { useIsMobile } from '@/hooks/useIsMobile'
 import { getProviderList } from '@/services/model'
 import {
   askQuestion,
@@ -133,6 +134,10 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
   // 模型独占输入框上方一行（完整名可见），点击弹出底部弹层选择。
   const [modelSheetOpen, setModelSheetOpen] = useState(false)
   const [providerNames, setProviderNames] = useState<Record<string, string>>({})
+  // 全屏/半屏切换是桌面端概念（侧栏 ↔ 独占阅读区）；手机上问答本来就
+  // 占满阅读区，切了没有任何视觉变化，看着像坏按钮（2026-10-04 实机
+  // 反馈）——手机上直接不渲染。
+  const isMobile = useIsMobile()
 
   const scope = useChatStore(state => state.scope)
   const setScope = useChatStore(state => state.setScope)
@@ -495,19 +500,21 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         <div className="flex-1" />
         {/* 模型选择已移到输入框上方一行（方案 B，见底部弹层），状态行只留
             范围 / 覆盖率 / 操作，长模型名不再挤在这里截断 */}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 shrink-0 px-1.5 text-muted-foreground hover:text-foreground"
-          onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
-          title={mode === 'half' ? '全屏' : '半屏'}
-        >
-          {mode === 'half' ? (
-            <Maximize2 className="h-3.5 w-3.5" />
-          ) : (
-            <Minimize2 className="h-3.5 w-3.5" />
-          )}
-        </Button>
+        {!isMobile && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 shrink-0 px-1.5 text-muted-foreground hover:text-foreground"
+            onClick={() => onModeChange(mode === 'half' ? 'full' : 'half')}
+            title={mode === 'half' ? '独占整页（隐藏笔记正文）' : '恢复侧栏（与笔记并排）'}
+          >
+            {mode === 'half' ? (
+              <Maximize2 className="h-3.5 w-3.5" />
+            ) : (
+              <Minimize2 className="h-3.5 w-3.5" />
+            )}
+          </Button>
+        )}
         {messages.length > 0 && (
           <Button
             variant="ghost"
