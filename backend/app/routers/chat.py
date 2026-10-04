@@ -1,10 +1,12 @@
+import json
+import os
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
 from app.services.chat_service import chat as chat_service
-from app.services.vector_store import VectorStoreManager
+from app.services.vector_store import NOTE_OUTPUT_DIR, VectorStoreManager
 from app.utils.logger import get_logger
 from app.utils.response import ResponseWrapper as R
 
@@ -18,6 +20,10 @@ _index_status: dict[str, str] = {}
 
 class IndexRequest(BaseModel):
     task_id: str
+    # 前端兜底内容 {markdown, transcript?, audio_meta?}：部分笔记只存在
+    # 前端 IndexedDB（后端任务记录/结果文件已被清理），缺源文件时用 pushed
+    # 内容先落盘再索引，否则这些笔记的单篇问答是死局（2026-10-04 手机实机）。
+    note: Optional[dict] = None
 
 
 class ChatMessage(BaseModel):
@@ -39,6 +45,30 @@ class AskRequest(BaseModel):
 
 class BackfillRequest(BaseModel):
     task_ids: Optional[list[str]] = None
+
+
+def _restore_note_file(task_id: str, note: dict) -> None:
+    """把前端推回的笔记内容落盘成标准 note_results json（仅缺文件时）。"""
+    result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
+    if os.path.exists(result_path):
+        return
+    markdown = note.get("markdown") or ""
+    if isinstance(markdown, list):
+        markdown = (markdown[-1] or {}).get("content", "") if markdown else ""
+    if not str(markdown).strip():
+        logger.warning(f"兜底内容缺少 markdown，放弃落盘: {task_id}")
+        return
+    payload = {
+        "markdown": markdown,
+        "transcript": note.get("transcript") or {},
+        "audio_meta": note.get("audio_meta") or {},
+    }
+    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
+    tmp_path = result_path + ".restore.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp_path, result_path)
+    logger.info(f"前端兜底落盘笔记源文件: {task_id}")
 
 
 def _do_index(task_id: str):
@@ -71,6 +101,13 @@ def index_task(data: IndexRequest, background_tasks: BackgroundTasks):
     if store.is_indexed(data.task_id):
         _index_status[data.task_id] = "indexed"
         return R.success(msg="已完成索引")
+
+    # 缺源文件时先用前端兜底内容落盘（见 IndexRequest.note 注释）
+    if data.note:
+        try:
+            _restore_note_file(data.task_id, data.note)
+        except Exception as e:
+            logger.error(f"兜底落盘失败: {data.task_id}, {e}")
 
     _index_status[data.task_id] = "indexing"
     background_tasks.add_task(_do_index, data.task_id)

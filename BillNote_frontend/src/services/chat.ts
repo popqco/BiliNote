@@ -29,8 +29,21 @@ export interface ChatStatusResponse {
   status: IndexStatus
 }
 
-export const indexTask = async (taskId: string): Promise<void> => {
-  return await request.post('/chat/index', { task_id: taskId })
+/** 索引兜底内容：后端缺 note_results 源文件时（笔记只存在前端 IndexedDB），
+ * 前端把自己持有的内容推给后端落盘再索引（2026-10-04 手机实机发现）。 */
+export interface IndexNotePayload {
+  markdown: string
+  transcript?: {
+    full_text?: string
+    language?: string
+    raw?: unknown
+    segments?: unknown[]
+  }
+  audio_meta?: Record<string, unknown>
+}
+
+export const indexTask = async (taskId: string, note?: IndexNotePayload): Promise<void> => {
+  return await request.post('/chat/index', { task_id: taskId, note })
 }
 
 export const askQuestion = async (data: {

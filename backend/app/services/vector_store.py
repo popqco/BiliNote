@@ -336,8 +336,9 @@ class VectorStoreManager:
         """
         result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
         if not os.path.exists(result_path):
-            logger.warning(f"笔记文件不存在，跳过索引: {result_path}")
-            return
+            # 必须抛错而不是静默跳过：_do_index 会把静默返回标成 indexed
+            # （假成功），前端拿着假状态进问答却检索不到任何内容。
+            raise ValueError(f"笔记源文件不存在，无法索引: {result_path}")
 
         with open(result_path, "r", encoding="utf-8") as f:
             note_data = json.load(f)
@@ -357,8 +358,7 @@ class VectorStoreManager:
         all_chunks = meta_chunks + md_chunks + tr_chunks
 
         if not all_chunks:
-            logger.warning(f"笔记内容为空，跳过索引: {task_id}")
-            return
+            raise ValueError(f"笔记内容为空，无法索引: {task_id}")
 
         col_name = self._collection_name(task_id)
 

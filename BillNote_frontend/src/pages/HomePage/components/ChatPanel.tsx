@@ -121,6 +121,24 @@ function SourceBadges({
   )
 }
 
+/** 索引兜底内容：把前端持有的笔记内容（IndexedDB/task store）推给后端。
+ * 后端缺 note_results 源文件时（笔记记录可能已被清理）先落盘再索引，
+ * 否则这些笔记的单篇问答永远"索引失败"，重新索引是死局。 */
+function notePayloadOf(t: any):
+  | { markdown: string; transcript?: any; audio_meta?: any }
+  | undefined {
+  if (!t) return undefined
+  const md = t.markdown
+  // 版本数组按新版本在前排列，与阅读器默认展示一致
+  const content = Array.isArray(md) ? (md[0]?.content ?? '') : typeof md === 'string' ? md : ''
+  if (!content.trim()) return undefined
+  return {
+    markdown: content,
+    transcript: t.transcript ?? undefined,
+    audio_meta: t.audioMeta ?? undefined,
+  }
+}
+
 export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -193,8 +211,9 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
         if (cov) setCoverage({ indexed: cov.indexed, total: cov.total_notes })
 
         if (res.status === 'idle') {
-          // 未索引，触发后台索引
-          await indexTask(taskId)
+          // 未索引，触发后台索引；带上前端兜底内容（后端缺源文件时落盘自愈）
+          const t = useTaskStore.getState().tasks.find(x => x.id === taskId)
+          await indexTask(taskId, notePayloadOf(t))
           if (!cancelled) setIndexStatus('indexing')
         }
 
@@ -368,21 +387,23 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <span className="text-sm">索引失败，请重试</span>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={async () => {
-            setIndexStatus('indexing')
-            try {
-              await indexTask(taskId)
-            } catch {
-              toast.error('索引请求失败')
-              setIndexStatus('failed')
-            }
-          }}
-        >
-          重新索引
-        </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={async () => {
+              setIndexStatus('indexing')
+              try {
+                // 兜底内容同上：后端缺源文件时靠前端这份自愈
+                const t = useTaskStore.getState().tasks.find(x => x.id === taskId)
+                await indexTask(taskId, notePayloadOf(t))
+              } catch {
+                toast.error('索引请求失败')
+                setIndexStatus('failed')
+              }
+            }}
+          >
+            重新索引
+          </Button>
       </div>
     )
   }
