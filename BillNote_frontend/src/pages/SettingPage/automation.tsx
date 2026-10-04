@@ -126,6 +126,13 @@ const Automation = () => {
    * 「立即运行一轮」：先校验 Cookie（失败当场给出原因，不再"点了没反应"），
    * 触发后轮询 /automation/status，把本轮提交/跳过明细或失败原因回显出来。
    */
+  /**
+   * 「立即运行一轮」：先校验 Cookie（失败当场给出原因，不再"点了没反应"），
+   * 触发后轮询 /automation/status，把本轮提交/跳过明细或失败原因回显出来。
+   * 基线锚定：触发前先记下当前 last_round_at，轮询只认"比基线新的轮次"——
+   * 状态文件里还躺着上一轮的失败原因/上上轮的进度，直接看会把旧失败
+   * 当成"本轮又失败了"误报（2026-10-04 Cookie 实测：已恢复后界面仍红）。
+   */
   const onRunNow = async () => {
     setBusy(true)
     let poll: number | undefined
@@ -137,12 +144,18 @@ const Automation = () => {
       } else {
         toast.success(`登录有效，「稍后再看」共 ${n} 个视频，开始检查…`)
       }
+      const before: any = await get_automation_status().catch(() => null)
+      const baseline = before?.last_round_at ?? null
       await run_automation_now()
 
       poll = window.setInterval(async () => {
         const st: any = await get_automation_status().catch(() => null)
         setStatus(st)
         if (!st) return
+        // 还没跑到新轮次：后端 running 且 progress/last_round_at 都还是旧的，
+        // 此时 st.last_error 是上一轮的残留，不能当本轮失败报。
+        const sameRound = baseline != null && st.last_round_at === baseline
+        if (sameRound) return
         if (st.last_error) {
           toast.error(st.last_error, { duration: 8000 })
           clearInterval(poll)
@@ -200,7 +213,12 @@ const Automation = () => {
             最近一轮：{status.phase || (status.running ? '进行中' : '未知')}
             {status.last_round_at && <span className="text-muted-foreground font-normal">（{status.last_round_at.replace('T', ' ').slice(0, 19)}）</span>}
           </div>
-          {status.last_error && <div className="text-red-500 mt-2">失败原因：{status.last_error}</div>}
+          {/* 运行中不展示旧失败原因：新轮启动时后端已清 last_error，
+              但状态文件落盘/轮询有延迟，running 且进度还是旧轮时这里会闪出
+              上一轮的红字（2026-10-04 Cookie 误报的另一半）。 */}
+          {status.last_error && !status.running && (
+            <div className="text-red-500 mt-2">失败原因：{status.last_error}</div>
+          )}
           {status.progress && (
             <div className="text-muted-foreground mt-2 flex flex-col gap-1">
               <div>

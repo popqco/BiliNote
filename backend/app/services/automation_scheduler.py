@@ -200,14 +200,18 @@ class AutomationScheduler:
     def run_round_once_safe(self, cfg: Optional[dict] = None) -> Dict:
         """带异常兜底的入口（HTTP 路由 / CLI / 线程共用）。"""
         if self._running_round:
-            # 说明白为什么没跑：不然界面只会看到「已触发」而进度纹丝不动
-            self._update_state(last_error="本进程已有一轮在运行，本次触发被忽略")
+            # 同进程已有轮次在跑：直接忽略，不写 last_error——正在跑的那轮会自己
+            # 更新进度与结果，写一条"被忽略"进去只会让界面把"跳过触发"误报成
+            # "本轮失败"（2026-10-04 实测：运行中点"立即运行一轮"污染状态）。
             return {"skipped": "当前进程已有检查轮在运行"}
         if not self._round_lock.acquire():
-            self._update_state(last_error="另一个入口（应用内调度或计划任务）正在跑一轮，本次触发被忽略")
+            # 文件锁被另一入口持有：同上，不污染共享状态文件，调用方看当前进度即可。
             return {"skipped": "另一个入口的检查轮正在运行（文件锁被占用）"}
         self._running_round = True
-        self._update_state(running=True, phase="拉取稍后再看")
+        # 新轮启动清掉上轮的失败与进度：否则运行中界面会同时显示"本轮进度"和
+        # "上轮失败原因"（2026-10-04 Cookie 误报即如此：22:32 的失败挂到 22:39
+        # 的进度旁边，用户以为本轮又因 Cookie 失败）。
+        self._update_state(running=True, phase="拉取稍后再看", last_error=None, progress=None)
         try:
             result = self.run_round_once(cfg)
         except Exception as e:
