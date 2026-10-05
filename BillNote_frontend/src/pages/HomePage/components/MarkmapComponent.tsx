@@ -90,12 +90,42 @@ function getMindmapBounds(svg: SVGSVGElement) {
 function stripMindmapImages(markdown: string) {
   return (markdown || '')
     // 思维导图只保留文字结构，图片节点会让预览排版和 PNG 导出效果都很差。
+    // 斜体包裹的 *Screenshot-[mm:ss]* 替换后残留的收尾星号（`![](...)*`）连星号一起剥。
+    .replace(/!\[[^\]]*\]\([^)]*\)[ \t]*\*{1,2}/g, '')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
     .replace(/<img\b[^>]*>/gi, '')
+    // 原片跳转链接行尾的收尾星号：`...?t=12)*`
+    .replace(/(\]\([^)]*(?:\?t=|\/video\/)[^\)]*\))[ \t]*\*{1,2}(?=[ \t]*$)/gm, '$1')
+    // 剥完只剩列表符/星号的行（空 li、孤立星号段）——markmap 会渲染成空节点
+    .replace(/^[ \t]*[-*+]?[ \t]*\*{1,2}[ \t]*$/gm, '')
+    .replace(/^[ \t]*[-*+][ \t]*$/gm, '')
+}
+
+// markmap-html-parser 建树时每个 <ul>/<ol> 会先成为一个空内容岔节点（列表项挂在
+// 它下面），只有"父节点仅有这一个子节点"时 markmap 的 cleanNode 才会把它折叠掉。
+// 笔记小节普遍是"列表 + 截图段 / 多组段落+列表"的多块结构，空岔会成片暴露——
+// 用户看到的就是一圈圈没有文字的分支（2026-10-05 截图）。这里把空内容节点用其
+// 子节点原地顶替，正文字节点不受影响。
+function isBlankNodeContent(content: unknown) {
+  return !String(content ?? '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/<[^>]+>/g, '')
+    .trim()
+}
+
+function pruneEmptyMapNodes<T extends { content?: unknown; children?: T[] }>(node: T, isRoot = false): T[] {
+  const children = (node.children ?? []).flatMap(child => pruneEmptyMapNodes(child))
+  if (isRoot || !isBlankNodeContent(node.content)) {
+    return [{ ...node, children }]
+  }
+  return children
 }
 
 function transformMindmap(markdown: string) {
-  return transformer.transform(stripMindmapImages(markdown))
+  const { root, ...rest } = transformer.transform(stripMindmapImages(markdown))
+  const [pruned] = pruneEmptyMapNodes(root, true)
+  return { root: pruned, ...rest }
 }
 
 function createExportSvg(svgEl: SVGSVGElement) {
