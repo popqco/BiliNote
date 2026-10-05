@@ -29,9 +29,12 @@ logger = get_logger(__name__)
 # app/downloaders/bilibili_dm_patch.py for details.
 apply_bilibili_dm_img_patch()
 
-# 暂时性下载错误的自动重试（2026-10-01 实战补充）：
+# 暂时性下载错误的自动重试（2026-10-01 实战补充，2026-10-05 加码）：
 # - HTTP 416（分片与 CDN 不一致，yt-dlp#8313）：清分片 + 关续传从头下；
-# - SSL EOF / 连接重置 / 读超时等 CDN 抖动：直接重试（保留分片续传）。
+# - SSL EOF / 连接重置 / 读超时等 CDN 抖动：直接重试（保留分片续传），
+#   但最后一次尝试前同样清分片从头下——残留分片的 Range 续传请求会钉死在
+#   同一个坏的 CDN 节点上，新连接才有机会被调度到健康节点（2026-10-05
+#   「交通法」笔记：3 次瞬态重试全撞同一 SSL EOF 认输）。
 # 仍失败则原样抛出——错误原因会经 _format_error 落到任务状态（不再有静默失败）。
 _YDL_TRANSIENT_RETRIES = 3
 _TRANSIENT_DL_MARKERS = (
@@ -81,8 +84,12 @@ def _ydl_extract_download(ydl_opts: dict, video_url: str, output_dir: str,
             transient = any(m in msg.lower() for m in _TRANSIENT_DL_MARKERS)
             if attempt >= _YDL_TRANSIENT_RETRIES or not transient:
                 raise
-            if "416" in msg:
-                logger.warning("下载触发 HTTP 416（第 %d 次），清除分片后从头重试: %s",
+            last_attempt = attempt == _YDL_TRANSIENT_RETRIES - 1
+            if "416" in msg or last_attempt:
+                # 416 或打向最后一次尝试：清分片 + 关续传从头下，换一条新连接
+                # 才有机会逃离坏的 CDN 节点
+                logger.warning("下载触发 %s（第 %d 次），清除分片后从头重试: %s",
+                               "HTTP 416" if "416" in msg else "瞬态错误(末次换链路)",
                                attempt, msg.strip()[:200])
                 _clear_partial_files(output_dir, video_id_hint)
                 ydl_opts = {**ydl_opts, "continuedl": False}

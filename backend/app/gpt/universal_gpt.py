@@ -210,6 +210,11 @@ class UniversalGPT(GPT):
             "service unavailable",
             # openai SDK 对不可解析的响应体抛的通用文案（多为边缘节点/代理抽风），值得重试
             "unknown error",
+            # 免费网关间歇性空回：openai._streaming.json 对空响应体抛
+            # JSONDecodeError（2026-10-05 连败两条笔记，稍后同网关成功，
+            # 证明一次重试本就能救回来）
+            "expecting value",
+            "jsondecodeerror",
         )
         if any(token in raw for token in retryable_tokens):
             return True

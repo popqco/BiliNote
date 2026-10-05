@@ -282,6 +282,16 @@ class _Completions:
                 raise RuntimeError(
                     f"Responses 上游失败: {getattr(err, 'message', None) or err}"
                 )
+            elif etype in ("response.incomplete", "response.incompleted"):
+                # 截断/限流掐断：原来直接被吞，调用方只看到"流结束+无正文"的
+                # EmptyCompletionError，真实原因丢了（2026-10-05 连败复盘发现）。
+                resp = getattr(event, "response", None)
+                reason = (
+                    getattr(getattr(resp, "incomplete_details", None), "reason", None)
+                    or getattr(resp, "status", None)
+                    or etype
+                )
+                raise RuntimeError(f"Responses 上游未完成: {reason}")
 
 
 class ResponsesCompatClient:
