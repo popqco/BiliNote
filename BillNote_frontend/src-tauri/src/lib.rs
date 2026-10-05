@@ -23,6 +23,12 @@ struct SidecarHandle(Mutex<Option<CommandChild>>);
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // 另存为对话框 + 文件写入：WebView2 默认拦截网页 blob 下载（思维导图
+        // PNG/SVG/XMind/HTML、长图、海报导出在桌面端"点了没反应"的根因）。
+        // 前端经 utils/save.ts 走 dialog.save() 选路径 + fs.writeFile() 落盘；
+        // dialog 返回的路径会自动进入 fs 的运行时作用域，无需额外授权路径。
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         // 剪贴板后台读取：navigator.clipboard.readText() 需要焦点/手势，
         // 后台轮询会被 WebView 拒绝；经 Rust 侧读系统剪贴板则无此限制。
         // 只申请读权限（allow-read-text），不碰写权限。

@@ -74,6 +74,31 @@ IMAGE_BUDGET = 150   # 拼图（每张拼图 = 1 个 image 块）数量上限
 TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
 
 
+import re as _re
+
+
+def _cleanup_marker_residue(markdown: str) -> str:
+    """清理截图/原片标记替换后残留的孤立星号。
+
+    模型有时把标记写成斜体包裹形态（`*Content-[02:10]*`），替换只消费标记
+    本体，留下包在外面的 `*`——用户看到的就是"标题后多个星号"、"段落之间
+    一行孤零零的 *"（2026-10-05 用户截图实锤）。两条规则都很保守：
+    1. 整行只有 1-2 个星号加空白 → 整行删除（合法 markdown 不存在这种行）；
+    2. 含视频跳转链接的行尾跟 1-2 个星号 → 摘掉星号（闭合被标记打断的斜体）。
+    """
+    if not markdown:
+        return markdown
+    # 整行孤星
+    cleaned = _re.sub(r"(?m)^[ \t]*\*{1,2}[ \t]*\r?\n", "", markdown)
+    # 行尾孤星（仅限含跳转链接的行，避免误伤正常斜体收尾）
+    cleaned = _re.sub(
+        r"(?m)^([^\n]*\[(?:原片|▶)?[^\]]*\]\([^\)]*(?:\?t=|/video/)[^\)]*\))\s*\*{1,2}[ \t]*$",
+        r"\1",
+        cleaned,
+    )
+    return cleaned
+
+
 class NoteGenerator:
     """
     NoteGenerator 用于执行视频/音频下载、转写、GPT 生成笔记、插入截图/链接、
@@ -957,7 +982,7 @@ class NoteGenerator:
             except Exception as e:
                 logger.warning(f"链接插入失败，跳过该步骤：{e}")
 
-        return markdown
+        return _cleanup_marker_residue(markdown)
 
     def _insert_screenshots(self, markdown: str, video_path: Path) -> str | None | Any:
         """
@@ -968,6 +993,7 @@ class NoteGenerator:
         :return: 替换后的 Markdown 字符串
         """
         matches: List[Tuple[str, int]] = extract_screenshot_timestamps(markdown)
+        failed = 0
         for idx, (marker, ts) in enumerate(matches):
             try:
                 img_path = generate_screenshot(str(video_path), str(IMAGE_OUTPUT_DIR), ts, idx)
@@ -976,9 +1002,15 @@ class NoteGenerator:
                 img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
                 markdown = markdown.replace(marker, f"![]({img_url})", 1)
             except Exception as exc:
-                logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
-                # self._handle_exception(task_id, exc)
-                return None
+                # 单张截图失败不再毁掉整篇笔记（旧行为 return None 会让上游
+                # 把整个 markdown 置空，笔记直接"生成成功"却空白）。改为：
+                # 记日志 + 把标记从正文里摘掉（留着一行 *Screenshot-[mm:ss]
+                # 是纯噪音），继续处理其余标记。
+                failed += 1
+                logger.warning(f"生成截图失败，已移除该标记 (timestamp={ts})：{exc}")
+                markdown = markdown.replace(marker, "", 1)
+        if failed:
+            logger.warning(f"截图插入完成，{failed}/{len(matches)} 张失败被跳过")
         return markdown
 
     @staticmethod

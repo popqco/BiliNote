@@ -818,7 +818,18 @@ const NoteForm = () => {
                     <FormLabel>启用</FormLabel>
                     <Checkbox
                       checked={videoUnderstandingEnabled}
-                      onCheckedChange={v => form.setValue('video_understanding', v)}
+                      onCheckedChange={v => {
+                        form.setValue('video_understanding', v)
+                        // 原片截图依赖视频理解（关掉就没有本地视频文件，后端会
+                        // 静默跳过截图插入）。关"视频理解"时同步取消勾选，
+                        // 不让 format 里残留一个必然落空的 screenshot。
+                        if (!v) {
+                          const cur = form.getValues('format') || []
+                          if (cur.includes('screenshot')) {
+                            form.setValue('format', cur.filter((x: string) => x !== 'screenshot'))
+                          }
+                        }
+                      }}
                     />
                   </div>
                   <FormMessage />

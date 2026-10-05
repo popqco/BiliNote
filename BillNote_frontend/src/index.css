@@ -214,3 +214,45 @@ html, body, #root {
    AntdThemeProvider：根上按 next-themes 切 antd darkAlgorithm，
    token 级跟随明暗主题。旧的 .dark .ant-sender 浅灰覆盖 hack 已删——
    它把输入区钉成 #f5f5f5（近白），深色模式下就是用户抱怨的“白框”。 */
+
+/* ===== 思维导图主题 B「靛青单色」（2026-10-05 用户四方案样板挑选） =====
+   markmap 0.18 的连线/圆点颜色是逐元素内联属性，CSS 直接覆盖即可；
+   文字在 foreignObject 裸 div 里（无 markmap-foreign 类名），也要直接命中。
+   预览用 .markmap-box 作用域限定；导出的 SVG 由 createExportSvg 注入
+   同色 <style>，保证所见即所得。 */
+.markmap-box svg path {
+  stroke: #64748b;
+}
+.dark .markmap-box svg path {
+  stroke: #6b7a90;
+}
+.markmap-box svg circle {
+  fill: #6366f1;
+}
+.dark .markmap-box svg circle {
+  fill: #818cf8;
+}
+.markmap-box svg foreignObject div {
+  color: #26303e;
+}
+.dark .markmap-box svg foreignObject div {
+  color: #dde3ec;
+}
+/* 展开/折叠圆点的背景（markmap 自带变量在裸 div 场景不生效，直接指定） */
+.markmap-box svg g.markmap-node > circle {
+  fill: #6366f1;
+}
+.dark .markmap-box svg g.markmap-node > circle {
+  fill: #818cf8;
+}
+
+/* ===== 原片截图显隐开关（2026-10-05 用户需求：看笔记时可一键隐藏截图） =====
+   只影响屏幕查看；导出（PDF/Word/长图/海报/复制）始终包含截图——
+   MarkdownViewer 在导出期间临时摘掉 hide-screenshots 类。 */
+.hide-screenshots img[src*="/static/screenshots/"] {
+  display: none;
+}
+/* 图片所在段落一并隐藏，避免留下大段空白 */
+.hide-screenshots p:has(> img[src*="/static/screenshots/"]) {
+  display: none;
+}

@@ -47,16 +47,16 @@ async function extractErrorMessage(e: unknown): Promise<string> {
   return `导出失败（${response?.status || '网络错误'}），请稍后再试`
 }
 
-/** Blob → 触发浏览器下载（全项目统一范式，同 MarkdownViewer / MarkmapComponent） */
-export function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  URL.revokeObjectURL(url)
+/** Blob → 触发下载（全项目统一范式，同 MarkdownViewer / MarkmapComponent）。
+ *  Tauri 环境改走原生另存为对话框：WebView2 默认拦截 blob 下载，
+ *  锚点点击静默失败——桌面 App 里导出"点了没反应"的根因（2026-10-05）。 */
+export async function downloadBlob(blob: Blob, filename: string) {
+  const { saveBlob } = await import('@/utils/save.ts')
+  const saved = await saveBlob(blob, filename)
+  if (typeof saved === 'string') {
+    const { default: toast } = await import('react-hot-toast')
+    toast.success(`已保存：${saved}`)
+  }
 }
 
 /**

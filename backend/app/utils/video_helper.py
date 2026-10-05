@@ -35,8 +35,15 @@ def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index:
     print("Running command:", command)
     result = subprocess.run(command, capture_output=True, text=True)
 
-    if result.returncode != 0:
-        print("ffmpeg failed:", result.stderr)
+    # 失败必须抛错而不是静默返回路径：调用方按「单张失败」降级处理，
+    # 若仍返回路径，markdown 会写入指向不存在文件的 URL → 前端破图
+    # （2026-10-05 截图链路稳定性排查确认的断点之一）
+    if result.returncode != 0 or not output_path.exists():
+        print("ffmpeg failed:", result.stderr[-500:] if result.stderr else "(no stderr)")
+        raise RuntimeError(
+            f"ffmpeg 截图失败 (t={timestamp}s, rc={result.returncode}): "
+            f"{(result.stderr or '')[-200:]}"
+        )
 
     return str(output_path)
 

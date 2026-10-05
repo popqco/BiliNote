@@ -4,6 +4,8 @@ import { transformer } from '@/lib/markmap.ts'
 import { Toolbar } from 'markmap-toolbar'
 import 'markmap-toolbar/dist/style.css'
 import JSZip from 'jszip'
+import toast from 'react-hot-toast'
+import { saveBlob } from '@/utils/save.ts'
 
 const MIN_EXPORT_FONT_PX = 256
 const MIN_EXPORT_WIDTH = 12800
@@ -234,7 +236,7 @@ export default function MarkmapEditor({
   }
   
   // 导出HTML思维导图
-  const exportHtml = () => {
+  const exportHtml = async () => {
     try {
       const { root } = transformMindmap(value)
       const data = JSON.stringify(root)
@@ -259,7 +261,7 @@ export default function MarkmapEditor({
   }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
-  <script src="https://cdn.jsdelivr.net/npm/markmap-view@0.18.10"></script>
+  <script src="https://cdn.jsdelivr.net/npm/markmap-view@0.18.12/dist/browser/index.js"></script>
 </head>
 <body>
   <svg id="mindmap"></svg>
@@ -276,14 +278,9 @@ export default function MarkmapEditor({
 </html>`;
       
       const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${title || 'mindmap'}.html`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const saved = await saveBlob(blob, `${title || 'mindmap'}.html`);
+      if (typeof saved === 'string') toast.success(`已保存：${saved}`);
+      else if (saved === null) toast('已取消保存');
     } catch (error) {
       console.error('导出HTML失败:', error);
     }
@@ -358,14 +355,9 @@ export default function MarkmapEditor({
 
       // 创建下载
       const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${title || 'mindmap'}.svg`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const saved = await saveBlob(blob, `${title || 'mindmap'}.svg`);
+      if (typeof saved === 'string') toast.success(`已保存：${saved}`);
+      else if (saved === null) toast('已取消保存');
     } catch (error) {
       console.error('导出SVG失败:', error);
     }
@@ -465,14 +457,9 @@ export default function MarkmapEditor({
 
       // 生成 ZIP 并下载
       const blob = await zip.generateAsync({ type: 'blob' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${title || 'mindmap'}.xmind`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      const saved = await saveBlob(blob, `${title || 'mindmap'}.xmind`);
+      if (typeof saved === 'string') toast.success(`已保存：${saved}`);
+      else if (saved === null) toast('已取消保存');
     } catch (error) {
       console.error('导出XMind失败:', error);
     }
@@ -486,15 +473,10 @@ export default function MarkmapEditor({
       setPngAction('exporting');
       setPngMessage('正在生成高清 PNG…');
       const blob = await exportSvgToPngBlob(svgRef.current);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${title || 'mindmap'}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showPngMessage('PNG 已开始下载');
+      const saved = await saveBlob(blob, `${title || 'mindmap'}.png`);
+      if (typeof saved === 'string') showPngMessage(`PNG 已保存：${saved}`);
+      else if (saved === null) showPngMessage('已取消保存');
+      else showPngMessage('PNG 已开始下载');
     } catch (error) {
       console.error('导出PNG失败:', error);
       showPngMessage('导出 PNG 失败，请查看控制台');
@@ -554,7 +536,7 @@ export default function MarkmapEditor({
   // }
 
   return (
-    <div className="relative flex h-full flex-col bg-card">
+    <div className="markmap-box relative flex h-full flex-col bg-card">
       {/* 全屏/退出全屏 按钮 */}
       <div className="absolute top-2 right-2 z-20 flex space-x-2">
         <button

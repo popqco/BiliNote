@@ -392,6 +392,29 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const contentCaptureRef = useRef<HTMLDivElement>(null)
   const posterRef = useRef<HTMLDivElement>(null)
 
+  // 原片截图显隐开关（2026-10-05 用户需求）：看笔记时可一键隐藏截图快速读文字。
+  // 全局记忆（localStorage）：所有笔记统一生效，下次打开保持上次选择。
+  // 只影响屏幕查看——导出（PDF/Word/长图/复制）始终包含截图，
+  // 长图导出期间用 exportForceShow 临时摘掉 hide-screenshots 类。
+  const [showScreenshots, setShowScreenshots] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('bilinote-show-screenshots') !== '0'
+    } catch {
+      return true
+    }
+  })
+  const [exportForceShow, setExportForceShow] = useState(false)
+  const toggleShowScreenshots = () =>
+    setShowScreenshots(v => {
+      const next = !v
+      try {
+        localStorage.setItem('bilinote-show-screenshots', next ? '1' : '0')
+      } catch {
+        /* 忽略 */
+      }
+      return next
+    })
+
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
 
@@ -759,8 +782,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         return
       }
       if (format === 'longimage') {
-        await exportLongImage(title)
-        toast.success('长图已导出')
+        // 导出始终包含截图：临时摘掉 hide-screenshots，等重渲染后再截
+        setExportForceShow(true)
+        try {
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+          await exportLongImage(title)
+          toast.success('长图已导出')
+        } finally {
+          setExportForceShow(false)
+        }
         return
       }
     } catch (e: any) {
@@ -903,6 +933,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const panelTakeover =
     showChat === 'full' || (isNarrow && (showChat === 'half' || showTranscribe))
 
+  // 笔记里是否真的带原片截图：没有就不显示开关按钮（避免无用按钮）
+  const hasScreenshots =
+    typeof selectedContent === 'string' && selectedContent.includes('/static/screenshots/')
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
       <MarkdownHeader
@@ -923,6 +957,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setShowChat={setShowChat}
         viewMode={viewMode}
         setViewMode={setViewMode}
+        showScreenshots={hasScreenshots ? showScreenshots : undefined}
+        onToggleShowScreenshots={hasScreenshots ? toggleShowScreenshots : undefined}
       />
 
       {viewMode === 'map' ? (
@@ -964,8 +1000,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 )
               ) : (
               <ScrollArea viewportRef={readerViewportRef} className="min-w-0 flex-1">
-                {/* 导出长图的截图根：视频信息条 + 正文都包进来 */}
-                <div ref={contentCaptureRef} className="bg-background pb-6">
+                {/* 导出长图的截图根：视频信息条 + 正文都包进来。
+                    hide-screenshots：用户关掉截图显示时只藏查看（导出期间被摘掉） */}
+                <div
+                  ref={contentCaptureRef}
+                  className={`bg-background pb-6${showScreenshots || exportForceShow ? '' : ' hide-screenshots'}`}
+                >
                 <div className="px-2">
                   <VideoBanner
                     audioMeta={currentTask?.audioMeta}

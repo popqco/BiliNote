@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Copy, Download, ChevronDown, FileText, FileDown, FileType2, Image, Share2, BrainCircuit, MessageSquare } from 'lucide-react'
+import { Copy, Download, ChevronDown, FileText, FileDown, FileType2, Image, ImageOff, Share2, BrainCircuit, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -41,6 +41,9 @@ interface NoteHeaderProps {
   setShowTranscribe: (show: boolean) => void
   showChat?: false | 'half' | 'full'
   setShowChat?: (mode: false | 'half' | 'full') => void
+  /** 原片截图显隐（2026-10-05）：仅当笔记里带截图时才传，未传则不显示开关 */
+  showScreenshots?: boolean
+  onToggleShowScreenshots?: () => void
 }
 
 export function MarkdownHeader({
@@ -61,6 +64,8 @@ export function MarkdownHeader({
   setShowChat,
   viewMode,
   setViewMode,
+  showScreenshots,
+  onToggleShowScreenshots,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
 
@@ -198,6 +203,32 @@ export function MarkdownHeader({
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        {onToggleShowScreenshots && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  onClick={onToggleShowScreenshots}
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 shrink-0 px-2"
+                >
+                  {showScreenshots ? (
+                    <Image className="h-4 w-4 sm:mr-1.5" />
+                  ) : (
+                    <ImageOff className="h-4 w-4 sm:mr-1.5" />
+                  )}
+                  <span className="hidden text-sm min-[420px]:inline">
+                    {showScreenshots ? '隐藏截图' : '显示截图'}
+                  </span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {showScreenshots ? '隐藏原片截图（只看文字；导出仍包含截图）' : '显示原片截图'}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
