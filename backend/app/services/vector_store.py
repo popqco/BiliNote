@@ -7,6 +7,15 @@ from typing import Optional
 import chromadb
 from chromadb.config import Settings
 
+# 打包必需的显式导入：chromadb 1.x 把 API 实现与 telemetry 实现写成配置
+# 字符串（chroma_api_impl / chroma_product_telemetry_impl），运行时动态加载，
+# PyInstaller 静态分析发现不了。2026-10-03 起打包版 exe 里 PersistentClient
+# 初始化全炸（No module named 'chromadb.telemetry.product.posthog' /
+# 'chromadb.api.rust'），所有笔记向量索引失败、AI 问答双端全灭。
+# 这两个都是纯 Python 模块（无额外二进制依赖），显式 import 后打包自动收录。
+import chromadb.api.rust  # noqa: F401
+import chromadb.telemetry.product.posthog  # noqa: F401
+
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
