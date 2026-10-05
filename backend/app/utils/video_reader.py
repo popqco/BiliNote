@@ -163,6 +163,15 @@ class VideoReader:
 
     def run(self)->list[str]:
         logger.info("开始提取视频帧...")
+        # FFMPEG_BIN_PATH 只有在 check_ffmpeg_exists 真正跑过一次后才会前置进
+        # 进程 PATH；健康轮询从未触发过的进程（纯后台自动化）若不在这里补一次，
+        # 所有抽帧都会以 WinError 2 告终（2026-10-05 自动化 30 轮全败的根因）。
+        try:
+            from ffmpeg_helper import ensure_ffmpeg_or_raise
+
+            ensure_ffmpeg_or_raise()
+        except ImportError:
+            pass
         try:
             # 确保目录存在
             print(self.frame_dir,self.grid_dir)

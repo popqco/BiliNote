@@ -25,6 +25,7 @@ from app.services.note import NOTE_OUTPUT_DIR, TERMINAL_STATUSES, NoteGenerator,
 from app.services.notifier import send_summary
 from app.services.watchlater import fetch_watchlater
 from app.utils.logger import get_logger
+from ffmpeg_helper import check_ffmpeg_exists
 
 logger = get_logger(__name__)
 
@@ -238,11 +239,29 @@ class AutomationScheduler:
         started = datetime.now()
         logger.info(f"=== 自动化检查轮开始 {started:%Y-%m-%d %H:%M:%S} ===")
 
+        # ffmpeg 预检：视频理解开着但 ffmpeg 不可用时，本轮提交的每个任务都必然
+        # 死在抽帧上（2026-10-05 实测：后台进程从未被健康轮询触发过 ffmpeg 探测，
+        # FFMPEG_BIN_PATH 没机会前置进 PATH，约 30 轮自动化全军覆没）。
+        # 这里直接判轮失败——不提交任务，也就不会发汇总邮件。
+        if gen.get("video_understanding") and not check_ffmpeg_exists(use_cache=False):
+            msg = "视频理解已开启，但未检测到 ffmpeg（安装后可在 .env 配置 FFMPEG_BIN_PATH 指向其 bin 目录），本轮已跳过"
+            logger.error(msg)
+            return {"error": msg}
+
         items = fetch_watchlater(max_items=100)
         mode = str(cfg.get("mode") or "all")
         window_days = int(cfg.get("window_days") or 7)
         max_per_round = max(1, int(cfg.get("max_per_round") or 5))
         cutoff = time.time() - window_days * 86400
+
+        # 失败冷却：任务失败不落数据库，去重查不到 → 下轮立刻重试 → 持续性故障
+        # （如 ffmpeg 缺失、Cookie 失效）会以「每轮一轮失败 + 一封邮件」的节奏
+        # 无限重放。按 bvid 记最近一次失败，冷却窗内跳过。
+        cooldown_min_cfg = cfg.get("retry_cooldown_minutes")
+        cooldown_min = 30 if cooldown_min_cfg is None else max(0, int(cooldown_min_cfg))
+        cooldown_s = cooldown_min * 60
+        failures = self._load_state().get("failures") or {}
+        now_ts = time.time()
 
         submitted: List[dict] = []
         skipped: List[dict] = []
@@ -256,6 +275,17 @@ class AutomationScheduler:
                 continue
             if find_active_task_by_video(bv):
                 skipped.append({"bvid": bv, "reason": "已在队列/生成中"})
+                continue
+            fail_rec = failures.get(bv)
+            if fail_rec and cooldown_s > 0 and now_ts - float(fail_rec.get("ts") or 0) < cooldown_s:
+                remain_min = int((cooldown_s - (now_ts - float(fail_rec.get("ts") or 0))) / 60) + 1
+                skipped.append({
+                    "bvid": bv,
+                    "reason": (
+                        f"上次失败冷却中（第 {fail_rec.get('count') or 1} 次："
+                        f"{str(fail_rec.get('message') or '')[:60]}），约 {remain_min} 分钟后自动重试"
+                    ),
+                })
                 continue
             if mode == "window" and it.get("add_at") and float(it["add_at"]) < cutoff:
                 skipped.append({"bvid": bv, "reason": f"超出时间窗（{window_days} 天内）"})
@@ -274,7 +304,8 @@ class AutomationScheduler:
             progress={"total_in_list": len(items), "submitted": submitted, "skipped": skipped},
         )
 
-        result = self._wait_and_summarize(submitted, skipped, started)
+        result = self._wait_and_summarize(submitted, skipped, started, cfg)
+        self._record_round_failures(result.get("submitted") or [])
         self._update_state(
             running=False,
             phase="完成",
@@ -285,6 +316,36 @@ class AutomationScheduler:
         )
         logger.info(f"=== 自动化检查轮结束：提交 {len(submitted)}，跳过 {len(skipped)} ===")
         return result
+
+    def _record_round_failures(self, submitted: List[dict]) -> None:
+        """把本轮终态写进失败冷却表：FAILED 计数+续期，SUCCESS 清除。"""
+        if not submitted:
+            return
+        state = self._load_state()
+        failures = state.get("failures") or {}
+        now_ts = time.time()
+        changed = False
+        for s in submitted:
+            bv = s.get("bvid")
+            if not bv:
+                continue
+            if s.get("status") == "FAILED":
+                prev = failures.get(bv) or {}
+                failures[bv] = {
+                    "ts": now_ts,
+                    "count": int(prev.get("count") or 0) + 1,
+                    "message": str(s.get("message") or "")[:120],
+                }
+                changed = True
+            elif s.get("status") == "SUCCESS" and bv in failures:
+                failures.pop(bv)
+                changed = True
+        # 7 天前的旧记录顺手清掉，防状态文件无限膨胀
+        for bv in [b for b, v in failures.items() if now_ts - float(v.get("ts") or 0) > 7 * 86400]:
+            failures.pop(bv)
+            changed = True
+        if changed:
+            self._update_state(failures=failures)
 
     def _submit_task(self, item: dict, cfg: dict) -> str:
         gen = cfg.get("gen") or {}
@@ -341,7 +402,8 @@ class AutomationScheduler:
         except Exception:
             return None
 
-    def _wait_and_summarize(self, submitted: List[dict], skipped: List[dict], started: datetime) -> Dict:
+    def _wait_and_summarize(self, submitted: List[dict], skipped: List[dict], started: datetime,
+                            cfg: Optional[dict] = None) -> Dict:
         deadline = time.time() + ROUND_MAX_WAIT_SECONDS
         pending = {s["task_id"]: s for s in submitted}
         while pending and time.time() < deadline:
@@ -362,9 +424,27 @@ class AutomationScheduler:
             "skipped": skipped,
             "still_pending": [s["task_id"] for s in pending.values()],
         }
+        # 通知节流：扫描频率（分钟级）与通知频率解耦。持续失败时扫描越勤、
+        # 邮件越轰炸，但轮次结果始终完整记录在状态文件/设置页「最近一轮」里，
+        # 被静默的轮次不会丢信息。
+        notify_cfg = (cfg or {}).get("notify") or {}
+        min_interval_min = int(notify_cfg.get("min_interval_minutes") or 0)
+        if min_interval_min > 0:
+            last_notify_ts = float(self._load_state().get("last_notify_ts") or 0)
+            if last_notify_ts > 0 and time.time() - last_notify_ts < min_interval_min * 60:
+                logger.info(
+                    f"通知节流：距上次通知不足 {min_interval_min} 分钟，本轮汇总不推送（结果已记录在状态文件）"
+                )
+                result["notify"] = [{
+                    "channel": "（节流）",
+                    "ok": True,
+                    "detail": f"距上次通知不足 {min_interval_min} 分钟，本轮静默",
+                }]
+                return result
         try:
             notify_results = send_summary(result)
             result["notify"] = notify_results
+            self._update_state(last_notify_ts=time.time())
         except Exception as e:
             logger.warning(f"汇总通知发送失败: {e}")
             result["notify"] = [{"channel": "（异常）", "ok": False, "detail": str(e)}]

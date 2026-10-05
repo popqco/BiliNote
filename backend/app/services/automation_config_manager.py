@@ -22,6 +22,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mode": "all",           # all=全部未总结 | window=仅最近 window_days 天新增
     "window_days": 7,
     "max_per_round": 5,      # 每轮最多新提交任务数（防一次性灌爆队列）
+    "retry_cooldown_minutes": 30,  # 同一视频失败后的冷却窗（失败不落库，靠它防每轮重放）
     "gen": {
         "provider_id": "",
         "model_name": "",
@@ -34,6 +35,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "extras": "",
     },
     "notify": {
+        "min_interval_minutes": 30,  # 两次通知的最小间隔（0 = 每轮都发），与扫描频率解耦
         "wxpusher": {"enabled": False, "app_token": "", "uids": ""},
         "smtp": {
             "enabled": False,

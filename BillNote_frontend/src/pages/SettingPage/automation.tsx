@@ -357,6 +357,14 @@ const Automation = () => {
       </Section>
 
       <Section title="通知渠道" desc="每轮有新任务时才发一条汇总（0 成功 0 失败的空轮不打扰）；两个渠道可独立启用、独立失败。填完点「发送测试通知」即可验证，收不到会直接显示原因。">
+        <Row label="通知最短间隔（分钟）" desc="扫描频率与通知频率解耦：检查照常按「检查频率」进行，间隔内结束的轮次只记录在「最近一轮」里，不重复推送。0 = 每轮都发。">
+          <Input
+            type="number"
+            className="w-28"
+            value={cfg.notify?.min_interval_minutes ?? 30}
+            onChange={e => upd(['notify', 'min_interval_minutes'], Math.max(0, Number(e.target.value) || 0))}
+          />
+        </Row>
         <Row label="微信推送（WxPusher）" desc="免费，微信里直接收推送，推荐">
           <Checkbox checked={!!wx.enabled} onCheckedChange={v => upd(['notify', 'wxpusher', 'enabled'], !!v)} />
         </Row>
