@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, memo, FC } from 'react'
+import { useState, useEffect, useRef, useMemo, memo, useCallback, FC } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
 import { Copy, ArrowRight, Play, ExternalLink } from 'lucide-react'
@@ -26,6 +26,7 @@ import { useChatJumpStore, type SourceJumpTarget } from '@/store/chatStore'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
+import { useSmoothScroll } from '@/hooks/useSmoothScroll'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
@@ -386,6 +387,20 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
   // （见下面的回顶 effect）。
   const readerViewportRef = useRef<HTMLDivElement>(null)
+  // 滚轮惯性平滑（设置页可关/三档手感）：Lenis 包住上面的 Viewport。
+  // 编程式滚动（回顶/章节跳转）必须走 smoothScrollTo，直接 element.scrollTo
+  // 会和进行中的惯性动画互相拉扯。
+  const {
+    attach: attachSmoothScroll,
+    scrollTo: smoothScrollTo,
+  } = useSmoothScroll()
+  const attachViewport = useCallback(
+    (node: HTMLDivElement | null) => {
+      readerViewportRef.current = node
+      attachSmoothScroll(node)
+    },
+    [attachSmoothScroll],
+  )
   // 导出（PDF/Word/长图/海报）状态与 DOM 引用
   const [exporting, setExporting] = useState<ExportFormat | null>(null)
   const [posterData, setPosterData] = useState<PosterData | null>(null)
@@ -463,8 +478,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     // 本 effect，抢先 scrollTo(0) 会把跳转定位刚滚到的位置清掉。
     const pending = activeJumpRef.current
     if (pending && pending.task_id === currentTask?.id) return
-    readerViewportRef.current?.scrollTo({ top: 0 })
-  }, [currentTask?.id, currentVerId])
+    const vp = readerViewportRef.current
+    if (vp) smoothScrollTo(vp, 0, { immediate: true })
+  }, [currentTask?.id, currentVerId, smoothScrollTo])
 
   // 问答来源跳转：切笔记后定位到对应章节 / 打开原文并定位时间。
   //
@@ -612,10 +628,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         // 平滑滚动约 300-500ms，而校验间隔只有 120ms：每轮都用 smooth
         // 会不停重启动画、位置永远到不了目标（browser-use 实测滚 10 次
         // 全部从 0 重来）。前两次给 smooth，之后一律瞬时补滚。
-        vp.scrollTo({
-          top: vp.scrollTop + offset - 16,
-          behavior: tries >= 3 ? 'auto' : 'smooth',
-        })
+        // Lenis 模式下 lerp 是指数逼近，每轮重设目标不重启动画、能收敛，
+        // 所以同样走「前两次平滑、之后瞬时」的节奏即可。
+        const targetTop = vp.scrollTop + offset - 16
+        smoothScrollTo(vp, targetTop, { immediate: tries >= 3 })
       } else {
         hit.scrollIntoView({ behavior: tries >= 3 ? 'auto' : 'smooth', block: 'start' })
       }
@@ -999,7 +1015,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                   </div>
                 )
               ) : (
-              <ScrollArea viewportRef={readerViewportRef} className="min-w-0 flex-1">
+              <ScrollArea viewportRef={attachViewport} className="min-w-0 flex-1">
                 {/* 导出长图的截图根：视频信息条 + 正文都包进来。
                     hide-screenshots：用户关掉截图显示时只藏查看（导出期间被摘掉） */}
                 <div

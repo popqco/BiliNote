@@ -7,7 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select.tsx'
-import { useSystemStore } from '@/store/configStore'
+import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
 
 /**
  * 「通用」设置：放不属于模型/转写/下载/自动化/外观的全局开关。
@@ -17,6 +17,8 @@ import { useSystemStore } from '@/store/configStore'
  *（localStorage: system-store），重启应用仍保留。
  * 第二项：应用外系统通知 —— 轮询在后台命中时经 OS 通知中心弹一条，
  * 应用不在前台也能看到；点击通知回到应用，应用内卡片（含封面+按钮）再弹出。
+ * 第三项：阅读区平滑滚动 —— 滚轮惯性（Lenis），消除一格一顿的跳变；
+ * 手机触摸端本来就是原生惯性，不受影响。手感三档即时切换、现场试选。
  */
 const General = () => {
   const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
@@ -25,6 +27,10 @@ const General = () => {
   const setPollIntervalSec = useSystemStore(s => s.setClipboardPollIntervalSec)
   const osNotifyEnabled = useSystemStore(s => s.clipboardOsNotifyEnabled)
   const setOsNotifyEnabled = useSystemStore(s => s.setClipboardOsNotifyEnabled)
+  const smoothEnabled = useSystemStore(s => s.smoothScrollEnabled)
+  const setSmoothEnabled = useSystemStore(s => s.setSmoothScrollEnabled)
+  const smoothTier = useSystemStore(s => s.smoothScrollTier)
+  const setSmoothTier = useSystemStore(s => s.setSmoothScrollTier)
 
   const handleIntervalChange = (v: string) => {
     const n = Number(v)
@@ -115,6 +121,43 @@ const General = () => {
               }
             }}
           />
+        </div>
+      </div>
+
+      <div className="border-border mt-4 max-w-3xl rounded-lg border p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-sm">
+            阅读区平滑滚动
+            <div className="text-muted-foreground text-xs">
+              滚轮滚动时加连贯的缓动动画（类似手机滑动的手感），消除一格一顿的跳变。
+              只影响桌面端的笔记阅读区与原文面板；手机触摸滑动本来就是原生惯性，不受影响。
+              关闭后回到系统原生滚动。
+            </div>
+          </div>
+          <Switch checked={smoothEnabled} onCheckedChange={setSmoothEnabled} />
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-4">
+          <div className="text-sm">
+            手感档位
+            <div className="text-muted-foreground text-xs">
+              跟手：滑行短、停得快，接近原生但顺滑；适中：连贯不飘（推荐）；
+              动量：接近手机松手后的滑行。切换后到阅读页滚几下即可对比。
+            </div>
+          </div>
+          <Select
+            value={smoothTier}
+            onValueChange={v => setSmoothTier(v as SmoothScrollTier)}
+            disabled={!smoothEnabled}
+          >
+            <SelectTrigger className="w-36">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="direct">跟手</SelectItem>
+              <SelectItem value="medium">适中</SelectItem>
+              <SelectItem value="momentum">动量</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
       </div>
     </div>

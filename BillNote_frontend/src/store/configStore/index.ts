@@ -21,7 +21,17 @@ interface SystemState {
   // 默认开；关掉后后台命中只攒着、回前台才提示。纯文本通知，不带封面。
   clipboardOsNotifyEnabled: boolean
   setClipboardOsNotifyEnabled: (value: boolean) => void
+
+  // 阅读区平滑滚动（滚轮惯性，Lenis）：只影响桌面鼠标/触控板，手机触摸
+  // 本来就是原生惯性。关闭则回到浏览器原生滚动（一格一顿）。
+  smoothScrollEnabled: boolean
+  setSmoothScrollEnabled: (value: boolean) => void
+  smoothScrollTier: SmoothScrollTier
+  setSmoothScrollTier: (value: SmoothScrollTier) => void
 }
+
+// 跟手：滑行短、停得快；适中：连贯不飘；动量：接近手机松手后的滑行
+export type SmoothScrollTier = 'direct' | 'medium' | 'momentum'
 // 暂不启用
 export const useSystemStore = create<SystemState>()(
   persist(
@@ -39,6 +49,11 @@ export const useSystemStore = create<SystemState>()(
 
       clipboardOsNotifyEnabled: true,
       setClipboardOsNotifyEnabled: value => set({ clipboardOsNotifyEnabled: value }),
+
+      smoothScrollEnabled: true,
+      setSmoothScrollEnabled: value => set({ smoothScrollEnabled: value }),
+      smoothScrollTier: 'medium',
+      setSmoothScrollTier: value => set({ smoothScrollTier: value }),
     }),
     {
       name: 'system-store', // 本地存储的 key

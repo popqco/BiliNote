@@ -1,10 +1,11 @@
 "use client"
 
 import { useTaskStore } from "@/store/taskStore"
-import { useEffect, useState, useRef } from "react"
+import { useEffect, useState, useRef, useCallback } from "react"
 import { Play } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {ScrollArea} from "@/components/ui/scroll-area.tsx";
+import { useSmoothScroll } from "@/hooks/useSmoothScroll"
 
 interface Segment {
   start: number
@@ -25,6 +26,12 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
   const [task, setTask] = useState<Task | null>(null)
   const [activeSegment, setActiveSegment] = useState<number | null>(null)
   const segmentRefs = useRef<(HTMLDivElement | null)[]>([])
+  // 原文面板与笔记正文同为长文阅读场景，滚轮惯性平滑与正文同款（设置页开关+档位）
+  const { attach: attachSmoothScroll, scrollTo: smoothScrollTo } = useSmoothScroll()
+  const attachViewport = useCallback(
+    (node: HTMLDivElement | null) => attachSmoothScroll(node),
+    [attachSmoothScroll],
+  )
 
   useEffect(() => {
     setTask(getCurrentTask())
@@ -59,17 +66,15 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
         }
         // 平滑滚动约 300ms，校验间隔只有 150ms：每轮都 smooth 会不停
         // 重启动画、位置永远到不了目标（与章节跳转同款坑）。前两次
-        // smooth，之后一律瞬时补滚。
-        const behavior = tries >= 3 ? 'auto' : 'smooth'
-        vp.scrollTo({
-          top: vp.scrollTop + (er.top - vr.top) - vr.height / 2 + er.height / 2,
-          behavior,
-        })
+        // smooth，之后一律瞬时补滚（Lenis 模式下 lerp 指数逼近，重设
+        // 目标不重启动画，同样的节奏即可）。
+        const targetTop = vp.scrollTop + (er.top - vr.top) - vr.height / 2 + er.height / 2
+        smoothScrollTo(vp, targetTop, { immediate: tries >= 3 })
       }
       if (tries >= 15) window.clearInterval(timer)
     }, 150)
     return () => window.clearInterval(timer)
-  }, [focusTime, task])
+  }, [focusTime, task, smoothScrollTo])
 
   const formatTime = (seconds: number): string => {
     const mins = Math.floor(seconds / 60)
@@ -106,7 +111,7 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
                 面板撑到整篇转写的高度，scrollIntoView 找不到自身滚动容器
                 就去滚笔记主视口——点时间徽章时整个阅读区被拽走（2026-10-03
                 用户反馈“时间戳跳转不直观”的元凶之一）。 */}
-            <ScrollArea className="min-h-0 w-full flex-1">
+            <ScrollArea viewportRef={attachViewport} className="min-h-0 w-full flex-1">
 
               <div className="space-y-1">
                 {task.transcript.segments.map((segment, index) => (
