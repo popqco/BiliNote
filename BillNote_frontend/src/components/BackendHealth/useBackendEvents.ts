@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isBackendAlive } from '@/utils/backendAliveProbe.ts'
 
 // 桌面端 Sidecar 健康度。监听 Tauri 侧的 backend-message / backend-error /
 // backend-terminated / backend-restarted 事件，把 stdout/stderr 缓冲成 ring buffer，
@@ -78,12 +79,24 @@ export function useBackendEvents(): BackendEvents {
           })
           return
         }
-        setStatus('terminated')
-        setExitCode(event.payload ?? null)
-        append({
-          level: 'error',
-          text: `[Backend terminated] code=${event.payload ?? 'unknown'}`,
-          ts: Date.now(),
+        // 健康门控（2026-10-06）：sidecar 退了但 /sys_check 仍 200（孤儿后端被
+        // 收编 / 手动后端在服务）→ 不改状态，红点/「后端已退出」是误报，只记日志
+        void isBackendAlive().then(alive => {
+          if (alive) {
+            append({
+              level: 'info',
+              text: `[Backend terminated but /sys_check alive; keeping healthy] code=${event.payload ?? 'unknown'}`,
+              ts: Date.now(),
+            })
+            return
+          }
+          setStatus('terminated')
+          setExitCode(event.payload ?? null)
+          append({
+            level: 'error',
+            text: `[Backend terminated] code=${event.payload ?? 'unknown'}`,
+            ts: Date.now(),
+          })
         })
       })
       const offRestart = await listen('backend-restarted', () => {

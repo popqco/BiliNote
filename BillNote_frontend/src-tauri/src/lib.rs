@@ -79,16 +79,52 @@ pub fn run() {
                 });
             }
 
-            // 启动 Sidecar 并把 child handle 存到 state，方便后续 restart_backend_sidecar 使用
-            let child = spawn_backend_sidecar(app.handle()).map_err(|e| {
-                eprintln!("Sidecar 启动失败: {}", e);
-                e
-            })?;
-            app.manage(SidecarHandle(Mutex::new(Some(child))));
+            // 启动后端前先探活：8483 上已有健康的 BiliNote 后端（上次 app 没把
+            // sidecar 杀干净的孤儿、或用户手动拉起的后端/另一个 app 实例）就
+            // 直接收编，不再 spawn——否则新 sidecar 会因端口占用立即退出，
+            // 前端把 backend-terminated 当成「后端挂了」弹出假横幅，而实际上
+            // 孤儿后端一直在正常服务（2026-10-06 用户实拍：功能全正常，
+            // 「后端进程已退出」横幅+红点常驻，重启 app 也消不掉）。
+            let port = backend_port();
+            match probe_backend_startup(port, 3) {
+                BackendProbe::Healthy => {
+                    println!(
+                        "[backend] port {} already served by a healthy BiliNote backend; adopting it",
+                        port
+                    );
+                    app.manage(SidecarHandle(Mutex::new(None)));
+                    // 收编路径同样要发 ready：前端启动门禁/横幅清除都靠它
+                    spawn_backend_ready_probe(app.handle().clone());
+                }
+                BackendProbe::PortBusyForeign => {
+                    let msg = format!(
+                        "端口 {} 已被其他程序占用，且不是健康的 BiliNote 后端（可能是僵死的 BiliNoteBackend.exe）。请用任务管理器结束占用该端口的进程后重启应用。",
+                        port
+                    );
+                    eprintln!("[backend] {}", msg);
+                    app.manage(SidecarHandle(Mutex::new(None)));
+                    // 等前端首屏挂载好 listener 再发（与 backend-warning 同款延迟）
+                    let app_handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.emit("backend-port-conflict", msg);
+                        }
+                    });
+                }
+                BackendProbe::Free => {
+                    // 启动 Sidecar 并把 child handle 存到 state，方便后续 restart_backend_sidecar 使用
+                    let child = spawn_backend_sidecar(app.handle()).map_err(|e| {
+                        eprintln!("Sidecar 启动失败: {}", e);
+                        e
+                    })?;
+                    app.manage(SidecarHandle(Mutex::new(Some(child))));
 
-            // 启动 ready probe：异步轮询本地 BACKEND_PORT 是否在监听，
-            // 解决前端 useCheckBackend 在 PyInstaller 解压期瞎猜后端起没起的问题。
-            spawn_backend_ready_probe(app.handle().clone());
+                    // 启动 ready probe：异步轮询本地 BACKEND_PORT 是否在监听，
+                    // 解决前端 useCheckBackend 在 PyInstaller 解压期瞎猜后端起没起的问题。
+                    spawn_backend_ready_probe(app.handle().clone());
+                }
+            }
 
             Ok(())
         })
@@ -470,6 +506,43 @@ fn restart_backend_sidecar(
     Ok(())
 }
 
+// 后端端口：app 自己的环境变量优先，缺省 8483。探活与 ready probe 共用，
+// 避免两处各算一套端口。
+fn backend_port() -> u16 {
+    env::var("BACKEND_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(BACKEND_DEFAULT_PORT)
+}
+
+// 启动期探活结论：
+// - Healthy：/api/sys_check 已 200（8483 上是我们的后端）→ 收编，不 spawn
+// - PortBusyForeign：端口连得上但不回健康响应（外来程序/僵死后端）→ 明确报错
+// - Free：端口空闲 → 正常 spawn sidecar
+enum BackendProbe {
+    Healthy,
+    PortBusyForeign,
+    Free,
+}
+
+fn probe_backend_startup(port: u16, attempts: u32) -> BackendProbe {
+    let addr: SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .expect("invalid backend addr");
+    for i in 0..attempts {
+        if probe_sys_check(&addr) {
+            return BackendProbe::Healthy;
+        }
+        if i + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(700));
+        }
+    }
+    match TcpStream::connect_timeout(&addr, Duration::from_millis(800)) {
+        Ok(_) => BackendProbe::PortBusyForeign,
+        Err(_) => BackendProbe::Free,
+    }
+}
+
 // 后端就绪探测：异步轮询 GET /api/sys_check，要求 HTTP 200 才算就绪。
 //
 // 旧实现只做 TcpStream::connect_timeout——但端口被另一个孤儿 sidecar 占着时也会
@@ -478,10 +551,7 @@ fn restart_backend_sidecar(
 //
 // 真发一个 HTTP 请求拿 200 才算「这是我们的后端在响应」。
 fn spawn_backend_ready_probe(app: tauri::AppHandle) {
-    let port: u16 = env::var("BACKEND_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(BACKEND_DEFAULT_PORT);
+    let port: u16 = backend_port();
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().expect("invalid backend addr");
     let timeout = Duration::from_secs(BACKEND_STARTUP_TIMEOUT_SECS);
 

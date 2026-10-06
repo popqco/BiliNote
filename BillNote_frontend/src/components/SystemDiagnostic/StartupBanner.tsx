@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { isBackendAlive } from '@/utils/backendAliveProbe.ts'
 
 // 桌面端启动诊断横幅。监听 Tauri 侧 emit 的 backend-warning / backend-error / backend-terminated。
 // 只在 Tauri 环境生效；纯 web 环境（无 window.__TAURI_INTERNALS__）下静默不挂载。
@@ -89,11 +90,28 @@ const StartupBanner = () => {
       // P1-④：terminated 横幅允许手动关闭（dismissible: true）。之前 false +
       // 无自动清逻辑 = 红横幅永远卡死。backend-restarted / backend-ready 的
       // 自动清逻辑不动；warning/timeout 的形状逻辑不动。
+      // 健康门控（2026-10-06）：sidecar 死了 ≠ 后端不可用——孤儿后端被收编/
+      // 手动后端在服务时 /sys_check 仍 200，此时红横幅是误报（用户实拍：
+      // 功能全正常，横幅却常驻）。先探活，健康就当没看见。
       const offTerminated = await listen<number | null>('backend-terminated', event => {
+        void isBackendAlive().then(alive => {
+          if (alive) return
+          setBanner({
+            severity: 'error',
+            title: '后端进程已退出',
+            detail: `退出码：${event.payload ?? '未知'}。打开「部署监控」或重启应用以恢复。`,
+            dismissible: true,
+          })
+        })
+      })
+
+      // Rust 启动期探活发现端口被外来程序占用（不是健康的 BiliNote 后端）：
+      // 没拉起 sidecar，直接给出可操作的报错（谁占的、怎么处理）。
+      const offPortConflict = await listen<string>('backend-port-conflict', event => {
         setBanner({
           severity: 'error',
-          title: '后端进程已退出',
-          detail: `退出码：${event.payload ?? '未知'}。打开「部署监控」或重启应用以恢复。`,
+          title: '后端端口被占用',
+          detail: event.payload || '端口 8483 被其他程序占用，后端无法启动。',
           dismissible: true,
         })
       })
@@ -114,7 +132,7 @@ const StartupBanner = () => {
       })
 
       // backend-error 是 sidecar stderr，量大噪音多，这里不直接展示，留给 P2 的日志面板。
-      unlisteners = [offWarning, offTerminated, offRestarted, offReady, offStartupTimeout]
+      unlisteners = [offWarning, offTerminated, offPortConflict, offRestarted, offReady, offStartupTimeout]
     })()
 
     return () => {

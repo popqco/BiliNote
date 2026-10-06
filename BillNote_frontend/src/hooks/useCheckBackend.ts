@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { resolveApiBaseUrl } from '@/utils/workerConnection.ts'
+import { isBackendAlive } from '@/utils/backendAliveProbe.ts'
 
 // 后端就绪检测的几个时间常量
 // - 总等待上限 60s：超过这个时间没就绪就切「启动失败」UI，
@@ -127,7 +128,12 @@ export const useCheckBackend = (): BackendCheck => {
           })
           const offTerm = await listen<number | null>('backend-terminated', (e) => {
             const code = e.payload
-            markFailed(`后端进程已退出 (code=${code ?? 'unknown'})`)
+            // 健康门控：sidecar 退了但 /sys_check 仍 200（收编的孤儿后端在服务）
+            // → 按就绪处理，不进失败态（2026-10-06 假「后端进程已退出」横幅）
+            void isBackendAlive().then((alive) => {
+              if (alive) markReady()
+              else markFailed(`后端进程已退出 (code=${code ?? 'unknown'})`)
+            })
           })
           tauriUnsubs.push(offReady, offTimeout, offTerm)
         })
