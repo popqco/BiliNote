@@ -129,9 +129,10 @@ const General = () => {
           <div className="text-sm">
             阅读区平滑滚动
             <div className="text-muted-foreground text-xs">
-              滚轮滚动时加连贯的缓动动画（类似手机滑动的手感），消除一格一顿的跳变。
-              只影响桌面端的笔记阅读区与原文面板；手机触摸滑动本来就是原生惯性，不受影响。
-              关闭后回到系统原生滚动。
+              两种触摸式阅读手感：滚轮加连贯的缓动动画，消除一格一顿的刻度感；
+              按住左键拖动 = 内容 1:1 跟随鼠标、松手带惯性滑行（像手机），
+              Shift+拖动仍是选择文字。只影响桌面端的笔记阅读区与原文面板；
+              手机触摸滑动本来就是原生惯性，不受影响。关闭后回到系统原生滚动。
             </div>
           </div>
           <Switch checked={smoothEnabled} onCheckedChange={setSmoothEnabled} />
@@ -141,7 +142,8 @@ const General = () => {
             手感档位
             <div className="text-muted-foreground text-xs">
               跟手：滑行短、停得快，接近原生但顺滑；适中：连贯不飘（推荐）；
-              动量：接近手机松手后的滑行。切换后到阅读页滚几下即可对比。
+              动量：接近手机松手后的滑行。滚轮与拖拽松手的惯性共用档位；
+              切换后到阅读页滚几下、拖几下即可对比。
             </div>
           </div>
           <Select
