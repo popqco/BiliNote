@@ -185,7 +185,9 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
                 </TooltipProvider>
               </div>
             </div>
-            {(task.status === 'FAILED' || task.status === 'FAILD') && task.message && (
+            {/* 进行中提示（排队位次/降级重试/失败原因）：轮询会把后端 message 合并进来，
+                之前只有失败卡才展示——总结阶段一蹲几分钟还零反馈，看起来像卡死（2026-10-06） */}
+            {task.message && (
               <div
                 className="text-muted-foreground mt-1 line-clamp-2 w-full text-[10px]"
                 title={task.message}

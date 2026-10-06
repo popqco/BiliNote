@@ -925,6 +925,12 @@ class NoteGenerator:
         attempts.append(("text_only", [], False))
 
         last_exc: Optional[Exception] = None
+        # 阶梯总死线（2026-10-06「总结中长期卡在总结中」反馈）：单次调用由
+        # 流式空闲超时兜底，但三级阶梯串起来最坏可拖 20-30 分钟且 UI 零反馈，
+        # 看起来像卡死。超过死线就明确失败并写清原因，交给用户重试（有缓存，重试很快）。
+        deadline_seconds = float(os.getenv("SUMMARIZE_LADDER_DEADLINE_SECONDS", "1500"))
+        ladder_started_at = time.monotonic()
+        strategy_labels = {"full": "原样（含视频帧）", "thinned": "减帧", "text_only": "纯文本"}
         for idx, (strategy, imgs, shot) in enumerate(attempts):
             if strategy == "thinned":
                 imgs = self._rebuild_video_grids(task_id)
@@ -932,11 +938,24 @@ class NoteGenerator:
                     logger.warning("减帧重建失败（无可用视频文件），跳过该级")
                     continue
             if idx > 0:
-                label = {"thinned": "减帧", "text_only": "纯文本"}.get(strategy, strategy)
-                logger.warning(f"总结失败进入降级：策略={label} (task_id={task_id})")
+                label = strategy_labels.get(strategy, strategy)
+                cause = type(last_exc).__name__ if last_exc else "未知错误"
+                logger.warning(f"总结失败进入降级：策略={label} 原因={cause} (task_id={task_id})")
+                elapsed_min = (time.monotonic() - ladder_started_at) / 60
+                if elapsed_min * 60 > deadline_seconds:
+                    deadline_exc = RuntimeError(
+                        f"总结累计 {elapsed_min:.0f} 分钟仍未成功（上游模型响应过慢），已停止降级重试；请稍后重试或更换模型"
+                    )
+                    self._handle_exception(task_id, deadline_exc)
+                    raise deadline_exc
                 self._update_status(
                     task_id, TaskStatus.SUMMARIZING,
-                    message=f"上游不稳定，正在用「{label}」策略重试（第 {idx + 1}/{len(attempts)} 次）",
+                    message=f"上游不稳定（{cause}），正在用「{label}」策略重试（第 {idx + 1}/{len(attempts)} 次）",
+                )
+            else:
+                self._update_status(
+                    task_id, TaskStatus.SUMMARIZING,
+                    message=f"正在调用模型总结（{strategy_labels.get(strategy, strategy)}），长视频可能需要几分钟",
                 )
             try:
                 markdown = gpt.summarize(build_source(imgs or [], shot))
