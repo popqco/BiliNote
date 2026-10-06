@@ -36,7 +36,7 @@ apply_bilibili_dm_img_patch()
 #   同一个坏的 CDN 节点上，新连接才有机会被调度到健康节点（2026-10-05
 #   「交通法」笔记：3 次瞬态重试全撞同一 SSL EOF 认输）。
 # 仍失败则原样抛出——错误原因会经 _format_error 落到任务状态（不再有静默失败）。
-_YDL_TRANSIENT_RETRIES = 3
+_YDL_TRANSIENT_RETRIES = 4
 _TRANSIENT_DL_MARKERS = (
     "416",
     "ssl",
@@ -47,6 +47,11 @@ _TRANSIENT_DL_MARKERS = (
     "read timed out",
     "timed out",
     "temporarily unavailable",
+    # CDN 中途断流：`ERROR: [download] Got error: <n> bytes read, <m> more
+    # expected. Giving up after N retries`——yt-dlp 内部读重试耗尽后的文案，
+    # 之前不匹配任何标记被当永久错误直接抛（2026-10-06「加班同」笔记实拍）
+    "got error",
+    "giving up after",
 )
 
 

@@ -4,6 +4,7 @@ import math
 import os
 import shutil
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -848,11 +849,29 @@ class NoteGenerator:
                 logger.warning(f"加载转写缓存失败，将重新转写：{e}")
 
         # 调用转写器（全局信号量：GPU/显存只允许一个 whisper 实例并发，见 ADR-0001）
+        # 瞬态网络错误自动重试（2026-10-06）：API 转写引擎（Groq 等）的
+        # `Connection error.` 之前一击致命——本地网络/代理抖一下整个任务就失败，
+        # 用户得手点三次「重试」。与 universal_gpt 调用重试同款退避节奏；
+        # 重试期间持锁，保证「同一时刻只跑一个转写」的不变量不被打破。
+        _TRANSCRIBE_RETRIES = 3
+        _TRANSCRIBE_RETRY_DELAYS = (3.0, 6.0)
         try:
             logger.info("开始转写音频（等待转写信号量）")
             with transcribe_semaphore:
-                logger.info("获得转写信号量，开始转写")
-                transcript = self.transcriber.transcript(file_path=audio_file)
+                transcript: TranscriptResult | None = None
+                for attempt in range(1, _TRANSCRIBE_RETRIES + 1):
+                    try:
+                        logger.info("获得转写信号量，开始转写（第 %d/%d 次尝试）",
+                                    attempt, _TRANSCRIBE_RETRIES)
+                        transcript = self.transcriber.transcript(file_path=audio_file)
+                        break
+                    except Exception as exc:
+                        if attempt >= _TRANSCRIBE_RETRIES:
+                            raise
+                        delay = _TRANSCRIBE_RETRY_DELAYS[attempt - 1]
+                        logger.warning("转写失败（第 %d/%d 次），%.0fs 后重试：%s",
+                                       attempt, _TRANSCRIBE_RETRIES, delay, exc)
+                        time.sleep(delay)
             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
             return transcript
