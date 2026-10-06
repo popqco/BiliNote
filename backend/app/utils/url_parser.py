@@ -53,6 +53,23 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
     return None
 
 
+# 多 P 视频下载器 id 带 _pN 后缀（yt-dlp 对分 P 视频报 BVxxx_p1）
+_MULTI_P_SUFFIX = re.compile(r"_p\d+$", re.IGNORECASE)
+
+
+def normalize_video_id(video_id: Optional[str], platform: str = "") -> Optional[str]:
+    """把视频 id 归一化为裸 id（多 P 后缀 `_pN` 仅 bilibili 有，剥掉）。
+
+    提交/自动化/状态文件全程用裸 bvid，唯独落库曾用下载器原始 id——
+    自动化「已有成功笔记」按裸 bvid 查库永远查不到，多 P 视频每轮重跑
+    （2026-10-06 潘通视频 15:47-16:53 连跑 6 次实锤）。
+    youtube 的 11 位 id 理论上可能以 _p<数字> 结尾，故只在 bilibili 剥后缀。
+    """
+    if not video_id or platform != "bilibili":
+        return video_id
+    return _MULTI_P_SUFFIX.sub("", video_id)
+
+
 def normalize_video_url(url: str) -> str:
     """
     将任意包含 BV 号的 B 站链接规范化为标准视频链接。

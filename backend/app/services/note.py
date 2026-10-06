@@ -1094,6 +1094,9 @@ def find_active_task_by_video(video_id: str) -> Optional[dict]:
     """
     if not video_id:
         return None
+    from app.utils.url_parser import normalize_video_id
+
+    video_id = normalize_video_id(video_id, "bilibili") if video_id.startswith("BV") else video_id
     try:
         candidates = sorted(
             NOTE_OUTPUT_DIR.glob("*.status.json"),
@@ -1110,7 +1113,9 @@ def find_active_task_by_video(video_id: str) -> Optional[dict]:
             data = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if data.get("video_id") != video_id:
+        # 状态文件的 video_id 可能被带 _pN 后缀的下载器元数据覆盖（多 P 视频），
+        # 归一化后再比对，否则正在跑的任务会被自动化当成「无任务」重复提交
+        if normalize_video_id(data.get("video_id"), data.get("platform")) != video_id:
             continue
         if data.get("status") in TERMINAL_STATUSES:
             continue

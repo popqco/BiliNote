@@ -1,6 +1,7 @@
 from app.db.models.video_tasks import VideoTask
 from app.db.engine import get_db
 from app.utils.logger import get_logger
+from app.utils.url_parser import normalize_video_id
 
 from sqlalchemy.exc import IntegrityError
 
@@ -9,6 +10,9 @@ logger = get_logger(__name__)
 
 # 插入任务（幂等：UI 重试复用同一 task_id，重复插入不再抛 UNIQUE 异常）
 def insert_video_task(video_id: str, platform: str, task_id: str):
+    # 多 P 视频下载器 id 带 _pN 后缀，落库统一归一化为裸 bvid——
+    # 否则自动化按裸 bvid 查「已有成功笔记」永远查不到（2026-10-06 潘通视频每轮重跑）
+    video_id = normalize_video_id(video_id, platform) or video_id
     db = next(get_db())
     try:
         existing = db.query(VideoTask).filter_by(task_id=task_id).first()
@@ -33,6 +37,7 @@ def insert_video_task(video_id: str, platform: str, task_id: str):
 
 # 查询任务（最新一条）
 def get_task_by_video(video_id: str, platform: str):
+    video_id = normalize_video_id(video_id, platform) or video_id
     db = next(get_db())
     try:
         task = (
@@ -55,6 +60,7 @@ def get_task_by_video(video_id: str, platform: str):
 
 # 删除任务
 def delete_task_by_video(video_id: str, platform: str):
+    video_id = normalize_video_id(video_id, platform) or video_id
     db = next(get_db())
     try:
         tasks = (
