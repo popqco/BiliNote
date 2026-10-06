@@ -91,6 +91,10 @@ interface TaskStore {
   addBackendTask: (bt: any, result?: any) => void
   /** 历史全量回填：/tasks/recent 概要批量并入（只带概要，正文点开时懒加载） */
   backfillBackendTasks: (list: any[]) => void
+  /** 仅从本地列表移除（不调后端删除）：/tasks/recent 视频级去重后，
+   * 后端已隐藏的重复历史卡由本地同步清掉；后端文件保留，删掉现行笔记
+   * 后老笔记还能经同步重新露出。 */
+  dropLocalTasks: (ids: string[]) => void
   removeTask: (id: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
@@ -403,6 +407,16 @@ export const useTaskStore = create<TaskStore>()(
       },
 
       clearTasks: () => set({ tasks: [], currentTaskId: null }),
+
+      dropLocalTasks: ids => {
+        const drop = new Set(ids)
+        if (drop.size === 0) return
+        set(state => ({
+          tasks: state.tasks.filter(t => !drop.has(t.id)),
+          currentTaskId:
+            state.currentTaskId && drop.has(state.currentTaskId) ? null : state.currentTaskId,
+        }))
+      },
 
       setCurrentTask: taskId => set({ currentTaskId: taskId }),
     }),

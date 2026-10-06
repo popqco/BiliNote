@@ -15,6 +15,43 @@ const hasTaskContent = (t: any): boolean => {
 
 const DAY_MS = 24 * 3600 * 1000
 
+/** 视频级 keeper 选择：与后端 app/services/recent_dedupe.py 同一规则——
+ * 非终态(进行中) > SUCCESS > 其他终态(FAILED)，同优先级取 createdAt 新者。
+ * 后端 /tasks/recent 每个视频只返回一条，本地隐藏卡要跟它对齐。 */
+const rankForDedupe = (t: any) =>
+  ACTIVE.includes(t?.status) ? 2 : t?.status === 'SUCCESS' ? 1 : 0
+
+/**
+ * 清理「后端已按视频去重隐藏」的本地卡（仅本地移除，不删后端文件）：
+ * 失败风暴时代同一视频留下几十条 FAILED 状态文件，/tasks/recent 以前全量
+ * 返回，本地历史里堆了几十张重复卡（2026-10-06 用户反馈）。后端去重后这些
+ * 卡不在 serverIds 里，按 keeper 规则清掉；后端文件保留，现行笔记被删后
+ * 老笔记还能经同步重新露出。
+ */
+const cleanupHiddenDupes = (serverTasks: any[]) => {
+  const serverIds = new Set(serverTasks.map(t => t?.task_id).filter(Boolean))
+  const tasks = useTaskStore.getState().tasks
+  const keeperByVideo = new Map<string, any>()
+  for (const t of tasks) {
+    const vid = t?.audioMeta?.video_id
+    if (!vid) continue
+    const cur = keeperByVideo.get(vid)
+    if (
+      !cur ||
+      rankForDedupe(t) > rankForDedupe(cur) ||
+      (rankForDedupe(t) === rankForDedupe(cur) && (t.createdAt || '') > (cur.createdAt || ''))
+    )
+      keeperByVideo.set(vid, t)
+  }
+  const stale: string[] = []
+  for (const t of tasks) {
+    if (!t || serverIds.has(t.id) || ACTIVE.includes(t.status)) continue
+    const vid = t.audioMeta?.video_id
+    if (vid && keeperByVideo.get(vid)?.id !== t.id) stale.push(t.id)
+  }
+  if (stale.length) useTaskStore.getState().dropLocalTasks(stale)
+}
+
 /**
  * 与后端 /tasks/recent 同步：
  * - 进页/配对成功时全量回填一次历史概要（不带正文，点开时懒加载）——
@@ -39,6 +76,9 @@ export const useTasksSync = (interval = 30000) => {
       const data: any = await get_recent_tasks(300)
       if (stopped || !Array.isArray(data?.tasks)) return
       backfilled = true
+      // 先并入回填（概要/自愈标题），再在合并后的全量上做清理
+      useTaskStore.getState().backfillBackendTasks(data.tasks)
+      cleanupHiddenDupes(data.tasks)
       const serverIds = new Set(data.tasks.map((t: any) => t?.task_id).filter(Boolean))
       const orphans = useTaskStore
         .getState()
@@ -50,7 +90,6 @@ export const useTasksSync = (interval = 30000) => {
             !hasTaskContent(t),
         )
         .map(t => t.id)
-      useTaskStore.getState().backfillBackendTasks(data.tasks)
       for (const id of orphans) {
         try {
           await useTaskStore.getState().removeTask(id)
@@ -67,6 +106,9 @@ export const useTasksSync = (interval = 30000) => {
       const data: any = await get_recent_tasks(120)
       const list = data?.tasks
       if (stopped || !Array.isArray(list)) return
+      // 30s 也做一次隐藏重复卡清理：手动重提同视频时，新 PENDING 卡进来后
+      // 老 SUCCESS 卡要立刻让位（不等下次启动的全量回填）
+      cleanupHiddenDupes(list)
       const fresh = (bt: any) => (bt.updated_at || 0) * 1000 > Date.now() - DAY_MS
 
       for (const bt of list) {

@@ -1117,14 +1117,19 @@ def list_recent_tasks(limit: int = 80) -> List[dict]:
     """按最近更新倒序返回任务概要列表（供 /tasks/recent 增量同步）。
 
     只保留 {uuid}.status.json 主文件，字段与前端任务卡片所需对齐。
+    视频级去重：同一 video_id 只返回一条（进行中 > SUCCESS > FAILED，
+    同优先级取新者），否则失败风暴留下的几十条 FAILED 会把历史列表
+    刷成重复卡（2026-10-06 用户反馈）。去重前先多扫 3 倍原始条目，
+    避免重复占比高的库里去重后不足 limit 条。
     """
+    scan_cap = max(limit * 3, 240)
     items: List[dict] = []
     try:
         files = sorted(
             NOTE_OUTPUT_DIR.glob("*.status.json"),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
-        )
+        )[:scan_cap]
     except OSError:
         return items
     for f in files:
@@ -1164,9 +1169,10 @@ def list_recent_tasks(limit: int = 80) -> List[dict]:
             "updated_at": updated_at,
             "has_result": (NOTE_OUTPUT_DIR / f"{stem}.json").exists(),
         })
-        if len(items) >= limit:
-            break
-    return items
+
+    from app.services.recent_dedupe import pick_latest_per_video
+
+    return pick_latest_per_video(items)[:limit]
 
 
 # ---------------- 运行中任务登记表（进程内） ----------------
