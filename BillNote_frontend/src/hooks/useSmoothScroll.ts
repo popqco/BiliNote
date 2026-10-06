@@ -13,13 +13,15 @@ const TIER_PARAMS: Record<SmoothScrollTier, { lerp: number; wheelMultiplier: num
   momentum: { lerp: 0.05, wheelMultiplier: 1.15 },
 }
 
-// 拖拽松手后的滑行外推时间（ms）：用松手前 ~120ms 的鼠标速度 × 该系数
-// 得到总滑行距离，再交给当前档位的 lerp 指数衰减。与滚轮共用档位语义：
-// 跟手=很快停，适中=滑一小段，动量=滑很远。
-const TIER_FLING_MS: Record<SmoothScrollTier, number> = {
-  direct: 250,
-  medium: 550,
-  momentum: 1100,
+// 拖拽松手后的摩擦衰减时间常数（ms），参照手机触摸滚动（iOS decelerationRate
+// normal ≈ 每 ms 衰减 0.998 → τ≈500ms；Android OverScroller 同族 250-800ms）：
+// v(t) = v0·e^(-t/τ)，总滑行距离 = v0·τ 自然涌现。
+// 关键是速度连续：滑行起步速度=松手瞬间手指速度，再逐渐摩擦停下。
+// 跟手=很快停，适中=滑一小段，动量=接近手机松手滑行。
+const TIER_FLING_TAU: Record<SmoothScrollTier, number> = {
+  direct: 200,
+  medium: 350,
+  momentum: 600,
 }
 
 // 按下后位移超过该值才算拖动，否则是点击（链接/按钮/图片缩放照常）
@@ -52,8 +54,8 @@ const isFinePointer = () => {
  * 按住拖动（左键，像手机那样抓着内容走）
  * - 按下后位移超过阈值才算拖动，小于阈值仍是点击（链接/按钮/图片缩放不受影响，
  *   被拖动吞掉的点击用一次性捕获监听抑制）。
- * - 1:1 跟踪鼠标轨迹；松手按最近 120ms 的速度外推滑行距离，交给当前档位
- *   的 lerp 指数衰减（跟手快停/动量滑远）。
+ * - 1:1 跟踪鼠标轨迹；松手按最近 120ms 的速度起滑，摩擦衰减（iOS 触摸
+ *   同族模型，速度连续）到自然停下，衰减快慢随当前档位。
  * - Shift+按住拖动不拦截，留给原生文字选择；拖动期间临时关掉 user-select
  *   并抑制链接/图片原生拖拽，双击选词（无位移）不受影响。
  * - 拖动开始后才 setPointerCapture：保证鼠标移出窗口也能持续跟踪并收到
@@ -169,9 +171,19 @@ export function useSmoothScroll() {
         if (dt > 10) velocity = (first.y - last.y) / dt
       }
       const maxGlide = Math.min(4000, node.clientHeight * MAX_GLIDE_VIEWPORTS)
-      const glide = Math.max(-maxGlide, Math.min(maxGlide, velocity * TIER_FLING_MS[tier]))
+      const tau = TIER_FLING_TAU[tier]
+      const glide = Math.max(-maxGlide, Math.min(maxGlide, velocity * tau))
       if (Math.abs(glide) >= 24) {
-        lenis.scrollTo(node.scrollTop + glide)
+        // 摩擦衰减滑行：easing 是归一化指数曲线，动画初速≈松手速度
+        //（速度连续），随后按 τ 摩擦减速——与手机触摸同族模型。
+        // 期间滚轮可随时接管（lenis 平滑重定目标），再次按下即停（见下）。
+        // 注意 lenis 的 duration 单位是「秒」（raf 里 deltaTime*0.001 累计），
+        // 传毫秒会变成上千秒的蠕动（实测教训：松手后以超慢速度挪个不停）。
+        const k = 4 // 曲线跑 4τ，98%+ 收敛，lenis 完成时精确到目标
+        lenis.scrollTo(node.scrollTop + glide, {
+          duration: (tau * k) / 1000,
+          easing: (u: number) => (1 - Math.exp(-k * u)) / (1 - Math.exp(-k)),
+        })
       }
     }
     const onPointerUp = (e: PointerEvent) => endDrag(e, true)
@@ -181,6 +193,8 @@ export function useSmoothScroll() {
       if (e.button !== 0) return
       if (e.pointerType !== 'mouse' && e.pointerType !== 'pen') return
       if (e.shiftKey) return // Shift+拖 = 原生文字选择
+      // 触摸语义：滑行中的页面被按住即停（无论随后是点击还是拖动）
+      lenis.scrollTo(node.scrollTop, { immediate: true })
       pointerId = e.pointerId
       startY = e.clientY
       top0 = node.scrollTop
