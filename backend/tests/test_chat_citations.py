@@ -384,5 +384,131 @@ class TestCleanSectionTitle(unittest.TestCase):
         )
 
 
+class TestLexicalTerms(unittest.TestCase):
+    def test_brand_term_extracted_generic_dropped(self):
+        """品牌串进关键串；“价格”这类高频泛词不作词面锚。"""
+        terms = vector_store._lexical_terms("猛玛极影7 Ultra 的价格是多少")
+        self.assertTrue(any("猛玛极影" in t for t in terms))
+        self.assertTrue(any("Ultra" in t for t in terms))
+        self.assertNotIn("价格", terms)
+
+    def test_exact_section_title_extracted(self):
+        terms = vector_store._lexical_terms("专业剧组与租赁商价值")
+        self.assertTrue(any("专业剧组" in t for t in terms))
+
+    def test_vague_question_no_terms(self):
+        self.assertEqual(vector_store._lexical_terms("总结一下这个视频"), [])
+
+
+class _FakeGlobalCollection:
+    """模拟全局集合：query 返回语义候选，get(where_document=...) 返回词面候选。"""
+
+    def __init__(self, semantic, lexical):
+        self._semantic = semantic
+        self._lexical = lexical
+
+    def query(self, query_texts, n_results, where=None):
+        return {
+            "ids": [[c["id"] for c in self._semantic]],
+            "documents": [[c["text"] for c in self._semantic]],
+            "metadatas": [[c["metadata"] for c in self._semantic]],
+            "distances": [[c["distance"] for c in self._semantic]],
+        }
+
+    def get(self, where=None, where_document=None, include=None, limit=None):
+        term = where_document["$contains"]
+        matched = [c for c in self._lexical if term in c["text"]]
+        n = limit or 12
+        return {
+            "ids": [c["id"] for c in matched[:n]],
+            "documents": [c["text"] for c in matched[:n]],
+            "metadatas": [c["metadata"] for c in matched[:n]],
+        }
+
+
+class TestLexicalRecall(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.store = vector_store.VectorStoreManager()
+
+    def _with_fake_client(self, fake):
+        store = self.store
+        orig_client = store._client
+        store._client = type("C", (), {"get_collection": lambda self, name: fake})()
+        return orig_client
+
+    def test_lexical_hit_enters_context_after_semantic(self):
+        """语义召回只有 intro 噪音时，含关键串的定价块经词面通道进上下文，
+        且排在同档语义候选之后（引用编号靠后但至少在场）。"""
+        store = self.store
+        sem_intro = {
+            "id": "note_1",
+            "text": "来源链接 BV123 # 猛玛极影7 Ultra 评测",
+            "metadata": {"source_type": "markdown", "section_title": "intro"},
+            "distance": 0.28,
+        }
+        sem_noise = {
+            "id": "other_1",
+            "text": "香水的前调是茉莉与檀香",
+            "metadata": {"source_type": "markdown", "section_title": "intro"},
+            "distance": 0.30,
+        }
+        lex_price = {
+            "id": "note_7",
+            "text": "## 5. 专业剧组与租赁商价值 8999 元的定价决定了极影7 Ultra 的目标用户",
+            "metadata": {"source_type": "markdown", "section_title": "5. 专业剧组与租赁商价值"},
+            "distance": None,
+        }
+        fake = _FakeGlobalCollection(semantic=[sem_intro, sem_noise], lexical=[lex_price])
+        orig_client = self._with_fake_client(fake)
+        try:
+            kept = store.query_cross("猛玛极影7 Ultra 的价格是多少")
+        finally:
+            store._client = orig_client
+        texts = [c["text"] for c in kept]
+        # 噪音候选被词面闸剔除，定价块在场且排在语义候选之后
+        self.assertFalse(any("香水" in t for t in texts))
+        self.assertTrue(any("8999" in t for t in texts))
+        self.assertEqual(texts[0], sem_intro["text"])
+
+    def test_lexical_dedupe_with_semantic(self):
+        """同一块既被语义召回又被词面召回时只保留一份。"""
+        store = self.store
+        both = {
+            "id": "note_1",
+            "text": "猛玛极影7 Ultra 评测 开箱",
+            "metadata": {"source_type": "markdown", "section_title": "intro"},
+            "distance": 0.25,
+        }
+        fake = _FakeGlobalCollection(semantic=[both], lexical=[both])
+        orig_client = self._with_fake_client(fake)
+        try:
+            kept = store.query_cross("猛玛极影7 Ultra")
+        finally:
+            store._client = orig_client
+        self.assertEqual(len(kept), 1)
+
+
+class TestSelectCrossTopLexicalFill(unittest.TestCase):
+    def test_none_distance_fills_after_semantic(self):
+        """distance=None 的词面候选通过词面闸、排在语义候选之后。"""
+        sem = {"text": "猛玛极影7 Ultra 评测横评", "distance": 0.28}
+        noise = {"text": "香水的前调是茉莉", "distance": 0.30}
+        lex = {"text": "猛玛极影7 Ultra 定价 8999 元", "distance": None}
+        kept = vector_store._select_cross_top(
+            "猛玛极影7 Ultra 的价格是多少", [noise, sem, lex], top_k=6
+        )
+        self.assertEqual(kept[0]["text"], sem["text"])
+        self.assertIn(lex["text"], [c["text"] for c in kept])
+        self.assertFalse(any("香水" in c["text"] for c in kept))
+
+    def test_pervasive_question_lexical_sorts_last(self):
+        """泛问路径：词面候选不再按 0 距离抢到最前，而是补位在语义之后。"""
+        sem = {"text": "甲乙丙丁戊己", "distance": 0.10}
+        lex = {"text": "甲乙都是关键词载体", "distance": None}
+        kept = vector_store._select_cross_top("甲乙关系如何", [lex, sem], top_k=6)
+        self.assertEqual(kept[0]["text"], sem["text"])
+
+
 if __name__ == "__main__":
     unittest.main()
