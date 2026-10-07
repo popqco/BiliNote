@@ -84,11 +84,17 @@ TOOLS = [
 
 # ── 工具执行 ──────────────────────────────────────────────────
 
-def execute_tool(task_id: str, tool_name: str, arguments: dict) -> str:
-    """执行工具调用，返回结果字符串。"""
+def execute_tool(task_id: str, tool_name: str, arguments: dict) -> tuple[str, Optional[dict]]:
+    """执行工具调用，返回 (结果字符串, 来源提示)。
+
+    来源提示 source_hint 描述本次返回内容属于哪类来源（含可跳转的时间
+    字段等），chat_service 用它往 sources 追加同编号的合成来源——答案
+    引用工具内容时，前端角标才有出处可点。无可归档来源（数据不存在、
+    筛选结果为空）时 hint 为 None。
+    """
     data = _load_note_data(task_id)
     if not data:
-        return json.dumps({"error": "笔记数据不存在"}, ensure_ascii=False)
+        return json.dumps({"error": "笔记数据不存在"}, ensure_ascii=False), None
 
     if tool_name == "lookup_transcript":
         return _lookup_transcript(data, arguments)
@@ -97,13 +103,13 @@ def execute_tool(task_id: str, tool_name: str, arguments: dict) -> str:
     elif tool_name == "get_note_content":
         return _get_note_content(data)
     else:
-        return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)
+        return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False), None
 
 
-def _lookup_transcript(data: dict, args: dict) -> str:
+def _lookup_transcript(data: dict, args: dict) -> tuple[str, Optional[dict]]:
     segments = data.get("transcript", {}).get("segments", [])
     if not segments:
-        return json.dumps({"error": "没有转录数据"}, ensure_ascii=False)
+        return json.dumps({"error": "没有转录数据"}, ensure_ascii=False), None
 
     position = args.get("position")
     start_time = args.get("start_time")
@@ -148,10 +154,19 @@ def _lookup_transcript(data: dict, args: dict) -> str:
             for s in filtered
         ],
     }
-    return json.dumps(result, ensure_ascii=False)
+    # 来源提示按本次实际返回的片段取时间跨度：筛选为空（没查到）时不给
+    # hint，避免在来源列表里挂一个空白徽章。
+    hint = None
+    if filtered:
+        hint = {
+            "source_type": "transcript",
+            "start_time": round(min(s.get("start", 0) for s in filtered), 1),
+            "end_time": round(max(s.get("end", 0) for s in filtered), 1),
+        }
+    return json.dumps(result, ensure_ascii=False), hint
 
 
-def _get_video_info(data: dict) -> str:
+def _get_video_info(data: dict) -> tuple[str, dict]:
     am = data.get("audio_meta", {})
     raw = am.get("raw_info", {}) or {}
 
@@ -170,10 +185,10 @@ def _get_video_info(data: dict) -> str:
     }
     # 去除 None 值
     info = {k: v for k, v in info.items() if v is not None and v != ""}
-    return json.dumps(info, ensure_ascii=False)
+    return json.dumps(info, ensure_ascii=False), {"source_type": "meta"}
 
 
-def _get_note_content(data: dict) -> str:
+def _get_note_content(data: dict) -> tuple[str, dict]:
     md = data.get("markdown", "")
     if isinstance(md, list):
         # 多版本，取最新
@@ -181,4 +196,5 @@ def _get_note_content(data: dict) -> str:
     # 限制长度
     if len(md) > 5000:
         md = md[:5000] + "\n\n... (内容过长已截断)"
-    return json.dumps({"markdown": md}, ensure_ascii=False)
+    # 无章节信息的整篇来源：前端点击定位到笔记顶部
+    return json.dumps({"markdown": md}, ensure_ascii=False), {"source_type": "markdown"}
