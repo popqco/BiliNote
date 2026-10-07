@@ -144,7 +144,8 @@ function createMarkdownComponents(baseURL: string) {
         (children[0] as string).startsWith('原片 @')
 
       if (isOriginLink) {
-        const timeMatch = (children[0] as string).match(/原片 @ (\d{2}:\d{2})/)
+        // 三位分钟（101:52）与 H:MM:SS 都要认，否则长视频 pill 显示成「原片」
+        const timeMatch = (children[0] as string).match(/原片 @ (\d{1,3}:\d{2}(?::\d{2})?)/)
         const timeText = timeMatch ? timeMatch[1] : '原片'
 
         return (
@@ -500,29 +501,54 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     if (!jumpTarget) return
     activeJumpRef.current = jumpTarget
     consumeJump()
+    // 全屏问答 / 窄屏（<768px，含手机）下面板替换了阅读区：跳转目标的
+    // DOM 根本不存在，轮询必然落空——时间类来源静默无反应、章节类 5 秒
+    // 后报「未找到对应章节」（2026-10-07 实锤主根因，用户实拍）。
+    // 先把视图切回正文，再走下面的定位轮询。窄屏下原文面板同样让位；
+    // 桌面端并排的原文面板不挡阅读区，保持不动。
+    if (showChat !== false) setShowChat(false)
+    if (isNarrow && showTranscribe) setShowTranscribe(false)
     // 同笔记跳转时 currentTask/currentVerId 都不变，靠这个信号触发定位
     setJumpSignal(s => s + 1)
-  }, [jumpTarget, consumeJump])
+  }, [jumpTarget, consumeJump, showChat, isNarrow, showTranscribe])
 
-  // 从笔记 DOM 推断“覆盖某时间点”的章节标题：每个 H2/H3 的文本里带
-  // 原片（MM:SS）时间戳，取 ≤ start_time 的最大者。找不到（正文尚未
-  // 渲染/全屏问答模式）返回 null，退化为只开转写面板不定位正文。
+  // 从笔记 DOM 推断“覆盖某时间点”的章节标题：H2/H3 文本里带时间戳
+  // （渲染后的原片 pill「原片（04:00）」、或无视频 id 笔记的裸尾缀
+  // 「章节名 (04:00)」），取 ≤ start_time 的最大者。
+  // 时间格式三种都要认（后端 note_helper 自 1cbe2d1 起就输出）：MM:SS、
+  // 三位分钟 MMM:SS（2h53m 的视频一半标记是 101:52 这种）、H:MM:SS——
+  // 旧实现只认两位分钟，长视频的时间引用全部静默失效。
   const findSectionTitleForTime = (seconds: number): string | null => {
     const root = contentCaptureRef.current
     if (!root) return null
+    const ORIGIN_TIME = /原片\s*[（(](\d{1,3}):(\d{2})(?::(\d{2}))?[）)]/
+    // 裸尾缀锚定行尾：避免误吃正文中段的括号数字；「(16:9)」这类比例
+    // 因秒位要求两位数字天然不命中
+    const BARE_TAIL_TIME = /[（(](\d{1,3}):(\d{2})(?::(\d{2}))?[）)]\s*$/
+    const toSeconds = (m: RegExpMatchArray) => {
+      const a = parseInt(m[1], 10)
+      const b = parseInt(m[2], 10)
+      const c = m[3] ? parseInt(m[3], 10) : null
+      return c === null ? a * 60 + b : a * 3600 + b * 60 + c
+    }
     let best: { el: HTMLElement; time: number } | null = null
     for (const h of root.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
-      const m = (h.textContent || '').match(/原片[（(](\d{1,2}):(\d{2})[）)]/)
+      const text = h.textContent || ''
+      const m = text.match(ORIGIN_TIME) || text.match(BARE_TAIL_TIME)
       if (!m) continue
-      const t = parseInt(m[1], 10) * 60 + parseInt(m[2], 10)
+      const t = toSeconds(m)
       if (t <= seconds + 1 && (!best || t > best.time)) {
         best = { el: h as HTMLElement, time: t }
       }
     }
     if (!best) return null
-    // 去掉“原片（04:00）”后缀再当 section_title 用，避免匹配串过长
+    // 去掉时间戳后缀再当 section_title 用，避免匹配串过长
     const title = best.el.textContent || ''
-    const cleaned = title.split('原片')[0].replace(/[\s*]+$/, '').trim()
+    const cleaned = title
+      .replace(ORIGIN_TIME, '')
+      .replace(BARE_TAIL_TIME, '')
+      .replace(/[\s*]+$/, '')
+      .trim()
     return cleaned || null
   }
 
@@ -554,8 +580,15 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       return
     }
     const normalize = (s: string) => s.replace(/[-：:\s*[\]]/g, '').toLowerCase()
+    // intro/开头 块（正文首个 H2 之前的引言、或标题清洗后为空的章节）
+    // 没有可匹配的 heading——旧实现拿 "intro" 去 fuzzy 匹配必败，点击
+    // 必报「未找到对应章节」。现在直接定位到笔记顶部（首个 heading）。
+    const topTarget = ['intro', '开头'].includes(sectionTitle.trim())
     const search = normalize(sectionTitle)
-    if (!search) return
+    if (!search) {
+      activeJumpRef.current = null
+      return
+    }
     // 找到 heading 后不能一滚了之：跨笔记跳转时笔记内容异步加载会
     // 中途重挂载阅读区（scrollTop 清零），一次 scrollTo 会被冲掉。
     // 这里持续校验目标位置，被冲掉就补滚，连续两轮稳定才算完成。
@@ -563,26 +596,45 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     // 才稳定，先等布局落定再开始计数，避免重试预算被布局抖动耗光。
     let tries = -4
     let stableTicks = 0
+    // 绝对死线：内容异步加载（懒加载）会重置轮询预算，但不允许无限
+    // 重试——10 秒还没定位到就放弃并提示。
+    const deadline = Date.now() + 10000
     const timer = window.setInterval(() => {
       tries += 1
       const root = contentCaptureRef.current
       const headings = (root || document).querySelectorAll('h1, h2, h3, h4, h5, h6')
       let hit: Element | null = null
-      for (const h of headings) {
-        const text = h.textContent || ''
-        const norm = normalize(text)
-        if (norm.includes(search) || search.includes(norm)) {
-          hit = h
-          break
-        }
-      }
-      if (!hit) {
-        if (tries >= 40) {
+      if (topTarget) {
+        // 开头定位：命中首个 heading 即可；全文一个 heading 都没有的
+        // 话直接把 viewport 滚回顶部收工。
+        hit = headings.length ? headings[0] : null
+        if (!hit && tries >= 6) {
+          const vp = readerViewportRef.current
           window.clearInterval(timer)
           activeJumpRef.current = null
-          toast.error('未找到对应章节')
+          if (vp) smoothScrollTo(vp, 0, { immediate: true })
+          return
         }
-        return
+      } else {
+        for (const h of headings) {
+          const text = h.textContent || ''
+          const norm = normalize(text)
+          // normalize 后为空的 heading（纯符号/纯时间戳）不参与匹配：
+          // search.includes('') 恒真，会把定位带到错误章节
+          if (!norm) continue
+          if (norm.includes(search) || search.includes(norm)) {
+            hit = h
+            break
+          }
+        }
+        if (!hit) {
+          if (tries >= 40 || Date.now() > deadline) {
+            window.clearInterval(timer)
+            activeJumpRef.current = null
+            toast.error('未找到对应章节')
+          }
+          return
+        }
       }
       // 阅读区滚的是 Radix ScrollArea 内层 viewport（window 不滚）。
       // viewport 一律从命中标题就近取——readerViewportRef 可能指向
@@ -619,7 +671,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         return
       }
       stableTicks = 0
-      if (tries >= 60) {
+      if (tries >= 60 || Date.now() > deadline) {
         window.clearInterval(timer)
         activeJumpRef.current = null
         return
@@ -639,9 +691,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     return () => window.clearInterval(timer)
     // 跨笔记：currentTask?.id 切过来后重跑；内容异步加载：currentVerId
     // 变化后重跑（旧实现没这个依赖，新笔记 markdown 渲染完成前轮询
-    // 可能已经在旧内容上耗尽了重试次数）。jumpSignal：同笔记跳转触发。
+    // 可能已经在旧内容上耗尽了重试次数）。selectedContent：单版本
+    // 老笔记正文由 Home 懒加载，currentVerId 不变——不监听内容本体，
+    // 5 秒轮询预算会在内容到达前耗尽、误报「未找到对应章节」。
+    // jumpSignal：同笔记跳转触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jumpSignal, currentTask?.id, currentVerId])
+  }, [jumpSignal, currentTask?.id, currentVerId, selectedContent])
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(selectedContent)
