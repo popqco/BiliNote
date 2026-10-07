@@ -28,6 +28,12 @@ interface SystemState {
   setSmoothScrollEnabled: (value: boolean) => void
   smoothScrollTier: SmoothScrollTier
   setSmoothScrollTier: (value: SmoothScrollTier) => void
+
+  // 拖动键选择：开（默认）= 左键拖动滚动、Shift+左键拖动选择文字；
+  // 关 = 左键拖动恢复原生选择文字、Shift+左键拖动接管滚动（修饰键互换）。
+  // 习惯「左键就是选字」的用户关掉即可，滚动仍可用 Shift+左键。
+  dragScrollEnabled: boolean
+  setDragScrollEnabled: (value: boolean) => void
 }
 
 // 跟手：滑行短、停得快；适中：连贯不飘；动量：接近手机松手后的滑行
@@ -54,6 +60,9 @@ export const useSystemStore = create<SystemState>()(
       setSmoothScrollEnabled: value => set({ smoothScrollEnabled: value }),
       smoothScrollTier: 'medium',
       setSmoothScrollTier: value => set({ smoothScrollTier: value }),
+
+      dragScrollEnabled: true,
+      setDragScrollEnabled: value => set({ dragScrollEnabled: value }),
     }),
     {
       name: 'system-store', // 本地存储的 key

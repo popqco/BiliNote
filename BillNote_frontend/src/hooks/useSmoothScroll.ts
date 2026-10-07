@@ -56,7 +56,9 @@ const isFinePointer = () => {
  *   被拖动吞掉的点击用一次性捕获监听抑制）。
  * - 1:1 跟踪鼠标轨迹；松手按最近 120ms 的速度起滑，摩擦衰减（iOS 触摸
  *   同族模型，速度连续）到自然停下，衰减快慢随当前档位。
- * - Shift+按住拖动不拦截，留给原生文字选择；拖动期间临时关掉 user-select
+ * - 按住拖动 = 滚动、Shift+按住拖动留给原生文字选择，这对修饰键可按
+ *   设置「左键拖动滚动」整体互换（关 = 左键拖动恢复选字、Shift+拖动滚动）；
+ *   拖动期间临时关掉 user-select
  *   并抑制链接/图片原生拖拽，双击选词（无位移）不受影响。
  * - 拖动开始后才 setPointerCapture：保证鼠标移出窗口也能持续跟踪并收到
  *   pointerup；提前捕获会把后续 click 重定向到视口、吞掉正常点击。
@@ -73,6 +75,7 @@ export function useSmoothScroll() {
   const [node, setNode] = useState<HTMLElement | null>(null)
   const enabled = useSystemStore(s => s.smoothScrollEnabled)
   const tier = useSystemStore(s => s.smoothScrollTier)
+  const dragScroll = useSystemStore(s => s.dragScrollEnabled)
 
   useEffect(() => {
     if (!node || !enabled || !isFinePointer()) return
@@ -192,7 +195,9 @@ export function useSmoothScroll() {
     const onPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return
       if (e.pointerType !== 'mouse' && e.pointerType !== 'pen') return
-      if (e.shiftKey) return // Shift+拖 = 原生文字选择
+      // 拖动/选字的修饰键按「左键拖动滚动」开关互换：开 = Shift+拖选字，
+      // 关 = 无修饰键的左键拖选字（Shift+拖接管滚动）
+      if (dragScroll ? e.shiftKey : !e.shiftKey) return
       // 触摸语义：滑行中的页面被按住即停（无论随后是点击还是拖动）
       lenis.scrollTo(node.scrollTop, { immediate: true })
       pointerId = e.pointerId
@@ -217,7 +222,7 @@ export function useSmoothScroll() {
       lenis.destroy()
       if (lenisRef.current === lenis) lenisRef.current = null
     }
-  }, [node, enabled, tier])
+  }, [node, enabled, tier, dragScroll])
 
   const scrollTo = useCallback(
     (el: HTMLElement, top: number, opts?: { immediate?: boolean }) => {

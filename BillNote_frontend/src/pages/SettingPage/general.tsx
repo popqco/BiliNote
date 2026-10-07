@@ -18,7 +18,8 @@ import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
  * 第二项：应用外系统通知 —— 轮询在后台命中时经 OS 通知中心弹一条，
  * 应用不在前台也能看到；点击通知回到应用，应用内卡片（含封面+按钮）再弹出。
  * 第三项：阅读区平滑滚动 —— 滚轮惯性（Lenis），消除一格一顿的跳变；
- * 手机触摸端本来就是原生惯性，不受影响。手感三档即时切换、现场试选。
+ * 手机触摸端本来就是原生惯性，不受影响。手感三档即时切换、现场试选；
+ * 拖动滚动键（左键 / Shift+左键）可按用户习惯互换。
  */
 const General = () => {
   const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
@@ -31,6 +32,8 @@ const General = () => {
   const setSmoothEnabled = useSystemStore(s => s.setSmoothScrollEnabled)
   const smoothTier = useSystemStore(s => s.smoothScrollTier)
   const setSmoothTier = useSystemStore(s => s.setSmoothScrollTier)
+  const dragScroll = useSystemStore(s => s.dragScrollEnabled)
+  const setDragScroll = useSystemStore(s => s.setDragScrollEnabled)
 
   const handleIntervalChange = (v: string) => {
     const n = Number(v)
@@ -130,8 +133,9 @@ const General = () => {
             阅读区平滑滚动
             <div className="text-muted-foreground text-xs">
               两种触摸式阅读手感：滚轮加连贯的缓动动画，消除一格一顿的刻度感；
-              按住左键拖动 = 内容 1:1 跟随鼠标、松手带惯性滑行（像手机），
-              Shift+拖动仍是选择文字。只影响桌面端的笔记阅读区与原文面板；
+              按住拖动 = 内容 1:1 跟随鼠标、松手带惯性滑行（像手机）。
+              拖动用哪个键（左键还是 Shift+左键）可在下方「按住左键拖动滚动」对调。
+              只影响桌面端的笔记阅读区与原文面板；
               手机触摸滑动本来就是原生惯性，不受影响。关闭后回到系统原生滚动。
             </div>
           </div>
@@ -160,6 +164,21 @@ const General = () => {
               <SelectItem value="momentum">动量</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-4">
+          <div className="text-sm">
+            按住左键拖动滚动
+            <div className="text-muted-foreground text-xs">
+              开（默认）：按住左键拖动 = 内容跟随滚动，Shift+左键拖动 = 选择文字；
+              关：左键拖动恢复为选择文字，改用 Shift+左键拖动滚动。
+              习惯「左键就是选字」的用户关掉即可。
+            </div>
+          </div>
+          <Switch
+            checked={dragScroll}
+            onCheckedChange={setDragScroll}
+            disabled={!smoothEnabled}
+          />
         </div>
       </div>
     </div>
