@@ -116,3 +116,27 @@ tail logs/app.log        # 确认 [startup 5/5] 启动完成、无 ERROR
 手机与桌面同处一个 Tailscale 网络：手机浏览器开 `http://<桌面机组网IP>:8483/` →
 设置 → 连接 Worker → 填 token（桌面端「设置 → 连接 Worker」页可查看本机 token）→ 配对。
 完整步骤与验证清单见 [worker-viewer-deploy.md](./worker-viewer-deploy.md)。
+
+## 6. 分发安装包（给另一台电脑一键安装）
+
+`pnpm tauri build --bundles nsis` 产出 `src-tauri/target/release/bundle/nsis/BiliNote_<版本>_x64-setup.exe`，
+内含桌面壳 + PyInstaller 后端（exe + `_internal`）+ 手机 viewer，新机器双击安装即开箱即用。
+
+前置（顺序敏感）：
+
+1. 后端产物就位 `src-tauri/bin/BiliNoteBackend/`：`BiliNoteBackend.exe`（+ 同内容三元组副本
+   `BiliNoteBackend-x86_64-pc-windows-msvc.exe`，构建期 bundler 按三元组名取件）+ `_internal/`；
+2. viewer 资源就位 `src-tauri/viewer-dist/`：用 `MSYS_NO_PATHCONV=1 VITE_API_BASE_URL=/api pnpm build`
+   的产物拷入（`tauri.conf.json` resources 已声明，gitignored 不入库）；
+3. ⚠️ **spec excludes torch**：torch 3.6GB 会把 NSIS 顶过 2GB 硬上限（makensis 32 位 mmap 越界，
+   报 "error mmapping file ... out of range"）。已在 spec 排除——安装包版本地转写回退 CPU，
+   Groq 云转写不受影响；本机部署不受影响（继续用旧 `_internal`，含 GPU）。
+
+验证（2026-10-07 实测流程）：静默安装到临时目录
+`setup.exe /S /D=C:\Temp\Test`（PowerShell `Start-Process -Wait` 最稳，Git Bash 直跑会被
+参数转换坑）→ 文件树完整 → 免 `.env` 启动后端 → sys_check 200 + `GET /` 直服 viewer 200。
+运行时 sidecar 解析为**无三元组后缀**的 `BiliNoteBackend.exe`（tauri-plugin-shell 2.3.5 源码确认），
+与安装布局一致；三元组名只在构建期需要。
+
+产出后手动上传：GitHub 仓库 → Releases → v2.5.0 → 编辑 → 拖入 setup.exe 发布。
+
