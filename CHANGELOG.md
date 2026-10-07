@@ -2,6 +2,37 @@
 
 本项目所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.5.0] - 2026-10-07
+
+> Fork 增强版首个版本（基于上游 2.4.5）。逐项变更见 2026-09-24 以来的 git 提交历史；
+> 部署与使用文档见 [docs/deploy-windows-installed.md](./docs/deploy-windows-installed.md) /
+> [docs/usage-guide-fork.md](./docs/usage-guide-fork.md)。
+
+### Added
+
+- **触摸式阅读滚动**：滚轮惯性平滑（消除一格一顿刻度感），按住左键拖动 1:1 跟随 + 松手速度连续摩擦滑行（iOS decelerationRate 同族模型，滑行初速=松手手速，滑行中再按即停）；「设置 → 通用」开关 + 三档手感（跟手/适中/动量），Shift+拖保留文字选择，拖动与点击按 6px 位移阈值区分
+- **Worker / Viewer 分离**：后端直服手机网页版，Tailscale 直连 + token 配对免公网，远端配置总开关、连接自检与配对前预检
+- **多格式导出**：笔记导出 PDF / Word / 长图 / 摘要海报（桌面端走 dialog 另存为，绕开 WebView2 对 blob 的拦截）；思维导图主题切换与 SVG 导出
+- **剪贴板监控**：复制视频链接切回窗口自动弹窗回填；可选后台轮询与 OS 系统通知（Tauri onFocusChanged 门控 + AUMID 快捷方式）
+- **AI 问答工作台**：三列并排布局，引用徽章点击定位正文章节（高亮 2 秒）或原文对应时间点
+
+### Changed
+
+- 生成历史视频级去重：同一视频只保留一张卡，重复生成收纳为多版本；前后端双向清理镜像残留
+- 总结降级阶梯：原样→减帧→纯文本逐级重试，卡片实时显示当前策略，25 分钟总死线兜底不再无声卡死
+- 自动化韧性：轮前 ffmpeg 预检、失败任务 30 分钟冷却、通知节流 30 分钟、「立即运行一轮」显示每个视频的提交/跳过原因
+- 桌面启动：端口预检 + 占用者点名、孤儿后端健康探测收编（根治假「后端已退出」横幅）、老笔记标题截断自愈
+- 手机端 UX：历史全量回填+懒加载、免 http 前缀、本机地址面板、深链直开全量可用
+
+### Fixed
+
+- 超长音频转写报 Connection error：Groq 25MB 上限，按时长自适应码率压缩 + 临时文件泄漏
+- 多 P 视频 `_pN` 后缀导致自动化每轮重复总结同一视频：id 归一化 + 存量数据清洗
+- 打包白壳 exe（BiliNoteBackend.spec pathex/collect_all 静默回退）导致 AI 问答、chromadb 等整块功能全灭
+- 任务状态机三故障：失败重试被拦、僵尸 PENDING 任务、terminated 红横幅卡死
+- 长视频 Groq 30MB 超限、上游抖动（网关空回/SSL）重试与末次换链路
+- 导图空分支（斜体星号残留 + markmap 空岔）、问答分页、自动化 Cookie 跨轮状态残留等
+
 ## [2.4.4] - 2026-06-23
 
 ### Security

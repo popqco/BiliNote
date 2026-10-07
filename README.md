@@ -3,7 +3,7 @@
     <p align="center">
   <img src="./doc/icon.svg" alt="BiliNote Banner" width="50" height="50"  />
 </p>
-<h1 align="center" > BiliNote v2.4.5（Fork 增强版）</h1>
+<h1 align="center" > BiliNote v2.5.0（Fork 增强版）</h1>
 </div>
 
 > **🍴 Fork 说明**：本仓库是 [JefferyHcool/BiliNote](https://github.com/JefferyHcool/BiliNote)（当前基于上游 v2.4.5）的个人增强分支。
