@@ -174,6 +174,49 @@ def _query_bigrams(query_text: str) -> list[str]:
     return [cleaned[i : i + 2] for i in range(len(cleaned) - 1)]
 
 
+# ── 词面补充召回 ─────────────────────────────────────────────────
+# 2026-10-07 实测（153 篇笔记 / 7323 块的真实库）：默认 all-MiniLM-L6-v2
+# 是英文嵌入模型，对中文语料的语义排序接近失效——与问题逐字命中的块也
+# 可能排在数百名之外（定价章节距查询 0.98、排名 176，连精确章节标题都
+# 进不了前 200），而带 URL/英文品牌词的 intro 块霸榜。语义 top-30 的召
+# 回池里根本没有正确块，后面的词面重排无从谈起，这就是「问价格答没有
+# 价格」的根源。
+# 对策：把问题里的关键串用 chroma where_document $contains 做确定性补充
+# 召回，与语义候选在同一场词面重排里竞争。零新依赖、无需重建索引。
+
+_LEX_TERM_MIN = 2          # 关键串最短长度
+_LEX_TERM_MAX = 12         # 关键串最长长度（太长容易整句无命中）
+_LEX_TERM_COUNT = 3        # 最多取几个关键串
+_LEX_RECALL_LIMIT = 12     # 每个关键串最多补充召回块数
+# 高频泛词不作词面锚：命中面太大，补充召回退化为随机抽样
+_LEX_GENERIC = {"价格", "视频", "笔记", "内容", "问题", "总结", "哪里", "什么", "怎么"}
+# 虚词/功能字：作为切分分隔符（“专业剧组与租赁商价值”→两段实词）
+_LEX_STOPCHARS = "的了是在下上中里个吗呢啊吧把和与及对往从到被给让有没还也很一"
+
+
+def _lexical_terms(query_text: str) -> list[str]:
+    """从问题里提取 2~12 字的连续关键串：价格同义归一、去疑问尾巴后，
+    按连续中英数字段切、虚词字再切分，剔高频泛词；长词优先去重，最多 3 个。"""
+    cleaned = _normalize_query_text(query_text)
+    cleaned = re.sub(r"(是多少|是什么|有哪些|怎么样|如何)$", "", cleaned.strip())
+    terms: list[str] = []
+    for run in re.findall(r"[一-鿿0-9a-zA-Z]+", cleaned):
+        for piece in re.split(f"[{re.escape(_LEX_STOPCHARS)}]", run):
+            if not (_LEX_TERM_MIN <= len(piece) <= _LEX_TERM_MAX):
+                continue
+            if piece in _LEX_GENERIC:
+                continue
+            terms.append(piece)
+    # 长词优先；已被更长词包含的短词丢弃（“猛玛极影7”吃掉“价格”以外的碎片）
+    uniq: list[str] = []
+    for term in sorted(set(terms), key=len, reverse=True):
+        if not any(term in kept for kept in uniq):
+            uniq.append(term)
+        if len(uniq) >= _LEX_TERM_COUNT:
+            break
+    return uniq
+
+
 def _select_cross_top(
     query_text: str, candidates: list[dict], top_k: int
 ) -> list[dict]:
@@ -235,20 +278,28 @@ def _select_cross_top(
                 )
             ]
             if lex_kept:
-                kept = [c for _, c in lex_kept]
+                # 语义候选按 embedding 距离升序；词面补充召回的候选没有
+                # 可信的 embedding 距离（distance=None，见 _lexical_recall），
+                # 排在同档语义候选之后、按词面得分降序补位。
+                kept = [(c, lex) for lex, c in lex_kept]
                 kept.sort(
-                    key=lambda c: c.get("distance")
-                    if c.get("distance") is not None
-                    else float("inf")
+                    key=lambda item: (
+                        item[0].get("distance")
+                        if item[0].get("distance") is not None
+                        else float("inf"),
+                        -item[1],
+                    )
                 )
-                return kept[:top_k]
+                return [c for c, _ in kept][:top_k]
             # 词面命中全部被距离闸拦下：保底给词面最强的单条，宁可少给
             # 也不给噪音。
             best_pair = max(scored, key=lambda item: item[0])
             return [best_pair[1]]
     ranked = sorted(
         candidates,
-        key=lambda c: c["distance"] if c.get("distance") is not None else 0,
+        key=lambda c: c["distance"]
+        if c.get("distance") is not None
+        else float("inf"),  # 词面补充候选（无距离）排在语义候选之后补位
     )
     best = ranked[0].get("distance")
     if best is None:
@@ -430,6 +481,7 @@ class VectorStoreManager:
             return chunks
         for i in range(len(results["documents"][0])):
             chunks.append({
+                "id": results["ids"][0][i] if results.get("ids") else None,
                 "text": results["documents"][0][i],
                 "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
                 "distance": results["distances"][0][i] if results["distances"] else None,
@@ -532,8 +584,51 @@ class VectorStoreManager:
                 return self._query_cross_fallback(query_text, task_ids, top_k)
 
         if not chunks:
+            chunks = []
+        # 词面补充召回：语义召回对中文接近失效（详见 _lexical_recall 注释），
+        # 把含问题关键串的块并入候选池，再由 _select_cross_top 统一筛选。
+        # 语义与词面都空才算真的无结果。
+        lexical = self._lexical_recall(collection, query_text, where)
+        if lexical:
+            seen = {c.get("id") for c in chunks if c.get("id")}
+            chunks = chunks + [c for c in lexical if c["id"] not in seen]
+        if not chunks:
             return []
         return _select_cross_top(query_text, chunks, top_k)
+
+    def _lexical_recall(
+        self, collection, query_text: str, where: Optional[dict]
+    ) -> list[dict]:
+        """按问题关键串做确定性补充召回（where_document $contains）。
+
+        背景（2026-10-07 实测）：默认 all-MiniLM-L6-v2 对中文的语义排序
+        接近失效，逐字命中的块可能排在数百名之外，语义 top-30 的召回池
+        里根本没有正确块。这里把含关键串的块直接捞回候选池——distance
+        置 None（embedding 距离对它们没有参考意义），交由
+        _select_cross_top 的词面层与语义候选统一竞争、排在同档语义候选
+        之后按词面得分补位。任一关键串查询失败只降级不阻断。
+        """
+        terms = _lexical_terms(query_text)
+        if not terms:
+            return []
+        out: dict[str, dict] = {}
+        for term in terms:
+            try:
+                got = collection.get(
+                    where=where,
+                    where_document={"$contains": term},
+                    include=["documents", "metadatas"],
+                    limit=_LEX_RECALL_LIMIT,
+                )
+            except Exception as e:
+                logger.warning(f"词面补充召回 {term!r} 失败: {e}")
+                continue
+            for cid, doc, meta in zip(
+                got.get("ids") or [], got.get("documents") or [], got.get("metadatas") or []
+            ):
+                if cid not in out:
+                    out[cid] = {"id": cid, "text": doc, "metadata": meta, "distance": None}
+        return list(out.values())
 
     def _try_query_global(
         self, collection, query_text: str, where: Optional[dict]
