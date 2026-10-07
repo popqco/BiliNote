@@ -47,7 +47,10 @@ def _clean_section_title(title: str) -> str:
             break
         title = cleaned
     title = title.rstrip('*').strip()
-    return title or "intro"
+    # 兜底名「开头」：正文首个 H2 之前的引言块、或标题清洗后为空的章节。
+    # 前端把 intro/开头 统一定位到笔记顶部（这类块没有可匹配的 heading，
+    # 旧的 "intro" 兜底会让点击必报「未找到对应章节」）。
+    return title or "开头"
 
 
 def _chunk_markdown(markdown: str) -> list[dict]:
@@ -59,7 +62,7 @@ def _chunk_markdown(markdown: str) -> list[dict]:
         if not section or len(section) < 30:
             continue
         heading_match = re.match(r'^(#{2,3})\s+(.+)', section)
-        raw_title = heading_match.group(2).strip() if heading_match else "intro"
+        raw_title = heading_match.group(2).strip() if heading_match else "开头"
         # section_title 存清洗后的短标题（无原片后缀），正文 chunk 保留原文
         title = _clean_section_title(raw_title.splitlines()[0])
         chunks.append({
@@ -211,11 +214,13 @@ def _select_cross_top(
             cutoff = best_lex * _LEX_RATIO
             # 距离闸以“词面命中候选”的最佳距离为基准，而不是全体候选的
             # 最佳距离：无关笔记可能偶然离问题更近，用它会把真命中卡掉。
+            # （2026-10-07 修复：旧实现注释写的是词面基准、代码却遍历全体
+            # 候选取 min，注释与行为相反，真命中被无关节奏误杀。）
             base = min(
                 (
                     c["distance"]
-                    for _, c in scored
-                    if c.get("distance") is not None
+                    for lex, c in scored
+                    if lex >= cutoff and c.get("distance") is not None
                 ),
                 default=None,
             )
@@ -468,8 +473,10 @@ class VectorStoreManager:
                     where={"source_type": source_type},
                 )
                 all_chunks.extend(self._parse_results(results))
-            except Exception:
-                pass
+            except Exception as e:
+                # 单来源查询失败不该拖垮整次检索，但不能无声吞掉——
+                # 之前 transcript 查询坏了只会静默少一类来源，排查无门。
+                logger.warning(f"单篇检索 {source_type} 来源失败: {e}")
 
         return all_chunks
 
@@ -485,15 +492,17 @@ class VectorStoreManager:
         ``top_k`` 可调（chat/ask 用默认值；MCP /chat/search 按需传更大的值）。
         候选先过词面重排（_select_cross_top）：无关笔记的片段不会被
         硬塞进上下文，来源数量即实际被引用的片段数。
-        全局集合读失败（多写者并发的 HNSW 瞬态错）时先尝试原地重建全局
-        集合并重查一次；仍失败则回退到各单篇集合召回 + 同一套筛选，
-        保证问答仍有来源且来源纯净度不打折。
+        全局集合不存在（老安装从未建过 all_notes）或读失败（多写者并发的
+        HNSW 瞬态错）时，先尝试从单篇集合原地重建全局集合并重查一次；
+        仍失败则回退到各单篇集合召回 + 同一套筛选，保证问答仍有来源且
+        来源纯净度不打折。（旧实现在"集合不存在"分支直接静默返空，
+        全局索引缺位的用户每次跨查都拿到零来源。）
         """
         try:
             collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)
         except Exception:
-            logger.warning("全局 Collection 不存在，请先建立索引")
-            return []
+            logger.warning("全局 Collection 不存在，尝试从单篇集合重建")
+            collection = None
 
         where = None
         if task_ids is not None:
@@ -502,12 +511,16 @@ class VectorStoreManager:
                 return []
             where = {"task_id": {"$in": task_ids}}
 
-        chunks = self._try_query_global(collection, query_text, where)
+        chunks = (
+            self._try_query_global(collection, query_text, where)
+            if collection is not None
+            else None
+        )
         if chunks is None:
-            # 全局集合坏了（典型：多进程写入后 HNSW 段失效，查询报
+            # 全局集合缺失或坏了（典型：多进程写入后 HNSW 段失效，查询报
             # "Error creating hnsw index"）：先重建再试一次，重建失败
             # 或仍查不动才降级到单篇集合。
-            logger.warning("全局集合查询失败，尝试重建后重查")
+            logger.warning("全局集合不可用，尝试重建后重查")
             if self._rebuild_global_from_per_note():
                 try:
                     collection = self._client.get_collection(GLOBAL_COLLECTION_NAME)

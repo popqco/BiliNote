@@ -13,6 +13,8 @@ export interface ChatSource {
   section_title?: string
   start_time?: number
   end_time?: number
+  /** 该来源是否被回答正文里的 [n] 角标实际引用（后端 _finalize_answer 打标） */
+  cited?: boolean
 }
 
 export type ChatScope = 'current' | 'all'

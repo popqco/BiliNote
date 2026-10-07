@@ -34,6 +34,132 @@ interface ChatPanelProps {
   onModeChange: (mode: ChatMode) => void
 }
 
+/** 秒 → M:SS / H:MM:SS。旧实现直接拼 `${s}s`（73s ~ 120s），长视频不可读。 */
+function fmtTime(seconds?: number): string {
+  const s = Math.max(0, Math.floor(seconds ?? 0))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const mm = String(m).padStart(2, '0')
+  const ss = String(sec).padStart(2, '0')
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`
+}
+
+/** 来源统一跳转入口（行内角标与底部徽章共用）。
+
+  守卫 1（2026-10-07 新增）：taskStore 里已无该笔记（被删除/未同步）时，
+  直接 toast 并中止——旧实现无条件 setCurrentTask，会把整个工作台掀成
+  idle 空板（currentTask 没了，MarkdownViewer 卸载，连问答面板一起消失）。
+  笔记列表尚未加载（tasks 为空）时放行，避免误伤正常跳转。 */
+function jumpToSource(s: ChatSource) {
+  const { tasks, currentTaskId, setCurrentTask } = useTaskStore.getState()
+  if (!s.task_id) return
+  if (tasks.length > 0 && !tasks.some(t => t.id === s.task_id)) {
+    toast.error('来源笔记不存在或已删除')
+    return
+  }
+  if (s.task_id !== currentTaskId) setCurrentTask(s.task_id)
+  useChatJumpStore.getState().requestJump({
+    task_id: s.task_id,
+    section_title: s.section_title,
+    start_time: s.start_time,
+  })
+}
+
+// ── 行内引用角标：把答案正文里的 [n] 变成可点击角标 ─────────────────
+// remark 插件扫 mdast 的 text 节点（code/inlineCode/math 天然不经过
+// text，代码块里的数组下标 arr[7] 不会被误转），把 [n] 替换成自定义
+// cite 节点；mdast-util-to-hast 按 data.hName 渲染成 <cite data-cite=n>，
+// 再由 AnswerMarkdown 的 components.cite 接管。零新依赖，~30 行。
+const CITE_MARKER_RE = /\[(\d{1,2})\]/g
+
+function transformCiteNodes(node: any): void {
+  if (!node || !Array.isArray(node.children)) return
+  for (let i = node.children.length - 1; i >= 0; i -= 1) {
+    const child = node.children[i]
+    if (child && child.type === 'text' && typeof child.value === 'string') {
+      const value: string = child.value
+      if (!CITE_MARKER_RE.test(value)) {
+        CITE_MARKER_RE.lastIndex = 0
+        continue
+      }
+      CITE_MARKER_RE.lastIndex = 0
+      const parts: any[] = []
+      let last = 0
+      let m: RegExpExecArray | null
+      while ((m = CITE_MARKER_RE.exec(value)) !== null) {
+        if (m.index > last) {
+          parts.push({ type: 'text', value: value.slice(last, m.index) })
+        }
+        parts.push({
+          type: 'cite',
+          data: { hName: 'cite', hProperties: { 'data-cite': m[1] } },
+          children: [{ type: 'text', value: m[0] }],
+        })
+        last = m.index + m[0].length
+      }
+      if (last < value.length) {
+        parts.push({ type: 'text', value: value.slice(last) })
+      }
+      node.children.splice(i, 1, ...parts)
+    } else if (child && Array.isArray(child.children)) {
+      transformCiteNodes(child)
+    }
+  }
+}
+
+function remarkCitations() {
+  return (tree: any) => {
+    transformCiteNodes(tree)
+  }
+}
+
+/** 问答回答专用渲染：带 sources 的助手消息用（含角标插件），其余走
+ * 普通路径。仅当 n 落在 sources 范围内才渲染可点击角标——越界编号
+ * （模型编造）保持原样文本，不剥不炸。旧消息没有编号也零影响。 */
+function AnswerMarkdown({ content, sources }: { content: string; sources?: ChatSource[] }) {
+  const hasSources = !!sources && sources.length > 0
+  const remarkPlugins = useMemo(
+    () => (hasSources ? [remarkGfm, remarkMath, remarkCitations] : [remarkGfm, remarkMath]),
+    [hasSources],
+  )
+  const components = useMemo(() => {
+    if (!hasSources) return undefined
+    return {
+      cite: (props: any) => {
+        const raw =
+          props?.node?.properties?.['data-cite'] ?? props?.['data-cite'] ?? props?.children
+        const n = Number(
+          typeof raw === 'string' && raw.startsWith('[') ? raw.slice(1, -1) : raw,
+        )
+        const source = Number.isFinite(n) ? sources![n - 1] : undefined
+        if (!source) return <span>{props.children}</span>
+        return (
+          <sup className="mx-0.5 inline-flex">
+            <button
+              type="button"
+              onClick={() => jumpToSource(source)}
+              title="跳转到来源对应位置"
+              className="cursor-pointer rounded border border-primary/40 bg-primary/10 px-1 align-super text-[10px] font-medium leading-4 text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
+            >
+              {n}
+            </button>
+          </sup>
+        )
+      },
+    }
+  }, [hasSources, sources])
+  return (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins as any}
+      rehypePlugins={[rehypeKatex]}
+      components={components as any}
+    >
+      {normalizeMathDelimiters(content)}
+    </ReactMarkdown>
+  )
+}
+
 function SourceBadges({
   sources,
   /** 锚定“提问时”的笔记：标签的本篇/跨篇判定用它，不随浏览位置漂移 */
@@ -46,17 +172,15 @@ function SourceBadges({
   currentTaskId: string
 }) {
   const [expanded, setExpanded] = useState(false)
-  const setCurrentTask = useTaskStore(state => state.setCurrentTask)
-  const requestJump = useChatJumpStore(state => state.requestJump)
 
   if (!sources || sources.length === 0) return null
 
   const detailOf = (s: ChatSource) =>
     s.source_type === 'markdown'
-      ? s.section_title || '笔记'
+      ? s.section_title || '笔记全文'
       : s.source_type === 'meta'
         ? '视频信息'
-        : `${(s.start_time ?? 0).toFixed(0)}s ~ ${(s.end_time ?? 0).toFixed(0)}s`
+        : `${fmtTime(s.start_time)} ~ ${fmtTime(s.end_time)}`
 
   const labelOf = (s: ChatSource) => {
     const detail = detailOf(s)
@@ -70,22 +194,14 @@ function SourceBadges({
   const jumpTitleOf = (s: ChatSource) => {
     if (!s.task_id) return undefined
     if (s.task_id !== currentTaskId) return '点击跳转到该笔记对应位置'
-    // 本篇来源：定位到笔记内对应章节（转录来源按时间映射到章节）
-    if (s.source_type === 'markdown' && s.section_title) return '点击定位到笔记该章节'
+    // 本篇来源：章节来源定位章节；无章节的整篇来源（get_note_content
+    // 工具证据 / intro 开头块）定位到笔记顶部
+    if (s.source_type === 'markdown') {
+      return s.section_title ? '点击定位到笔记该章节' : '点击定位到笔记开头'
+    }
     if (s.source_type === 'transcript' && s.start_time != null)
       return '点击定位到笔记该章节'
     return undefined
-  }
-
-  const handleJump = (s: ChatSource) => {
-    if (!s.task_id) return
-    // 用实时当前笔记判断是否需要切换（锚点只管标签显示）
-    if (s.task_id !== currentTaskId) setCurrentTask(s.task_id)
-    requestJump({
-      task_id: s.task_id,
-      section_title: s.section_title,
-      start_time: s.start_time,
-    })
   }
 
   return (
@@ -106,12 +222,13 @@ function SourceBadges({
               <Badge
                 key={i}
                 variant="outline"
-                className="text-xs font-normal"
+                className={`text-xs font-normal${s.cited ? ' border-primary/50 text-foreground' : ' opacity-60'}${jumpTitle ? ' cursor-pointer' : ''}`}
                 style={jumpTitle ? { cursor: 'pointer' } : undefined}
                 title={jumpTitle}
-                onClick={jumpTitle ? () => handleJump(s) : undefined}
+                onClick={jumpTitle ? () => jumpToSource(s) : undefined}
               >
-                {labelOf(s)}
+                {/* 编号与行内角标一一对应（后端 context 与 sources 同序） */}
+                [{i + 1}] {labelOf(s)}
               </Badge>
             )
           })}
@@ -306,6 +423,15 @@ export default function ChatPanel({ taskId, mode, onModeChange }: ChatPanelProps
       key: `msg-${i}`,
       role: msg.role === 'user' ? ('user' as const) : ('ai' as const),
       content: msg.content,
+      // 助手消息按条挂 AnswerMarkdown：闭包持有本条的 sources，[n] 角标
+      // 才能对上本条的引用列表（角色级 contentRender 拿不到按条数据）。
+      ...(msg.role === 'assistant'
+        ? {
+            contentRender: () => (
+              <AnswerMarkdown content={msg.content} sources={msg.sources} />
+            ),
+          }
+        : {}),
       footer:
         msg.role === 'assistant' && msg.sources ? (
           <SourceBadges
