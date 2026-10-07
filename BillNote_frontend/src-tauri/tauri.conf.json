@@ -29,9 +29,10 @@
     "externalBin": [
       "bin/BiliNoteBackend/BiliNoteBackend"
     ],
-    "resources": {
-    "bin/BiliNoteBackend/_internal":"_internal"
-    },
+ "resources": {
+  "bin/BiliNoteBackend/_internal": "_internal",
+  "viewer-dist": "viewer-dist"
+ },
     "macOS":{
       "files": {
                "Frameworks": "bin/BiliNoteBackend/_internal"

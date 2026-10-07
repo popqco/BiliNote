@@ -327,3 +327,5 @@ cython_debug/
 # FFmpeg 构建文件（不应该提交到仓库）
 ffmpeg*/
 ffmpg*/
+# 安装包构建资源：后端产物(bin/)由 build.bat/本地 spec 打包生成, viewer-dist 为 /api 构建产物, 均不入库
+/BillNote_frontend/src-tauri/viewer-dist/

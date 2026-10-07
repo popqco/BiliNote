@@ -24,8 +24,14 @@ def resolve_dist_dir(explicit: str | None = None) -> Path | None:
     if raw.strip():
         candidate = Path(raw.strip()).expanduser()
     else:
-        # backend/app/frontend_dist.py -> parents[2] == 仓库根
-        candidate = Path(__file__).resolve().parents[2] / "BillNote_frontend" / "dist"
+        # 装机版（PyInstaller onedir）：_internal/app/frontend_dist.py 的
+        # parents[2] == 安装根目录，Tauri 安装包把 viewer-dist 资源放在根目录
+        # ——新机器没有 .env/FRONTEND_DIST，靠这个默认值直服手机 Viewer。
+        frozen_root = Path(__file__).resolve().parents[2]
+        candidate = frozen_root / "viewer-dist"
+        if not (candidate / "index.html").is_file():
+            # 源码开发模式：backend/app/frontend_dist.py -> parents[2] == 仓库根
+            candidate = frozen_root / "BillNote_frontend" / "dist"
     if (candidate / "index.html").is_file():
         return candidate
     return None
