@@ -615,6 +615,11 @@ class VectorStoreManager:
                 continue
             if "_transcript.json" in name or "_audio.json" in name:
                 continue
+            # 历史 checkpoint 残留（如 {uuid}.gpt.checkpoint.json，旧格式无
+            # _markdown 中缀）：不是笔记正文，混进来会让 coverage 虚高、
+            # backfill 对着一个不存在正文的文件反复失败。
+            if ".gpt.checkpoint" in name:
+                continue
             task_id = name[: -len(".json")]
             if "_" in task_id:
                 continue
@@ -743,6 +748,9 @@ class VectorStoreManager:
             if name.endswith(".status.json"):
                 continue
             if "_transcript.json" in name or "_audio.json" in name:
+                continue
+            if ".gpt.checkpoint" in name:
+                # 同 _local_note_task_ids：checkpoint 残留不是笔记正文
                 continue
             task_id = name[: -len(".json")]
             if "_" in task_id:
