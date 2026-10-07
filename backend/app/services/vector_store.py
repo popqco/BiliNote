@@ -602,11 +602,23 @@ class VectorStoreManager:
         # 语义与词面都空才算真的无结果。
         lexical = self._lexical_recall(collection, query_text, where)
         if lexical:
-            seen = {c.get("id") for c in chunks if c.get("id")}
-            chunks = chunks + [c for c in lexical if c["id"] not in seen]
+            chunks = chunks + lexical
         if not chunks:
             return []
-        return _select_cross_top(query_text, chunks, top_k)
+        # 文本级去重：重复索引/多通道命中的同文本块只保留一份——历史重建
+        # 给同一 meta 块留下过 4 个不同 id 的副本，不去重会出现 4 块同文
+        # 来源徽章。优先保留带 embedding 距离的语义副本。
+        dedup: dict[str, dict] = {}
+        for c in chunks:
+            key = (c.get("text") or "")[:200]
+            old = dedup.get(key)
+            if old is None:
+                dedup[key] = c
+                continue
+            old_dist, new_dist = old.get("distance"), c.get("distance")
+            if new_dist is not None and (old_dist is None or new_dist < old_dist):
+                dedup[key] = c
+        return _select_cross_top(query_text, list(dedup.values()), top_k)
 
     def _lexical_recall(
         self, collection, query_text: str, where: Optional[dict]
