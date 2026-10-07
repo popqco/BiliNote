@@ -3,8 +3,25 @@
     <p align="center">
   <img src="./doc/icon.svg" alt="BiliNote Banner" width="50" height="50"  />
 </p>
-<h1 align="center" > BiliNote v2.4.4</h1>
+<h1 align="center" > BiliNote v2.4.5（Fork 增强版）</h1>
 </div>
+
+> **🍴 Fork 说明**：本仓库是 [JefferyHcool/BiliNote](https://github.com/JefferyHcool/BiliNote)（当前基于上游 v2.4.5）的个人增强分支。
+> 上游的全部功能与部署方式（Docker / 源码部署，见下文）**原样适用**；在此之上叠加了以下增强。
+> 本机装机版的构建部署流程见 **[docs/deploy-windows-installed.md](./docs/deploy-windows-installed.md)**，
+> 增强功能的使用指南见 **[docs/usage-guide-fork.md](./docs/usage-guide-fork.md)**。
+
+### Fork 增强一览（相对上游）
+
+- **触摸式阅读滚动**：滚轮惯性平滑（消除一格一顿的刻度感）+ 按住左键拖动 1:1 跟随鼠标 + 松手摩擦滑行（iOS 触摸同族的速度连续模型）；「设置 → 通用 → 阅读区平滑滚动」可开关，三档手感（跟手 / 适中 / 动量）现场试选。只作用桌面端笔记阅读区与原文面板，手机端触摸本就是原生惯性。
+- **手机浏览器访问（Worker / Viewer 分离）**：桌面端当 Worker，手机经 Tailscale 直连后端直服的网页版，token 配对免公网，支持远端提交任务与受控改配置。见 [docs/worker-viewer-deploy.md](./docs/worker-viewer-deploy.md)。
+- **多格式导出**：笔记导出 PDF / Word / 长图 / 摘要海报；思维导图支持主题切换与 SVG 导出。
+- **AI 问答工作台**：三列并排布局、引用徽章点击定位正文/原文时间点、来源章节高亮。
+- **自动化韧性**：轮前 ffmpeg 预检、失败任务 30 分钟冷却、通知节流防轰炸、多 P 视频 id 归一化去重、任务状态机修复（僵尸任务收敛、重试不再被拦）。
+- **转写 / 总结韧性**：超长音频按时长自适应码率压缩（根治 Groq 25MB 上限报错）、总结降级阶梯（原样→减帧→纯文本）+ 实时进度提示 + 总死线、上游抖动自动重试。
+- **桌面体验**：剪贴板监控（复制视频链接自动弹窗）、OS 系统通知、启动端口预检 + 孤儿后端收编（假「后端已退出」横幅根治）、生成历史视频级去重、老笔记标题自愈。
+- 详细变更见 [CHANGELOG.md](./CHANGELOG.md)（上游）与 git 提交历史（fork 部分）。
+
 
 <p align="center"><i>AI 视频笔记生成工具 让 AI 为你的视频做笔记</i></p>
 
