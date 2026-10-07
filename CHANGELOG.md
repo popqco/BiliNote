@@ -6,6 +6,8 @@
 
 ### Added
 
+- **MCP Server（外部 AI harness 接入）**：新增 stdio MCP 服务器（`backend/mcp_server.py`），Codex / ZCode 等外部 AI 工具可直接读取笔记库并调用核心功能。检索优先哲学：`search_notes` 走新增的 `POST /api/chat/search` 纯本地向量原文块检索（零在线 API），由 harness 自身模型推理作答；内置在线 API 问答降为兜底。11 个工具覆盖读（列表/正文/转写/检索/索引状态）、写（生成/重试/导出/补索引）与删除（需显式 confirm）。本机回环免鉴权，远程 Worker 经 Tailscale + 配对 token 可用（`BILINOTE_BASE_URL` / `BILINOTE_TOKEN`）。见 [docs/mcp.md](./docs/mcp.md)
+
 - 「设置 → 通用」新增**「按住左键拖动滚动」开关**（默认开=现状）：关闭后修饰键互换——左键拖动恢复为原生选择文字，改用 Shift+左键拖动滚动；习惯「左键就是选字」的用户无需再按住 Shift
 
 ## [2.5.0] - 2026-10-07
