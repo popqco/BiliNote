@@ -43,6 +43,19 @@ class AskRequest(BaseModel):
     task_ids: Optional[list[str]] = None
 
 
+class SearchRequest(BaseModel):
+    # 语义检索原文块（纯向量召回，无 LLM 调用）。外部 harness（MCP）用
+    # 它拿原始片段自己推理，不走 chat/ask 的内置问答链路。
+    query: str
+    # "all"（默认，跨全部已索引笔记）| "current"（只查 task_id 那一篇）|
+    # 单个 task_id（限定查那一篇，与 chat/ask 的 scope 约定一致）。
+    scope: str = "all"
+    task_id: Optional[str] = None
+    task_ids: Optional[list[str]] = None
+    # 召回条数上限。注意词面重排/距离闸可能让实际返回少于该值（宁缺勿噪）。
+    top_k: int = 6
+
+
 class BackfillRequest(BaseModel):
     task_ids: Optional[list[str]] = None
 
@@ -177,6 +190,58 @@ def ask_question(data: AskRequest):
         return R.error(
             msg=f"问答失败（模型 {data.model_name} / 供应商 {pname}）：{str(e)}"
         )
+
+
+@router.post("/chat/search")
+def search_chunks(data: SearchRequest):
+    """语义检索笔记原文块（纯 chromadb 向量召回，无 LLM 调用）。
+
+    与 /chat/ask 的分工：ask 是"检索 + 内置模型作答"一条龙；search 只
+    检索并原样返回片段（text + 来源/时间戳/小节标题），由调用方（外部
+    harness 的模型）自行推理。嵌入是本地模型，检索环节零在线 API 依赖。
+    """
+    try:
+        query = (data.query or "").strip()
+        if not query:
+            return R.error(msg="query 不能为空", code=400)
+        try:
+            top_k = max(1, min(int(data.top_k or 6), 30))
+        except Exception:
+            top_k = 6
+
+        scope = (data.scope or "all").strip().lower()
+        if scope in ("current", "all"):
+            task_ids = data.task_ids
+            if scope == "current":
+                if not data.task_id:
+                    return R.error(msg="scope=current 时必须提供 task_id", code=400)
+                task_ids = [data.task_id]
+        elif data.task_ids is None:
+            # scope 传单个 task_id 视为限定查那一篇（与 chat/ask 行为一致）
+            task_ids = [scope]
+        else:
+            task_ids = data.task_ids
+
+        store = VectorStoreManager()
+        chunks = store.query_cross(query, task_ids=task_ids, top_k=top_k)
+
+        results = []
+        for c in chunks:
+            meta = c.get("metadata", {}) or {}
+            results.append({
+                "text": c.get("text", ""),
+                "source_type": meta.get("source_type"),
+                "task_id": meta.get("task_id"),
+                "note_title": meta.get("note_title"),
+                "section_title": meta.get("section_title"),
+                "start_time": meta.get("start_time"),
+                "end_time": meta.get("end_time"),
+                "distance": c.get("distance"),
+            })
+        return R.success(data={"query": query, "count": len(results), "results": results})
+    except Exception as e:
+        logger.error(f"chat/search 检索失败: {e}", exc_info=True)
+        return R.error(msg=f"检索失败：{e}")
 
 
 @router.get("/chat/indexed")

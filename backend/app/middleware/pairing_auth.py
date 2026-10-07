@@ -27,6 +27,7 @@ _REMOTE_TASK_PREFIXES = (
     "/api/image_proxy",
     "/api/chat/ask",
     "/api/chat/status",
+    "/api/chat/search",
     "/api/model_list",
     "/api/model_enable",
     "/api/pairing_token",

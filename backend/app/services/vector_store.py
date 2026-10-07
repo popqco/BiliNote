@@ -474,11 +474,15 @@ class VectorStoreManager:
         return all_chunks
 
     def query_cross(
-        self, query_text: str, task_ids: Optional[list] = None
+        self,
+        query_text: str,
+        task_ids: Optional[list] = None,
+        top_k: int = CROSS_TOP_K,
     ) -> list[dict]:
         """跨笔记检索：全局按语义距离统一召回 Top-K，不过滤出自哪篇笔记。
 
         ``task_ids`` 为空/None 时查全部已索引笔记；否则只查给定笔记。
+        ``top_k`` 可调（chat/ask 用默认值；MCP /chat/search 按需传更大的值）。
         候选先过词面重排（_select_cross_top）：无关笔记的片段不会被
         硬塞进上下文，来源数量即实际被引用的片段数。
         全局集合读失败（多写者并发的 HNSW 瞬态错）时先尝试原地重建全局
@@ -512,11 +516,11 @@ class VectorStoreManager:
                     logger.warning(f"重建后重查仍失败: {e}")
                     chunks = None
             if chunks is None:
-                return self._query_cross_fallback(query_text, task_ids)
+                return self._query_cross_fallback(query_text, task_ids, top_k)
 
         if not chunks:
             return []
-        return _select_cross_top(query_text, chunks, CROSS_TOP_K)
+        return _select_cross_top(query_text, chunks, top_k)
 
     def _try_query_global(
         self, collection, query_text: str, where: Optional[dict]
@@ -635,7 +639,7 @@ class VectorStoreManager:
         return title
 
     def _query_cross_fallback(
-        self, query_text: str, task_ids: Optional[list]
+        self, query_text: str, task_ids: Optional[list], top_k: int = CROSS_TOP_K
     ) -> list[dict]:
         """全局集合不可读时的降级：逐篇查单篇集合。
 
@@ -670,7 +674,7 @@ class VectorStoreManager:
                         tid, title_cache
                     )
             merged.extend(chunks)
-        return _select_cross_top(query_text, merged, CROSS_TOP_K)
+        return _select_cross_top(query_text, merged, top_k)
 
     def indexed_task_ids(self, limit: int = MAX_CROSS_NOTES) -> list:
         """返回全局索引中已建索引的 task_id 列表（按写入顺序去重）。
