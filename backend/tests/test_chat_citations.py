@@ -482,7 +482,7 @@ class TestLexicalRecall(unittest.TestCase):
         self.assertEqual(texts[0], sem_intro["text"])
 
     def test_lexical_dedupe_with_semantic(self):
-        """同一块既被语义召回又被词面召回时只保留一份。"""
+        """同一块既被语义召回又被词面召回时只保留一份（文本级去重）。"""
         store = self.store
         both = {
             "id": "note_1",
@@ -497,6 +497,34 @@ class TestLexicalRecall(unittest.TestCase):
         finally:
             store._client = orig_client
         self.assertEqual(len(kept), 1)
+
+    def test_duplicate_index_entries_deduped_by_text(self):
+        """历史重建留下的同文本多 id 副本（meta 块 ×4）只出一份来源。"""
+        store = self.store
+        meta_dupes = [
+            {
+                "id": f"pantone_{i}",
+                "text": "视频标题：潘通色为何如此昂贵 标签：色彩",
+                "metadata": {"source_type": "meta", "note_title": "潘通"},
+                "distance": 0.40 + i * 0.01,
+            }
+            for i in range(4)
+        ]
+        lex_sec = {
+            "id": "pantone_sec9",
+            "text": "争议核心：价格、订阅与老化 色卡 全套 8999",
+            "metadata": {"source_type": "markdown", "section_title": "争议核心"},
+            "distance": None,
+        }
+        fake = _FakeGlobalCollection(semantic=meta_dupes, lexical=[lex_sec])
+        orig_client = self._with_fake_client(fake)
+        try:
+            kept = store.query_cross("潘通色全套色卡多少钱")
+        finally:
+            store._client = orig_client
+        meta_texts = [c["text"] for c in kept if c["metadata"].get("source_type") == "meta"]
+        self.assertEqual(len(meta_texts), 1)
+        self.assertTrue(any("争议核心" in c["text"] for c in kept))
 
 
 class TestSelectCrossTopLexicalFill(unittest.TestCase):
