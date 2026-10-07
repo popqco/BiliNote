@@ -185,34 +185,46 @@ def _query_bigrams(query_text: str) -> list[str]:
 # 召回，与语义候选在同一场词面重排里竞争。零新依赖、无需重建索引。
 
 _LEX_TERM_MIN = 2          # 关键串最短长度
-_LEX_TERM_MAX = 12         # 关键串最长长度（太长容易整句无命中）
-_LEX_TERM_COUNT = 3        # 最多取几个关键串
-_LEX_RECALL_LIMIT = 12     # 每个关键串最多补充召回块数
+_LEX_TERM_MAX = 12         # 关键串最长长度
+_LEX_TERM_CAP = 6          # 最多取几个关键串
+_LEX_RECALL_LIMIT = 8      # 每个关键串最多补充召回块数
 # 高频泛词不作词面锚：命中面太大，补充召回退化为随机抽样
 _LEX_GENERIC = {"价格", "视频", "笔记", "内容", "问题", "总结", "哪里", "什么", "怎么"}
 # 虚词/功能字：作为切分分隔符（“专业剧组与租赁商价值”→两段实词）
 _LEX_STOPCHARS = "的了是在下上中里个吗呢啊吧把和与及对往从到被给让有没还也很一"
 
 
+def _is_cjk(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
 def _lexical_terms(query_text: str) -> list[str]:
-    """从问题里提取 2~12 字的连续关键串：价格同义归一、去疑问尾巴后，
-    按连续中英数字段切、虚词字再切分，剔高频泛词；长词优先去重，最多 3 个。"""
+    """从问题里提取可逐字命中的关键串。
+
+    中文没有分词边界，整段长串很难在正文里逐字出现（“潘通色全套色卡价
+    格”9 连字任何块都不会原样包含），所以 CJK 片段超过 4 字时按 2 字滑窗
+    展开（前缀优先——品牌词通常在片段开头）；英文/数字串天然有词边界，
+    保持整词。最后剔高频泛词、保序去重，最多 _LEX_TERM_CAP 个。
+    """
     cleaned = _normalize_query_text(query_text)
     cleaned = re.sub(r"(是多少|是什么|有哪些|怎么样|如何)$", "", cleaned.strip())
-    terms: list[str] = []
+    cand: list[str] = []
     for run in re.findall(r"[一-鿿0-9a-zA-Z]+", cleaned):
         for piece in re.split(f"[{re.escape(_LEX_STOPCHARS)}]", run):
-            if not (_LEX_TERM_MIN <= len(piece) <= _LEX_TERM_MAX):
+            if not piece or len(piece) > _LEX_TERM_MAX:
                 continue
-            if piece in _LEX_GENERIC:
+            if _is_cjk(piece) and len(piece) > 4:
+                for i in range(len(piece) - 1):
+                    cand.append(piece[i : i + 2])
                 continue
-            terms.append(piece)
-    # 长词优先；已被更长词包含的短词丢弃（“猛玛极影7”吃掉“价格”以外的碎片）
+            cand.append(piece)
     uniq: list[str] = []
-    for term in sorted(set(terms), key=len, reverse=True):
-        if not any(term in kept for kept in uniq):
+    for term in cand:
+        if len(term) < _LEX_TERM_MIN or term in _LEX_GENERIC:
+            continue
+        if term not in uniq:
             uniq.append(term)
-        if len(uniq) >= _LEX_TERM_COUNT:
+        if len(uniq) >= _LEX_TERM_CAP:
             break
     return uniq
 
