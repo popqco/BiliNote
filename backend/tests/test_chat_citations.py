@@ -386,18 +386,28 @@ class TestCleanSectionTitle(unittest.TestCase):
 
 class TestLexicalTerms(unittest.TestCase):
     def test_brand_term_extracted_generic_dropped(self):
-        """品牌串进关键串；“价格”这类高频泛词不作词面锚。"""
+        """品牌 2 字锚进关键串；英文词保持整词；“价格”泛词不作锚。"""
         terms = vector_store._lexical_terms("猛玛极影7 Ultra 的价格是多少")
-        self.assertTrue(any("猛玛极影" in t for t in terms))
-        self.assertTrue(any("Ultra" in t for t in terms))
+        self.assertIn("猛玛", terms)
+        self.assertIn("Ultra", terms)
         self.assertNotIn("价格", terms)
+
+    def test_long_cjk_run_expanded_to_windows(self):
+        """长中文串滑窗展开：潘通问题能产出 潘通/色卡 锚点。"""
+        terms = vector_store._lexical_terms("潘通色全套色卡多少钱")
+        self.assertIn("潘通", terms)
+        self.assertIn("色卡", terms)
 
     def test_exact_section_title_extracted(self):
         terms = vector_store._lexical_terms("专业剧组与租赁商价值")
         self.assertTrue(any("专业剧组" in t for t in terms))
 
-    def test_vague_question_no_terms(self):
-        self.assertEqual(vector_store._lexical_terms("总结一下这个视频"), [])
+    def test_vague_question_no_long_anchor(self):
+        """泛问句只产出无害碎片，不产生长锚点。"""
+        terms = vector_store._lexical_terms("总结一下这个视频")
+        self.assertTrue(all(len(t) <= 2 for t in terms))
+        self.assertNotIn("视频", terms)
+        self.assertNotIn("总结", terms)
 
 
 class _FakeGlobalCollection:
