@@ -1,15 +1,20 @@
 from abc import ABC
 import os
 
+from openai import PermissionDeniedError
+
 from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
+from app.utils.logger import get_logger
 from app.utils.openai_client import build_openai_client
 import ffmpeg
 import tempfile
 from dotenv import load_dotenv
 load_dotenv()
+
+logger = get_logger(__name__)
 MAX_SIZE_MB = 18
 MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024
 # 自适应压缩的码率下限（16k 单声道对 whisper 仍可用）；约 3 小时以上的音频
@@ -68,18 +73,37 @@ class GroqTranscriber(Transcriber, ABC):
                 key_label="Groq 转写引擎的 API Key",
             )
             filename = file_path
+            model = os.getenv('GROQ_TRANSCRIBER_MODEL') or 'whisper-large-v3-turbo'
 
-            with open(filename, "rb") as file:
+            def _create(cli):
                 # GROQ_TRANSCRIBER_MODEL 未配置时 os.getenv 返回 None，Groq 会报
                 # 400 invalid_model（'`model` is a required property'）——任务直接失败。
                 # 这里给缺省 whisper-large-v3-turbo（与 .env 注释一致），避免静默 None。
-                transcription = client.audio.transcriptions.create(
-                    file=(filename, file.read()),
-                    model=os.getenv('GROQ_TRANSCRIBER_MODEL') or 'whisper-large-v3-turbo',
-                    response_format="verbose_json",
+                # 每次调用都重新打开文件：file.read() 会把句柄读空，降级重试需要新句柄。
+                with open(filename, "rb") as file:
+                    return cli.audio.transcriptions.create(
+                        file=(filename, file.read()),
+                        model=model,
+                        response_format="verbose_json",
+                    )
+
+            try:
+                transcription = _create(client)
+            except PermissionDeniedError as exc:
+                # 2026-10-08 实锤：该中转站对国内直连 IP 一律 403
+                # （同一 key 走系统代理即 200），而应用客户端默认
+                # trust_env=False 绕系统代理（防 Clash 对流式 LLM 请求假死）。
+                # 转写是一次性大请求、走代理没有流式假死问题——403 时用
+                # 系统代理重建客户端重试一次；仍失败则按普通错误上抛。
+                logger.warning(f"转写直连被拒（{exc}），改用系统代理重试一次")
+                proxy_client = build_openai_client(
+                    api_key=provider.get('api_key'),
+                    base_url=provider.get('base_url'),
+                    key_label="Groq 转写引擎的 API Key",
+                    use_system_proxy=True,
                 )
-                print(transcription.text)
-            print(transcription)
+                transcription = _create(proxy_client)
+            print(transcription.text)
             segments = []
             full_text = ""
 
