@@ -24,10 +24,16 @@ def build_openai_client(
     *,
     key_label: str = "API Key",
     timeout: Optional[float] = None,
+    use_system_proxy: bool = False,
 ) -> OpenAI:
     """构造 OpenAI 客户端。api_key 为空直接抛清晰错误；代理已配置则注入。
 
     key_label 用于错误提示，例如 "Groq 的 API Key" / "OpenAI 供应商的 API Key"。
+
+    ``use_system_proxy``：应用未配置代理时，默认 trust_env=False 绕系统代理
+    直连（防 Clash 对流式 LLM 请求假死）；置 True 则改用 trust_env=True，
+    让 httpx 读系统（注册表）代理设置——转写这类一次性大请求在中转站拒绝
+    直连（403）时需要这条退路，见 transcriber/groq.py。
     """
     if not api_key or not str(api_key).strip():
         raise ValueError(f"{key_label} 未配置，请先在「设置」里填写后再使用")
@@ -44,6 +50,9 @@ def build_openai_client(
     if proxy_url:
         kwargs["http_client"] = httpx.Client(proxy=proxy_url, timeout=timeout)
         logger.info(f"OpenAI 客户端走代理: {proxy_url}")
+    elif use_system_proxy:
+        kwargs["http_client"] = httpx.Client(trust_env=True, timeout=timeout)
+        logger.info("OpenAI 客户端走系统代理（trust_env=True）")
     else:
         # 关键：httpx trust_env=True 时会经 urllib.getproxies() 读到 Windows
         # 注册表系统代理（Clash 等）。实测 Clash 转发大 LLM 请求会间歇性假死
