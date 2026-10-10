@@ -8,6 +8,7 @@
     在入口挡掉，给用户「xxx 的 API Key 未配置」这种能看懂的提示。
 """
 import os
+import urllib.parse
 from typing import Optional
 
 from openai import OpenAI
@@ -16,6 +17,28 @@ from app.services.proxy_config_manager import ProxyConfigManager
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _is_loopback_base_url(base_url: Optional[str]) -> bool:
+    """base_url 是否指向本机回环地址（本地网关/转换器，如 127.0.0.1:8787）。
+
+    回环地址永远不该走代理：桌面端进程环境里可能带着 HTTP_PROXY（被带代理
+    变量的终端拉起时继承而来），绕经系统代理转发到 127.0.0.1 只会引入一层
+    有害的转发——2026-10-11 实锤：httpx 经 BeiBeiCore(7892) 访问本机 muse
+    网关被代理层直接回 502 空响应，而 curl 走同一代理却正常，全链路总结
+    因此全灭（网关日志里压根没有这些请求）。"""
+    try:
+        host = urllib.parse.urlparse(str(base_url or "")).hostname or ""
+    except Exception:
+        return False
+    return host.lower() in ("127.0.0.1", "localhost", "::1")
+
+
+def _effective_proxy_url(base_url: Optional[str]) -> Optional[str]:
+    """该 base_url 当前应使用的代理 URL；回环地址恒为 None（本地网关直连）。"""
+    if _is_loopback_base_url(base_url):
+        return None
+    return ProxyConfigManager().get_proxy_url()
 
 
 def build_openai_client(
@@ -45,12 +68,13 @@ def build_openai_client(
         timeout = _shaped_timeout()
     kwargs["timeout"] = timeout
 
-    proxy_url = ProxyConfigManager().get_proxy_url()
+    loopback = _is_loopback_base_url(base_url)
+    proxy_url = _effective_proxy_url(base_url)
     import httpx
     if proxy_url:
         kwargs["http_client"] = httpx.Client(proxy=proxy_url, timeout=timeout)
         logger.info(f"OpenAI 客户端走代理: {proxy_url}")
-    elif use_system_proxy:
+    elif use_system_proxy and not loopback:
         kwargs["http_client"] = httpx.Client(trust_env=True, timeout=timeout)
         logger.info("OpenAI 客户端走系统代理（trust_env=True）")
     else:
@@ -59,7 +83,10 @@ def build_openai_client(
         # （py-spy 实锤卡在 http_proxy 收响应头）。应用未配置代理时显式
         # trust_env=False 直连，绕开系统代理。
         kwargs["http_client"] = httpx.Client(trust_env=False, timeout=timeout)
-        logger.info("OpenAI 客户端直连（绕过系统代理）")
+        if loopback:
+            logger.info("OpenAI 客户端直连（回环地址，本地网关不走代理）")
+        else:
+            logger.info("OpenAI 客户端直连（绕过系统代理）")
 
     return OpenAI(**kwargs)
 
