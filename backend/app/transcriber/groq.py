@@ -24,7 +24,11 @@ _MIN_BITRATE_KBPS = 16
 def compress_audio(input_path: str, target_bitrate='64k') -> str:
     output_fd, output_path = tempfile.mkstemp(suffix=".mp3")  # 临时输出文件
     os.close(output_fd)  # ffmpeg 会用路径操作
-    ffmpeg.input(input_path).output(output_path, audio_bitrate=target_bitrate, ac=1).run(quiet=True, overwrite_output=True)
+    # ar=16000：16kHz 是 whisper 的原生输入采样率。不采样率时 44.1kHz 输入
+    # 让 libmp3lame 的码率下限钳在 32k（MPEG-1 层Ⅲ），16kbps 请求被静默抬高——
+    # 262 分钟实测产 60.1MB（32k×262min 吻合），78 分钟以上的音频永远压不进上限；
+    # 降到 16kHz（MPEG-2 层Ⅲ）后 16k 码率合法，单文件容量提到约 157 分钟。
+    ffmpeg.input(input_path).output(output_path, audio_bitrate=target_bitrate, ar=16000, ac=1).run(quiet=True, overwrite_output=True)
     return output_path
 
 def fit_size_audio(input_path: str) -> str:
@@ -49,6 +53,8 @@ def fit_size_audio(input_path: str) -> str:
     return output_path
 
 class GroqTranscriber(Transcriber, ABC):
+    # 供分段转写编排器读取的上限声明（segmented.py 触发切分的依据）
+    max_audio_size_bytes = MAX_SIZE_BYTES
 
 
     @timeit

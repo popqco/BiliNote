@@ -36,6 +36,7 @@ from app.services.provider import ProviderService
 from app.services.task_serial_executor import transcribe_semaphore
 from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
+from app.transcriber.segmented import SAFETY_FACTOR, FLOOR_BYTES_PER_SEC, cleanup_part_caches, probe_duration, transcribe_segmented
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link, normalize_math_delimiters
 from app.utils.logger import get_logger
@@ -73,6 +74,22 @@ IMAGE_BUDGET = 150   # 拼图（每张拼图 = 1 个 image 块）数量上限
 
 # 非终态判定用（提交去重 / 任务列表）
 TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
+
+
+def _should_segment(audio_file: str, max_bytes: int) -> bool:
+    """是否需要走分段转写：ffprobe 成功、原始文件超上限、且就算压到下限码率
+    （16kbps，whisper 仍可用）也放不进上限。任一探测异常都按 False 兜底走
+    原路径——既有 fit_size_audio 会给出明确的「仍超限」报错。"""
+    try:
+        if os.path.getsize(audio_file) <= max_bytes:
+            return False
+        duration = probe_duration(audio_file)
+        if duration <= 0:
+            return False
+        return duration * FLOOR_BYTES_PER_SEC > max_bytes * SAFETY_FACTOR
+    except Exception as e:
+        logger.warning(f"分段转写触发判定探测失败，按整件处理：{e}")
+        return False
 
 
 import re as _re
@@ -844,6 +861,8 @@ class NoteGenerator:
             try:
                 data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
                 segments = [TranscriptSegment(**seg) for seg in data.get("segments", [])]
+                # 命中合并缓存：顺手清理段级断点缓存（成功任务不再需要它们）
+                cleanup_part_caches(NOTE_OUTPUT_DIR, task_id)
                 return TranscriptResult(language=data["language"], full_text=data["full_text"], segments=segments)
             except Exception as e:
                 logger.warning(f"加载转写缓存失败，将重新转写：{e}")
@@ -855,24 +874,52 @@ class NoteGenerator:
         # 重试期间持锁，保证「同一时刻只跑一个转写」的不变量不被打破。
         _TRANSCRIBE_RETRIES = 3
         _TRANSCRIBE_RETRY_DELAYS = (3.0, 6.0)
+        # 超长音频分段转写：引擎声明了大小上限、原始文件超限、且按下限码率
+        # （16kbps→2000B/s）压完仍会超限时，等长硬切 N 段逐段转写再合并——
+        # mp3 44.1kHz 的 32k 编码器底码让压缩对 78 分钟以上的音频物理性失败
+        # （2026-10-10：262 分钟压到 60.1MB 实锤）。探测失败按不分段兜底，
+        # 让既有 fit_size_audio 报出它那句明确的错。
+        _max_audio_bytes = getattr(self.transcriber, "max_audio_size_bytes", None)
+        use_segmented = bool(
+            _max_audio_bytes and audio_file and os.path.exists(audio_file)
+            and _should_segment(audio_file, _max_audio_bytes)
+        )
         try:
             logger.info("开始转写音频（等待转写信号量）")
             with transcribe_semaphore:
                 transcript: TranscriptResult | None = None
-                for attempt in range(1, _TRANSCRIBE_RETRIES + 1):
-                    try:
-                        logger.info("获得转写信号量，开始转写（第 %d/%d 次尝试）",
-                                    attempt, _TRANSCRIBE_RETRIES)
-                        transcript = self.transcriber.transcript(file_path=audio_file)
-                        break
-                    except Exception as exc:
-                        if attempt >= _TRANSCRIBE_RETRIES:
-                            raise
-                        delay = _TRANSCRIBE_RETRY_DELAYS[attempt - 1]
-                        logger.warning("转写失败（第 %d/%d 次），%.0fs 后重试：%s",
-                                       attempt, _TRANSCRIBE_RETRIES, delay, exc)
-                        time.sleep(delay)
+                if use_segmented:
+
+                    def _on_segment_progress(part_index: int, total: int) -> None:
+                        self._update_status(
+                            task_id, status_phase, message=f"转写中（第 {part_index}/{total} 段）"
+                        )
+
+                    transcript = transcribe_segmented(
+                        self.transcriber,
+                        audio_file,
+                        _max_audio_bytes,
+                        on_progress=_on_segment_progress,
+                        part_cache_dir=NOTE_OUTPUT_DIR,
+                        task_id=task_id,
+                    )
+                else:
+                    for attempt in range(1, _TRANSCRIBE_RETRIES + 1):
+                        try:
+                            logger.info("获得转写信号量，开始转写（第 %d/%d 次尝试）",
+                                        attempt, _TRANSCRIBE_RETRIES)
+                            transcript = self.transcriber.transcript(file_path=audio_file)
+                            break
+                        except Exception as exc:
+                            if attempt >= _TRANSCRIBE_RETRIES:
+                                raise
+                            delay = _TRANSCRIBE_RETRY_DELAYS[attempt - 1]
+                            logger.warning("转写失败（第 %d/%d 次），%.0fs 后重试：%s",
+                                           attempt, _TRANSCRIBE_RETRIES, delay, exc)
+                            time.sleep(delay)
             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
+            if use_segmented:
+                cleanup_part_caches(NOTE_OUTPUT_DIR, task_id)
             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
             return transcript
         except Exception as exc:
