@@ -105,6 +105,11 @@ export const useTaskPolling = (interval = 3000) => {
           if (res.audio_meta) {
             useTaskStore.getState().mergeTaskAudioMeta(task.id, res.audio_meta)
           }
+          // 同阶段内的进度文案（如分段转写「转写中（第 2/3 段）」）要在状态
+          // 停在 TRANSCRIBING 期间持续刷新，否则面板显示的是首段之前的旧消息
+          if (res.message && res.message !== task.message) {
+            useTaskStore.getState().updateTaskContent(task.id, { message: res.message })
+          }
           if (typeof res.queue_position === 'number' && res.queue_position !== task.queuePosition) {
             useTaskStore.getState().updateTaskContent(task.id, { queuePosition: res.queue_position })
           }
