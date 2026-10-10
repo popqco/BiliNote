@@ -22,7 +22,7 @@ from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TaskStatus
 from app.services.automation_config_manager import AutomationConfigManager
 from app.services.note import NOTE_OUTPUT_DIR, TERMINAL_STATUSES, NoteGenerator, find_active_task_by_video
-from app.services.notifier import send_summary
+from app.services.notifier import send_round_failure_alert, send_summary
 from app.services.watchlater import fetch_watchlater
 from app.utils.logger import get_logger
 from ffmpeg_helper import check_ffmpeg_exists
@@ -218,13 +218,44 @@ class AutomationScheduler:
         except Exception as e:
             logger.error(f"检查轮失败: {e}", exc_info=True)
             self._update_state(running=False, phase="失败", last_error=str(e))
+            self._alert_round_failure(str(e))
             return {"error": str(e)}
         finally:
             self._running_round = False
             self._round_lock.release()
         if isinstance(result, dict) and result.get("error"):
             self._update_state(running=False, phase="失败", last_error=result["error"])
+            self._alert_round_failure(result["error"])
         return result
+
+    def _alert_round_failure(self, error: str) -> None:
+        """轮级失败告警：整轮失败不提交任何任务，也就走不到 _wait_and_summarize
+        的通知路径——此前自动化停摆完全静默（2026-10-10 Cookie -101 连败 1 小时+，
+        零邮件）。节流双保险：
+        - 基础节流：max(30, min_interval_minutes) 分钟内不重发（失败轮每 5 分钟
+          必触发一次，纯靠基础节流一晚上也会刷几十封）；
+        - 同文案抑制：同一错误文案 6 小时内不重发（夜间网络抖动的 SSLError
+          反复触发同一句报错），文案变化（如换成 Cookie 失效）立即告警。
+        """
+        try:
+            cfg = AutomationConfigManager().get_config()
+            min_interval_min = int(((cfg.get("notify") or {}).get("min_interval_minutes")) or 0)
+            basic_s = max(30, min_interval_min) * 60
+            state = self._load_state()
+            now_ts = time.time()
+            last_ts = float(state.get("last_alert_ts") or 0)
+            last_err = str(state.get("last_alert_error") or "")
+            same_error = last_err == str(error)
+            if last_ts > 0:
+                if same_error and now_ts - last_ts < 6 * 3600:
+                    return
+                if not same_error and now_ts - last_ts < basic_s:
+                    return
+            results = send_round_failure_alert(error)
+            self._update_state(last_alert_ts=now_ts, last_alert_error=str(error)[:200])
+            logger.info(f"轮级失败告警已发送：{results}")
+        except Exception as e:
+            logger.warning(f"轮级失败告警发送失败: {e}")
 
     def run_round_once(self, cfg: Optional[dict] = None) -> Dict:
         cfg = cfg or AutomationConfigManager().get_config()
@@ -313,6 +344,9 @@ class AutomationScheduler:
             last_result=result,
             last_round_ts=time.time(),
             last_round_at=started.isoformat(),
+            # 清掉告警记忆：本轮健康，下次新故障不应被「同文案 6 小时抑制」误吞
+            last_alert_ts=None,
+            last_alert_error=None,
         )
         logger.info(f"=== 自动化检查轮结束：提交 {len(submitted)}，跳过 {len(skipped)} ===")
         return result

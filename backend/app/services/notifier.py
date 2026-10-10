@@ -7,6 +7,7 @@
 """
 import smtplib
 import ssl
+from datetime import datetime
 from email.header import Header
 from email.mime.text import MIMEText
 from typing import List, Tuple
@@ -139,6 +140,22 @@ def send_summary(result: dict) -> List[dict]:
     content = "\n".join(lines)
     title = f"BiliNote 检查轮：成功 {len(ok)} / 失败 {len(failed)}"
     return send_via_channels(title, content)
+
+
+def send_round_failure_alert(error: str) -> List[dict]:
+    """检查轮整轮失败（拉稍后再看之前就死掉）的独立告警。
+
+    这类失败走不到 send_summary 的通知路径：fetch_watchlater 抛异常、以及
+    run_round_once 的前置校验失败（生成配置不完整 / ffmpeg 缺失）都会在提交
+    任何任务之前 return，自动化的停摆此前是静默的（2026-10-10 实测：Cookie
+    -101 令调度每 5 分钟连败 1 小时+，零邮件）。"""
+    content = (
+        "【BiliNote 自动化告警】检查轮失败\n"
+        f"时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n"
+        f"原因：{str(error)[:300]}\n"
+        "下一轮会自动重试；若为 Cookie 失效请到「设置 → 下载配置」更新 SESSDATA。"
+    )
+    return send_via_channels("BiliNote 告警：检查轮失败", content)
 
 
 def send_test() -> List[dict]:
