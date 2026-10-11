@@ -162,46 +162,55 @@ class VideoReader:
         return save_path
 
     def encode_images_to_base64(self, image_paths: list[str]) -> list[str]:
-        base64_images = []
-        for path in image_paths:
+        def _encode(path: str) -> str:
             with open(path, "rb") as img_file:
                 encoded_string = base64.b64encode(img_file.read()).decode("utf-8")
-                base64_images.append(f"data:image/jpeg;base64,{encoded_string}")
-        return base64_images
+                return f"data:image/jpeg;base64,{encoded_string}"
 
-    def run(self)->list[str]:
+        if len(image_paths) <= 1:
+            return [_encode(p) for p in image_paths]
+        # 纯读文件+编码，互不依赖，并行省一大截 IO（2026-10-11）
+        with ThreadPoolExecutor(max_workers=min(4, len(image_paths))) as pool:
+            return list(pool.map(_encode, image_paths))
+
+    def run(self, reuse_frames: bool = False) -> list[str]:
         logger.info("开始提取视频帧...")
-        # FFMPEG_BIN_PATH 只有在 check_ffmpeg_exists 真正跑过一次后才会前置进
-        # 进程 PATH；健康轮询从未触发过的进程（纯后台自动化）若不在这里补一次，
-        # 所有抽帧都会以 WinError 2 告终（2026-10-05 自动化 30 轮全败的根因）。
-        try:
-            from ffmpeg_helper import ensure_ffmpeg_or_raise
-
-            ensure_ffmpeg_or_raise()
-        except ImportError:
-            pass
         try:
             # 确保目录存在
-            print(self.frame_dir,self.grid_dir)
             os.makedirs(self.frame_dir, exist_ok=True)
             os.makedirs(self.grid_dir, exist_ok=True)
-            #清空帧文件夹
-            for file in os.listdir(self.frame_dir):
-                if file.startswith("frame_"):
-                    os.remove(os.path.join(self.frame_dir, file))
-            print(self.frame_dir,self.grid_dir)
-            #清空网格文件夹
+            # reuse_frames=True（降级升格重建 grid2/grid3 用）：采样间隔没变，
+            # 帧缓存与原抽取完全一致，跳过全量重新抽帧（长视频省几分钟 ffmpeg）。
+            has_cached_frames = any(
+                f.startswith("frame_") for f in os.listdir(self.frame_dir)
+            )
+            if reuse_frames and has_cached_frames:
+                logger.info("采样间隔未变，复用已抽取的帧缓存")
+            else:
+                # FFMPEG_BIN_PATH 只有在 check_ffmpeg_exists 真正跑过一次后才会前置进
+                # 进程 PATH；健康轮询从未触发过的进程（纯后台自动化）若不在这里补一次，
+                # 所有抽帧都会以 WinError 2 告终（2026-10-05 自动化 30 轮全败的根因）。
+                # 复用帧缓存的重建路径完全不碰 ffmpeg，无需这步。
+                try:
+                    from ffmpeg_helper import ensure_ffmpeg_or_raise
+
+                    ensure_ffmpeg_or_raise()
+                except ImportError:
+                    pass
+                # 清空帧文件夹
+                for file in os.listdir(self.frame_dir):
+                    if file.startswith("frame_"):
+                        os.remove(os.path.join(self.frame_dir, file))
+                self.extract_frames()
+            # 清空网格文件夹（重建必然要重拼，旧拼图作废）
             for file in os.listdir(self.grid_dir):
                 if file.startswith("grid_"):
                     os.remove(os.path.join(self.grid_dir, file))
-            print(self.frame_dir,self.grid_dir)
-            self.extract_frames()
-            print("2#3",self.frame_dir,self.grid_dir)
             logger.info("开始拼接网格图...")
-            image_paths = []
             groups = self.group_images()
             group_size = self.grid_size[0] * self.grid_size[1]
-            for idx, group in enumerate(groups, start=1):
+
+            def _concat_one(idx: int, group: list[str]) -> str:
                 if len(group) < group_size:
                     # 尾组不再整组丢弃（旧逻辑让视频结尾几分钟完全没有截图）：
                     # 保持列数不变、行数按剩余张数收窄，空位留白（无时间戳角标，
@@ -211,13 +220,18 @@ class VideoReader:
                         f"第 {idx} 组为尾组（{len(group)}/{group_size} 张），"
                         f"按 {self.grid_size[0]}×{tail_rows} 小拼图保留"
                     )
-                    out_path = self.concat_images(
+                    return self.concat_images(
                         group, f"grid_{idx}", cols=self.grid_size[0], rows=tail_rows
                     )
-                    image_paths.append(out_path)
-                    continue
-                out_path = self.concat_images(group, f"grid_{idx}")
-                image_paths.append(out_path)
+                return self.concat_images(group, f"grid_{idx}")
+
+            # 各组互不依赖、各写各的文件，并行拼图（2026-10-11：抽帧早已并行，
+            # 拼图一直串行，长视频上百组时这里能省几十秒）。pool.map 保序。
+            workers = max(1, min(4, len(groups)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                image_paths = list(
+                    pool.map(lambda t: _concat_one(*t), enumerate(groups, start=1))
+                )
 
             logger.info("📤 开始编码图像...")
             urls = self.encode_images_to_base64(image_paths)

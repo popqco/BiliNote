@@ -33,7 +33,12 @@ from app.models.notes_model import AudioDownloadResult, NoteResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.constant import SUPPORT_PLATFORM_MAP
 from app.services.provider import ProviderService
-from app.services.task_serial_executor import transcribe_semaphore
+from app.services.task_config_manager import TaskConfigManager
+from app.services.task_serial_executor import (
+    LOCAL_TRANSCRIBER_TYPES,
+    local_transcribe_semaphore,
+    online_transcribe_semaphore,
+)
 from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
 from app.transcriber.segmented import SAFETY_FACTOR, FLOOR_BYTES_PER_SEC, cleanup_part_caches, probe_duration, transcribe_segmented
@@ -68,19 +73,15 @@ IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 # 「日志消失」时确认的根因。
 logger = get_logger(__name__)
 
-# 视频理解帧预算（见 _adapt_frame_budget）：超过时自动拉大间隔/加大拼图。
-# 2026-10-11 默认从 600/150 提到 2400/500：转写+截图改为「时间对齐分批」喂给
-# 模型（每批 ≤20 张拼图，单请求体积不变），大上下文模型能吃下更密的采样；
-# 免费额度紧张/上游不稳时可设 FRAME_BUDGET=600、IMAGE_BUDGET=150 回到旧密度。
-def _env_int(name: str, default: int) -> int:
-    try:
-        return max(1, int(os.getenv(name) or default))
-    except ValueError:
-        return default
+# 视频理解帧预算（见 _adapt_frame_budget）：超过时自动逐级升格/拉间隔。
+# 2026-10-11 起 UI 可调（设置→通用「生成性能与预算」，落盘 config/task_config.json），
+# 取值优先级：配置文件 > 环境变量 > 默认 4800/1000（激进档；旧档 600/150、2400/500）。
+def _frame_budget() -> int:
+    return TaskConfigManager().get("frame_budget")
 
 
-FRAME_BUDGET = _env_int("FRAME_BUDGET", 2400)   # 抽帧总数上限
-IMAGE_BUDGET = _env_int("IMAGE_BUDGET", 500)    # 拼图（每张拼图 = 1 个 image 块）数量上限
+def _image_budget() -> int:
+    return TaskConfigManager().get("image_budget")
 
 # 非终态判定用（提交去重 / 任务列表）
 TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
@@ -397,6 +398,7 @@ class NoteGenerator:
             name=provider["name"],
             api_format=provider.get("api_format") or "chat",
             extra_headers=provider.get("extra_headers"),
+            thinking_effort=provider.get("thinking_effort"),
         )
         return GPTFactory().from_config(config)
 
@@ -537,9 +539,9 @@ class NoteGenerator:
         视频理解失败的头号原因是请求体过大：1 秒间隔 + 1×1 拼图时，20 分钟视频
         会生成 1200 张图、几百 MB 请求，免费上游必挂（2026-10-01 批量失败案例）。
         这里按视频真实时长把「拼图数量」压到 IMAGE_BUDGET 以内、帧数压进
-        FRAME_BUDGET。策略（2026-10-11 调整）：优先拉大采样间隔、保持格子尺寸
-        ——2×2 的单格 783×441 比 3×3 的 522×294 清晰得多（用户反馈「拼图尺寸
-        弄得很大」）；只有当间隔要被拉到设定值 2 倍以上时才升 3×3 换密度。
+        FRAME_BUDGET。阶梯（2026-10-11 用户定版：逐级升格优先）——兜不住先升
+        2×2、再升 3×3，每级都用原间隔试；实在兜不住才拉采样间隔（在最大可用
+        格子上算最小拉伸）。时间密度（间隔）比单格分辨率更值得保。
         """
         try:
             import ffmpeg as _ffmpeg
@@ -550,6 +552,8 @@ class NoteGenerator:
         if duration <= 0:
             return frame_interval, grid_size
 
+        frame_budget = _frame_budget()
+        image_budget = _image_budget()
         interval = max(1, int(frame_interval))
         grid = [max(1, int(g)) for g in (grid_size or [2, 2])]
         area = grid[0] * grid[1]
@@ -557,36 +561,38 @@ class NoteGenerator:
         def images_at(iv: int, a: int) -> float:
             return duration / iv / a
 
+        def over_budget(a: int, iv: int) -> bool:
+            return images_at(iv, a) > image_budget or duration / iv > frame_budget
+
         def required_interval(a: int) -> int:
             """拼图面积 a 下，把拼图压进 IMAGE_BUDGET、帧数压进 FRAME_BUDGET 所需的最小间隔。"""
             iv = interval
-            if images_at(iv, a) > IMAGE_BUDGET:
-                iv = max(iv, math.ceil(duration / (IMAGE_BUDGET * a)))
-            if duration / iv > FRAME_BUDGET:
-                iv = max(iv, math.ceil(duration / FRAME_BUDGET))
+            if images_at(iv, a) > image_budget:
+                iv = max(iv, math.ceil(duration / (image_budget * a)))
+            if duration / iv > frame_budget:
+                iv = max(iv, math.ceil(duration / frame_budget))
             return iv
 
         frames_before = int(duration / interval)
-        if images_at(interval, area) <= IMAGE_BUDGET and frames_before <= FRAME_BUDGET:
+        if not over_budget(area, interval):
             return interval, grid
 
-        iv_flat = required_interval(area)
-        if area < 9 and iv_flat > 2 * interval:
-            side = int(area ** 0.5) + 1
-            iv_bigger = required_interval(side * side)
-            if iv_bigger < iv_flat:
-                grid = [side, side]
-                area = side * side
-                interval = iv_bigger
-            else:
-                interval = iv_flat
+        # 逐级升格阶梯（用户定版）：2×2 → 3×3 → 拉间隔；格子升到顶仍超预算才动间隔。
+        if area < 4 and not over_budget(4, interval):
+            grid, area = [2, 2], 4
+        elif area < 9 and not over_budget(9, interval):
+            grid, area = [3, 3], 9
         else:
-            interval = iv_flat
+            # 间隔兜底：在最大可用格子上算最小拉伸（格子越大 → 需要的拉伸越小）
+            if area < 9:
+                grid, area = [3, 3], 9
+            interval = required_interval(area)
 
         images_after = int(images_at(interval, area))
         msg = (
             f"已自动调整采样：间隔 {interval}s / 拼图 {grid[0]}×{grid[1]}，"
-            f"预计 {images_after} 张拼图（原设置约 {frames_before} 帧，超出预算 FRAME_BUDGET={FRAME_BUDGET}/IMAGE_BUDGET={IMAGE_BUDGET}）"
+            f"预计 {images_after} 张拼图（原设置约 {frames_before} 帧，超出预算 "
+            f"FRAME_BUDGET={frame_budget}/IMAGE_BUDGET={image_budget}，阶梯 2×2→3×3→拉间隔）"
         )
         logger.info(msg)
         self._update_status(task_id, TaskStatus.DOWNLOADING, message=msg)
@@ -663,7 +669,7 @@ class NoteGenerator:
                             save_quality=80,
                             frame_dir=frame_dir,
                             grid_dir=grid_dir,
-                            max_frames=FRAME_BUDGET,
+                            max_frames=_frame_budget(),
                         ).run()
                     else:
                         logger.warning(f"视频文件不在本地（{vp}），视频理解降级为纯文本总结")
@@ -706,7 +712,7 @@ class NoteGenerator:
                         save_quality=80,
                         frame_dir=frame_dir,
                         grid_dir=grid_dir,
-                        max_frames=FRAME_BUDGET,
+                        max_frames=_frame_budget(),
                     ).run()
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
@@ -912,7 +918,13 @@ class NoteGenerator:
         )
         try:
             logger.info("开始转写音频（等待转写信号量）")
-            with transcribe_semaphore:
+            # 本地 whisper 独占 GPU 只跑一个；在线引擎（Groq 等）放开并发（2026-10-11）
+            _sem = (
+                local_transcribe_semaphore
+                if getattr(self, "transcriber_type", "") in LOCAL_TRANSCRIBER_TYPES
+                else online_transcribe_semaphore
+            )
+            with _sem:
                 transcript: TranscriptResult | None = None
                 if use_segmented:
 
@@ -971,9 +983,10 @@ class NoteGenerator:
     ) -> str | None:
         """调用 GPT 总结转写文本；失败时按「降级阶梯」逐级用更小的请求重试。
 
-        阶梯：原样（含完整帧）→ 减帧（间隔×3、拼图至少 2×2）→ 纯文本。
-        每一级内部由 UniversalGPT 自己做网络重试；空响应快速失败进入下一级。
-        （见 docs/adr/0003：明确不跨供应商自动切换。）
+        阶梯（2026-10-11 定版：逐级升格优先）——原样（含完整帧）→ 升格 2×2（间隔
+        不变，原格子 <2×2 时才有）→ 升格 3×3（间隔不变，<3×3 时才有）→ 减帧
+        （间隔×3、格子 3×3 兜底）→ 纯文本。每级内部由 UniversalGPT 自己做网络
+        重试；空响应快速失败进入下一级。（见 docs/adr/0003：明确不跨供应商自动切换。）
         """
         task_id = task_id or markdown_cache_file.stem
         self._update_status(task_id, TaskStatus.SUMMARIZING)
@@ -994,7 +1007,14 @@ class NoteGenerator:
 
         attempts: List[Tuple[str, Optional[List[str]], bool]] = [("full", video_img_urls, screenshot)]
         if video_img_urls:
-            attempts.append(("thinned", None, screenshot))  # None = 惰性重建减帧拼图
+            # 升格优先阶梯（2026-10-11 定版）：先用原间隔把格子升上去，间隔最后才动。
+            _grid = list(self._last_grid_size or [2, 2])
+            _area = _grid[0] * _grid[1]
+            if _area < 4:
+                attempts.append(("grid2", None, screenshot))   # None = 惰性重建（升格 2×2）
+            if _area < 9:
+                attempts.append(("grid3", None, screenshot))   # 惰性重建（升格 3×3）
+            attempts.append(("thinned", None, screenshot))     # 惰性重建（间隔×3、3×3 兜底）
         attempts.append(("text_only", [], False))
 
         last_exc: Optional[Exception] = None
@@ -1008,12 +1028,18 @@ class NoteGenerator:
         per_chunk_seconds = float(os.getenv("SUMMARIZE_LADDER_DEADLINE_PER_CHUNK", "240"))
         deadline_seconds += max(0, est_chunks - 1) * per_chunk_seconds
         ladder_started_at = time.monotonic()
-        strategy_labels = {"full": "原样（含视频帧）", "thinned": "减帧", "text_only": "纯文本"}
+        strategy_labels = {
+            "full": "原样（含视频帧）",
+            "grid2": "升格 2×2",
+            "grid3": "升格 3×3",
+            "thinned": "减帧（间隔×3）",
+            "text_only": "纯文本",
+        }
         for idx, (strategy, imgs, shot) in enumerate(attempts):
-            if strategy == "thinned":
-                imgs = self._rebuild_video_grids(task_id)
+            if strategy in ("grid2", "grid3", "thinned"):
+                imgs = self._rebuild_video_grids(task_id, mode=strategy)
                 if not imgs:
-                    logger.warning("减帧重建失败（无可用视频文件），跳过该级")
+                    logger.warning(f"拼图重建失败（{strategy}，无可用视频文件），跳过该级")
                     continue
             if idx > 0:
                 label = strategy_labels.get(strategy, strategy)
@@ -1049,31 +1075,41 @@ class NoteGenerator:
             raise last_exc
         raise RuntimeError("总结失败：所有降级策略均未成功")
 
-    def _rebuild_video_grids(self, task_id: Optional[str] = None) -> List[str]:
-        """降级第 2 级：用「间隔×3、拼图至少 2×2」重建缩略图网格（请求体积约 1/3）。"""
+    def _rebuild_video_grids(self, task_id: Optional[str] = None, mode: str = "thinned") -> List[str]:
+        """总结降级的拼图重建（升格优先阶梯，2026-10-11 定版）。
+
+        grid2：升格 2×2、间隔不变；grid3：升格 3×3、间隔不变（间隔都没动，帧
+        缓存可原样复用，只重新拼图）；thinned：间隔×3、格子升到 3×3 兜底。
+        """
         try:
             if not self.video_path or not Path(self.video_path).exists():
                 return []
             base_interval = self._last_frame_interval or 6
             grid = list(self._last_grid_size or [2, 2])
-            if grid[0] * grid[1] < 4:
-                grid = [2, 2]
-            thinned_interval = max(1, base_interval * 3)
-            logger.info(f"减帧重建：interval {base_interval}->{thinned_interval}, grid={grid}")
+            area = grid[0] * grid[1] if grid else 4
+            if mode == "grid2":
+                grid, interval, reuse = [2, 2], base_interval, True
+            elif mode == "grid3":
+                grid, interval, reuse = [3, 3], base_interval, True
+            else:  # thinned：间隔变了，帧必须重新抽
+                grid = [3, 3] if area < 9 else grid
+                interval = max(1, base_interval * 3)
+                reuse = False
+            logger.info(f"降级重建（{mode}）：interval {base_interval}->{interval}, grid={grid}, 复用帧缓存={reuse}")
             frame_dir, grid_dir = self._task_scratch_dirs(task_id)
             return VideoReader(
                 video_path=str(self.video_path),
                 grid_size=tuple(grid),
-                frame_interval=thinned_interval,
+                frame_interval=interval,
                 unit_width=960,
                 unit_height=540,
                 save_quality=80,
                 frame_dir=frame_dir,
                 grid_dir=grid_dir,
-                max_frames=FRAME_BUDGET,
-            ).run()
+                max_frames=_frame_budget(),
+            ).run(reuse_frames=reuse)
         except Exception as e:
-            logger.warning(f"减帧重建失败: {e}")
+            logger.warning(f"拼图重建失败: {e}")
             return []
 
     def _post_process_markdown(

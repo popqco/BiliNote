@@ -336,6 +336,52 @@ const Automation = () => {
             onCheckedChange={v => upd(['gen', 'video_understanding'], !!v)}
           />
         </Row>
+        {!!gen.video_understanding && (
+          <>
+            <Row label="采样间隔（秒）">
+              <Input
+                type="number"
+                min={1}
+                max={30}
+                className="w-28"
+                value={gen.video_interval ?? 6}
+                onChange={e => {
+                  const n = Number(e.target.value)
+                  upd(['gen', 'video_interval'], Number.isFinite(n) && n >= 1 ? Math.round(n) : 6)
+                }}
+              />
+            </Row>
+            <Row label="拼图尺寸（列 × 行）">
+              <div className="flex items-center gap-1">
+                <Input
+                  type="number"
+                  min={1}
+                  max={4}
+                  className="h-8 w-16"
+                  value={(gen.grid_size || [2, 2])[0] ?? 2}
+                  onChange={e => {
+                    const n = Math.max(1, Math.min(4, Math.round(Number(e.target.value)) || 1))
+                    const rows = (gen.grid_size || [2, 2])[1] ?? 2
+                    upd(['gen', 'grid_size'], [n, rows])
+                  }}
+                />
+                <span className="text-muted-foreground text-xs">×</span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={4}
+                  className="h-8 w-16"
+                  value={(gen.grid_size || [2, 2])[1] ?? 2}
+                  onChange={e => {
+                    const n = Math.max(1, Math.min(4, Math.round(Number(e.target.value)) || 1))
+                    const cols = (gen.grid_size || [2, 2])[0] ?? 2
+                    upd(['gen', 'grid_size'], [cols, n])
+                  }}
+                />
+              </div>
+            </Row>
+          </>
+        )}
         <div className="flex flex-wrap items-center gap-4">
           {noteFormats.map(({ label, value }) => (
             <label key={value} className="flex items-center space-x-2 text-sm">

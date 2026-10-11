@@ -1,10 +1,10 @@
-r"""video_reader 时间戳解析（100+ 分钟视频）与 _adapt_frame_budget 新预算策略单测。
+r"""video_reader 时间戳解析（100+ 分钟视频）与 _adapt_frame_budget 预算阶梯单测。
 
-背景（2026-10-11）：
+背景：
 - 旧帧名正则 \d{2} 只认两位分钟，≥100 分钟视频排序 key 全变 inf（顺序乱）、
   拼图上时间戳消失；
-- 预算默认 600/150 → 2400/500，且扩格策略从「先升 3×3」改为「优先拉间隔保
-  持 2×2，间隔要超设定值 2 倍才升 3×3」（用户反馈拼图格子太小）。
+- 预算阶梯（2026-10-11 用户定版：逐级升格优先）——兜不住先升 2×2、再升 3×3，
+  每级都用原间隔试；实在兜不住才拉采样间隔。
 """
 import pytest
 
@@ -76,8 +76,9 @@ def _probe(monkeypatch, duration):
 
 
 def _budgets(monkeypatch, frame=2400, image=500):
-    monkeypatch.setattr(note_mod, "FRAME_BUDGET", frame)
-    monkeypatch.setattr(note_mod, "IMAGE_BUDGET", image)
+    # 2026-10-11 起预算走 TaskConfigManager 运行时读取，测试直接钉住取值函数
+    monkeypatch.setattr(note_mod, "_frame_budget", lambda: frame)
+    monkeypatch.setattr(note_mod, "_image_budget", lambda: image)
 
 
 def test_short_video_unchanged(tmp_path, monkeypatch):
@@ -86,30 +87,53 @@ def test_short_video_unchanged(tmp_path, monkeypatch):
     assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (6, [2, 2])
 
 
-def test_4h_video_stretches_interval_keeps_2x2(tmp_path, monkeypatch):
-    """4 小时视频：拼图 600>500 超预算 → 间隔 6→8s（≤2 倍设定值，不升格子）。"""
+def test_mild_overrun_upgrades_2x2_first(tmp_path, monkeypatch):
+    """逐级升格（用户定版）：1×1 拼图 600>500 轻微超预算 → 升 2×2、间隔不动。"""
+    _budgets(monkeypatch)
+    _probe(monkeypatch, 3600)
+    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [1, 1]) == (6, [2, 2])
+
+
+def test_4h_video_upgrades_to_3x3_keeps_interval(tmp_path, monkeypatch):
+    """4 小时视频：2×2 拼图 600>500 超预算 → 升 3×3 后 267 张兜得住 → 间隔保持 6s。"""
     _budgets(monkeypatch)
     _probe(monkeypatch, 14400)
-    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (8, [2, 2])
+    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (6, [3, 3])
 
 
-def test_10h_video_expands_grid_when_it_buys_density(tmp_path, monkeypatch):
-    """10 小时视频：2×2 要拉到 18s（>2 倍设定值）；升 3×3 后帧预算把间隔压到
-    15s——升格换回密度，按设计升 3×3（2400 帧 / 267 张拼图）。"""
+def test_2x2_over_3x3_fits_adopts_3x3(tmp_path, monkeypatch):
+    """1×1 → 2×2 仍超（200>150）→ 3×3 兜住（89≤150）→ 升 3×3、间隔不动。"""
+    _budgets(monkeypatch, frame=2400, image=150)
+    _probe(monkeypatch, 4800)
+    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [1, 1]) == (6, [3, 3])
+
+
+def test_10h_video_stretches_interval_at_3x3(tmp_path, monkeypatch):
+    """10 小时视频：3×3 也要 666>500 兜不住 → 升满 3×3 后才拉间隔到 15s
+    （帧预算硬约束：36000/2400）。"""
     _budgets(monkeypatch)
     _probe(monkeypatch, 36000)
     assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (15, [3, 3])
 
 
-def test_grid_expands_only_when_it_buys_density(tmp_path, monkeypatch):
-    """旧拼图预算（150）下 2×2 要拉到 24s（>2 倍），升 3×3 能换回 11s → 升格。"""
+def test_grid_expands_before_interval_touches(tmp_path, monkeypatch):
+    """旧拼图预算（150）下 4h 视频：2×2 超（600>150）、3×3 兜不住（267>150）
+    → 升满 3×3 再拉间隔 6→11s。"""
     _budgets(monkeypatch, frame=2400, image=150)
     _probe(monkeypatch, 14400)
     assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (11, [3, 3])
 
 
-def test_frame_budget_binding_keeps_grid(tmp_path, monkeypatch):
-    """帧预算（600）是硬约束时，升格子换不回帧数 → 保 2×2 直接拉间隔。"""
+def test_frame_budget_binding_upgrades_grid_then_stretches(tmp_path, monkeypatch):
+    """帧预算（600）是硬约束时格子换不回帧数，但阶梯仍先升满 3×3（拼图数
+    267>150 也超）再拉间隔到 24s——与旧策略的区别是格子跟着升满。"""
     _budgets(monkeypatch, frame=600, image=150)
     _probe(monkeypatch, 14400)
-    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (24, [2, 2])
+    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [2, 2]) == (24, [3, 3])
+
+
+def test_configured_3x3_goes_straight_to_interval(tmp_path, monkeypatch):
+    """配置已是 3×3：没有升格空间 → 直接拉间隔（267>150 → 11s）。"""
+    _budgets(monkeypatch, frame=2400, image=150)
+    _probe(monkeypatch, 14400)
+    assert _gen()._adapt_frame_budget(tmp_path / "v.mp4", 6, [3, 3]) == (11, [3, 3])
