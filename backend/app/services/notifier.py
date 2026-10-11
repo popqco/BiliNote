@@ -153,7 +153,8 @@ def send_round_failure_alert(error: str) -> List[dict]:
         "【BiliNote 自动化告警】检查轮失败\n"
         f"时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n"
         f"原因：{str(error)[:300]}\n"
-        "下一轮会自动重试；若为 Cookie 失效请到「设置 → 下载配置」更新 SESSDATA。"
+        "下一轮会自动重试；若为 Cookie 失效，请到「设置 → 下载配置」用「扫码登录」"
+        "重新登录（已扫码的账号此后会自动续期，无需再手动更新）。"
     )
     return send_via_channels("BiliNote 告警：检查轮失败", content)
 

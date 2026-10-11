@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 
@@ -6,6 +7,9 @@ from typing import Callable, List, Optional
 class ChunkPayload:
     segments: list
     image_urls: list
+    # 分批元信息（chunk_time_aligned 填写）：批次序号/总数/时间范围，
+    # summarize 据此在每批 prompt 里注入「第 i/N 段」说明；旧路径保持 None。
+    meta: Optional[dict] = None
 
 
 class RequestChunker:
@@ -155,6 +159,94 @@ class RequestChunker:
                 raise ValueError("single image payload exceeds max_bytes")
             chunks.append(ChunkPayload(segments=[], image_urls=[image]))
 
+        return chunks
+
+    def chunk_time_aligned(self, segments: list, image_urls: list, **kwargs) -> Optional[List[ChunkPayload]]:
+        """时间对齐分批（2026-10-11）：转写按时间轴切 N 个连续窗口，拼图按时间
+        占比摊进各窗，让每一批同时含「这段的转写 + 这段的截图」。
+
+        背景：chunk() 按字节数切文本，45MB 预算下转写几乎永远整个装进第 1 块，
+        超出的拼图全部溢出成 segments=[] 的纯图块——模型看图时没有任何上下文
+        （2026-10-11 摸底确认）。本方法把切分依据从「字节」换成「批次数」：
+        N = ceil(拼图数 / max_images_per_chunk)，文本窗口与拼图窗口一一对应。
+
+        :returns: 批次列表；无法满足约束（转写段数不足以开出足够窗口、或某批
+            超 max_bytes）时返回 None，调用方回退 chunk() 旧逻辑。
+        """
+        segments = list(segments or [])
+        image_urls = list(image_urls or [])
+        if not image_urls:
+            return None
+        per_chunk = max(1, int(self.max_images_per_chunk or 20))
+        if not segments:
+            return None  # 纯图无文本，交回旧逻辑处理
+
+        total_batches = min(math.ceil(len(image_urls) / per_chunk), len(segments))
+        if total_batches < 2:
+            return None  # 一批就装得下，不需要分
+
+        def text_bytes(seg) -> int:
+            t = self._get_text(seg)
+            return len(t.encode("utf-8")) if t else 1  # 空段至少算 1，防除零
+
+        # 按文本字节数近似均分出 total_batches 个时间连续、非空的窗口
+        total_text = sum(text_bytes(s) for s in segments)
+        windows: List[list] = []
+        target = total_text / total_batches
+        acc = 0
+        current: list = []
+        for i, seg in enumerate(segments):
+            current.append(seg)
+            acc += text_bytes(seg)
+            segs_left = len(segments) - i - 1
+            windows_left = total_batches - len(windows) - 1  # 本窗之后还要开的窗数（含尾窗）
+            if acc >= target and windows_left >= 1 and segs_left >= windows_left:
+                windows.append(current)
+                remaining_text = total_text - sum(text_bytes(s) for w in windows for s in w)
+                target = remaining_text / (total_batches - len(windows))
+                acc = 0
+                current = []
+        if current:
+            windows.append(current)
+        if len(windows) < total_batches:
+            return None
+
+        # 拼图按时间顺序连续等分到各窗（floor/ceil 分布，每窗 ≤ per_chunk）
+        chunk_count = len(windows)
+        if math.ceil(len(image_urls) / chunk_count) > per_chunk:
+            return None
+
+        def seg_time(seg, key):
+            if isinstance(seg, dict):
+                return seg.get(key)
+            return getattr(seg, key, None)
+
+        chunks: List[ChunkPayload] = []
+        for j, win in enumerate(windows):
+            lo = (j * len(image_urls)) // chunk_count
+            hi = ((j + 1) * len(image_urls)) // chunk_count
+            time_start = seg_time(win[0], "start") if win else None
+            time_end = seg_time(win[-1], "end") if win else None
+            chunks.append(ChunkPayload(
+                segments=win,
+                image_urls=image_urls[lo:hi],
+                meta={
+                    "batch_index": j + 1,
+                    "batch_total": chunk_count,
+                    "time_start": time_start,
+                    "time_end": time_end,
+                },
+            ))
+
+        # 兜底字节校验：正常构造下单批 ≈ 文本窗口 + 20 张拼图 ≈ 6MB ≪ 45MB，
+        # 但单个巨型 segment 或异常大的 base64 都可能超限——宁可回退旧逻辑
+        for c in chunks:
+            try:
+                size = self._messages_size(c.segments, c.image_urls, **kwargs)
+            except Exception:
+                return None
+            if size > self.max_bytes:
+                return None
         return chunks
 
     def group_texts_by_budget(self, texts: List[str], build_messages: Callable, **kwargs) -> List[List[str]]:

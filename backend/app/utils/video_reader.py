@@ -19,6 +19,10 @@ logger = get_logger(__name__)
 # 压到 1568px 后单张 ~215KB，同样的 64 张只需 13MB，模型看到的细节没有可感差异。
 MAX_GRID_LONG_SIDE = 1568
 
+# 帧文件名里的时间戳：分钟可超过两位（100 分钟以上的视频 frame_101_52.jpg），
+# 旧正则 \d{2} 会匹配失败 → 排序 key 变 inf（顺序全乱）、拼图上时间戳消失
+_FRAME_TS_RE = re.compile(r"frame_(\d{1,4})_(\d{2})\.jpg")
+
 
 class VideoReader:
     def __init__(self,
@@ -31,7 +35,8 @@ class VideoReader:
                  save_quality=90,
                  font_path="fonts/arial.ttf",
                  frame_dir=None,
-                 grid_dir=None):
+                 grid_dir=None,
+                 max_frames=1000):
         self.video_path = video_path
         self.grid_size = grid_size
         self.frame_interval = frame_interval
@@ -43,6 +48,7 @@ class VideoReader:
         self.grid_dir = grid_dir or get_app_dir("grid_output")
         print(f"视频路径：{video_path}",self.frame_dir,self.grid_dir)
         self.font_path = font_path
+        self.max_frames = max_frames
 
     @staticmethod
     def _calculate_file_md5(file_path: str) -> str:
@@ -58,7 +64,7 @@ class VideoReader:
         return f"{mm:02d}_{ss:02d}"
 
     def extract_time_from_filename(self, filename: str) -> float:
-        match = re.search(r"frame_(\d{2})_(\d{2})\.jpg", filename)
+        match = _FRAME_TS_RE.search(filename)
         if match:
             mm, ss = map(int, match.groups())
             return mm * 60 + ss
@@ -76,12 +82,13 @@ class VideoReader:
         except subprocess.CalledProcessError:
             return None
 
-    def extract_frames(self, max_frames=1000) -> list[str]:
-
+    def extract_frames(self, max_frames=None) -> list[str]:
+        # max_frames 参数保留（旧调用点/测试直接传参）；缺省用构造时注入的预算
+        limit = self.max_frames if max_frames is None else max_frames
         try:
             os.makedirs(self.frame_dir, exist_ok=True)
             duration = float(ffmpeg.probe(self.video_path)["format"]["duration"])
-            timestamps = [i for i in range(0, int(duration), self.frame_interval)][:max_frames]
+            timestamps = [i for i in range(0, int(duration), self.frame_interval)][:limit]
 
             # 并行提取帧
             max_workers = min(os.cpu_count() or 4, 8, len(timestamps))
@@ -120,10 +127,11 @@ class VideoReader:
         group_size = self.grid_size[0] * self.grid_size[1]
         return [image_files[i:i + group_size] for i in range(0, len(image_files), group_size)]
 
-    def concat_images(self, image_paths: list[str], name: str) -> str:
+    def concat_images(self, image_paths: list[str], name: str, cols: int = None, rows: int = None) -> str:
         os.makedirs(self.grid_dir, exist_ok=True)
 
-        cols, rows = self.grid_size
+        cols = cols or self.grid_size[0]
+        rows = rows or self.grid_size[1]
         unit_w, unit_h = self.unit_width, self.unit_height
         long_side = max(unit_w * cols, unit_h * rows)
         if long_side > MAX_GRID_LONG_SIDE:
@@ -136,7 +144,7 @@ class VideoReader:
 
         for path in image_paths:
             img = Image.open(path).convert("RGB").resize((unit_w, unit_h), Image.Resampling.LANCZOS)
-            timestamp = re.search(r"frame_(\d{2})_(\d{2})\.jpg", os.path.basename(path))
+            timestamp = _FRAME_TS_RE.search(os.path.basename(path))
             time_text = f"{timestamp.group(1)}:{timestamp.group(2)}" if timestamp else ""
             draw = ImageDraw.Draw(img)
             draw.text((10, 10), time_text, fill="yellow", font=font, stroke_width=1, stroke_fill="black")
@@ -192,9 +200,21 @@ class VideoReader:
             logger.info("开始拼接网格图...")
             image_paths = []
             groups = self.group_images()
+            group_size = self.grid_size[0] * self.grid_size[1]
             for idx, group in enumerate(groups, start=1):
-                if len(group) < self.grid_size[0] * self.grid_size[1]:
-                    logger.warning(f"⚠️ 跳过第 {idx} 组，图片不足 {self.grid_size[0] * self.grid_size[1]} 张")
+                if len(group) < group_size:
+                    # 尾组不再整组丢弃（旧逻辑让视频结尾几分钟完全没有截图）：
+                    # 保持列数不变、行数按剩余张数收窄，空位留白（无时间戳角标，
+                    # 模型会当成空白格）
+                    tail_rows = -(-len(group) // self.grid_size[0])
+                    logger.info(
+                        f"第 {idx} 组为尾组（{len(group)}/{group_size} 张），"
+                        f"按 {self.grid_size[0]}×{tail_rows} 小拼图保留"
+                    )
+                    out_path = self.concat_images(
+                        group, f"grid_{idx}", cols=self.grid_size[0], rows=tail_rows
+                    )
+                    image_paths.append(out_path)
                     continue
                 out_path = self.concat_images(group, f"grid_{idx}")
                 image_paths.append(out_path)

@@ -67,7 +67,10 @@ def fetch_watchlater(ps: int = 20, max_items: int = 100) -> List[dict]:
         code = data.get("code")
         if code != 0:
             if code == -101:
-                raise RuntimeError("B 站 Cookie 未登录或已失效：请到「设置 → 下载配置」更新 SESSDATA")
+                raise RuntimeError(
+                    "B 站 Cookie 未登录或已失效：请到「设置 → 下载配置」扫码登录"
+                    "（扫码后 Cookie 会自动续期，无需再手动更新）"
+                )
             raise RuntimeError(f"稍后再看接口返回错误：code={code}, msg={data.get('message')}")
 
         d = data.get("data") or {}

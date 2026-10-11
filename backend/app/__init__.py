@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from .middleware.pairing_auth import PairingAuthMiddleware
-from .routers import note, provider, model, config, chat, export
+from .routers import note, provider, model, config, chat, export, bilibili_auth
 
 
 
@@ -15,6 +15,7 @@ def create_app(lifespan, enable_pairing_auth: bool = True) -> FastAPI:
     app.include_router(config.router,  prefix="/api")
     app.include_router(chat.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
+    app.include_router(bilibili_auth.router, prefix="/api")
 
     if enable_pairing_auth:
         app.add_middleware(PairingAuthMiddleware)

@@ -14,12 +14,21 @@ from app.gpt.utils import fix_markdown
 from app.gpt.request_chunker import RequestChunker
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
-from typing import List
+from typing import List, Optional
 
 from app.utils.logger import get_logger
 
 # 统一 get_logger，保证记录进 logs/app.log（裸 logging.getLogger 无 handler 会丢日志）
 logger = get_logger(__name__)
+
+
+def _feed_strategy() -> str:
+    """喂图策略：segmented（默认，时间对齐分批）| single（旧字节分块）。
+
+    函数化而非常量：source_signature 里要引用它，且测试里可以用
+    monkeypatch.setenv 在运行时切换。
+    """
+    return (os.getenv("SUMMARY_FEED_STRATEGY", "segmented") or "segmented").strip().lower()
 
 
 class EmptyCompletionError(RuntimeError):
@@ -81,6 +90,11 @@ class UniversalGPT(GPT):
             style=kwargs.get('style'),
             extras=kwargs.get('extras'),
         )
+        # 分批喂图（chunk_time_aligned）时给每批注入「第 i/N 段」说明，
+        # 让模型知道这只是整条视频的一部分，输出本段笔记待合并
+        chunk_note = str(kwargs.get("chunk_note") or "")
+        if chunk_note:
+            content_text = chunk_note + "\n\n" + content_text
 
         video_img_urls = kwargs.get('video_img_urls', [])
 
@@ -134,6 +148,8 @@ class UniversalGPT(GPT):
             "temperature": self.temperature,
             "max_request_bytes": self.max_request_bytes,
             "max_images_per_request": self.max_images_per_request,
+            # 喂图策略影响分批组成；换策略后旧 checkpoint 的 partials 必然对不上
+            "feed_strategy": _feed_strategy(),
             "title": source.title,
             "tags": source.tags,
             "format": source._format,
@@ -372,6 +388,30 @@ class UniversalGPT(GPT):
 
         return current_partials[0]
 
+    @staticmethod
+    def _format_batch_ts(seconds) -> str:
+        try:
+            s = int(float(seconds))
+        except (TypeError, ValueError):
+            return "?"
+        return f"{s // 60}:{s % 60:02d}"
+
+    def _batch_note(self, meta: Optional[dict]) -> str:
+        """把分批元信息转成注入每批 prompt 的说明文字（旧路径 meta 为 None）。"""
+        if not meta:
+            return ""
+        total = int(meta.get("batch_total") or 0)
+        if total <= 1:
+            return ""
+        return (
+            f"【分批说明】整条视频的转写与截图被分成 {total} 批依次发给你，"
+            f"本批是第 {meta.get('batch_index')}/{total} 批"
+            f"（对应原片 {self._format_batch_ts(meta.get('time_start'))} - "
+            f"{self._format_batch_ts(meta.get('time_end'))}）。"
+            "请只基于本批的转写与截图撰写这一段的笔记（仍按完整格式输出），"
+            "系统随后会把各批笔记合并成整篇。"
+        )
+
     def summarize(self, source: GPTSource) -> str:
         self.screenshot = source.screenshot
         self.link = source.link
@@ -389,16 +429,36 @@ class UniversalGPT(GPT):
             max_images_per_chunk=self.max_images_per_request,
         )
 
+        # 喂图策略（2026-10-11）：默认 segmented——拼图数超过单请求上限时，
+        # 按「时间对齐」分批（转写窗口与拼图窗口一一对应，消灭无文本纯图块）；
+        # 设 SUMMARY_FEED_STRATEGY=single 回到旧行为（45MB 字节切分，图溢出
+        # 成纯图块），适合强行单次全量喂给大上下文模型。
+        chunks = None
+        if _feed_strategy() == "segmented" and source.video_img_urls:
+            try:
+                chunks = chunker.chunk_time_aligned(
+                    source.segment,
+                    source.video_img_urls,
+                    title=source.title,
+                    tags=source.tags,
+                    _format=source._format,
+                    style=source.style,
+                    extras=source.extras,
+                )
+            except Exception as e:
+                logger.warning(f"时间对齐分批失败，回退按字节分块：{e}")
+                chunks = None
         try:
-            chunks = chunker.chunk(
-                source.segment,
-                source.video_img_urls or [],
-                title=source.title,
-                tags=source.tags,
-                _format=source._format,
-                style=source.style,
-                extras=source.extras
-            )
+            if chunks is None:
+                chunks = chunker.chunk(
+                    source.segment,
+                    source.video_img_urls or [],
+                    title=source.title,
+                    tags=source.tags,
+                    _format=source._format,
+                    style=source.style,
+                    extras=source.extras
+                )
         except ValueError:
             chunks = chunker.chunk(
                 source.segment,
@@ -409,6 +469,10 @@ class UniversalGPT(GPT):
                 style=source.style,
                 extras=source.extras
             )
+
+        batch_total = sum(1 for c in chunks if getattr(c, "meta", None))
+        if batch_total > 1:
+            logger.info(f"时间对齐分批喂图：{batch_total} 批（共 {len(source.video_img_urls or [])} 张拼图）")
 
         partials = []
         if checkpoint_key and source_signature:
@@ -427,7 +491,8 @@ class UniversalGPT(GPT):
                 video_img_urls=chunk.image_urls,
                 _format=source._format,
                 style=source.style,
-                extras=source.extras
+                extras=source.extras,
+                chunk_note=self._batch_note(getattr(chunk, "meta", None)),
             )
             try:
                 response = self._chat_completion_create(messages)

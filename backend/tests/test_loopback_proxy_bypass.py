@@ -18,6 +18,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+# 注意：test_groq_proxy_fallback 运行时会把 sys.modules["app.utils.openai_client"]
+# 永久替换成只有 build_openai_client 的桩模块；这里必须在「收集期」（真模块还在
+# sys.modules 时）就绑定真模块对象，patch 也打在这个对象上——用字符串 target 的
+# patch("app.utils.openai_client.ProxyConfigManager") 会解析到桩上直接 AttributeError。
+import app.utils.openai_client as _oai  # noqa: E402
 from app.utils.openai_client import _effective_proxy_url, _is_loopback_base_url  # noqa: E402
 
 PROXY_ENV_KEYS = (
@@ -67,7 +72,7 @@ class TestEffectiveProxyUrl(unittest.TestCase):
 
     def test_env_proxy_still_used_for_remote(self):
         """远端地址仍按原语义吃环境变量回退（docker/CLI 场景不回归）。"""
-        with patch("app.utils.openai_client.ProxyConfigManager") as mgr:
+        with patch.object(_oai, "ProxyConfigManager") as mgr:
             mgr.return_value.get_proxy_url.return_value = "http://127.0.0.1:7892"
             self.assertEqual(
                 _effective_proxy_url("https://api.groq.com/openai/v1"),
@@ -76,7 +81,7 @@ class TestEffectiveProxyUrl(unittest.TestCase):
 
     def test_loopback_short_circuits_before_manager(self):
         """回环短路发生在读配置/环境之前——ProxyConfigManager 不应被调用。"""
-        with patch("app.utils.openai_client.ProxyConfigManager") as mgr:
+        with patch.object(_oai, "ProxyConfigManager") as mgr:
             self.assertIsNone(_effective_proxy_url("http://127.0.0.1:8787/v1"))
             mgr.assert_not_called()
 

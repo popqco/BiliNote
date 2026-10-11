@@ -279,6 +279,19 @@ class AutomationScheduler:
             logger.error(msg)
             return {"error": msg}
 
+        # Cookie 体检+自动续期：B 站会主动失效 SESSDATA，扫码登录拿到的
+        # refresh_token 可以在到期前无限续期。轮前跑一次（内部 12h 节流），
+        # 体检/续期失败不阻塞本轮——watchlater 的 -101 会给出真实错误。
+        try:
+            from app.services.bilibili_auth import ensure_cookie_fresh
+            fresh = ensure_cookie_fresh()
+            if fresh.get("refreshed"):
+                logger.info("轮前 Cookie 体检：已自动续期")
+            elif not fresh.get("ok"):
+                logger.warning(f"轮前 Cookie 体检未通过：{fresh.get('reason')}")
+        except Exception as e:
+            logger.warning(f"轮前 Cookie 体检异常（忽略，继续本轮）：{e}")
+
         items = fetch_watchlater(max_items=100)
         mode = str(cfg.get("mode") or "all")
         window_days = int(cfg.get("window_days") or 7)

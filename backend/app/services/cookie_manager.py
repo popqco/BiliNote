@@ -1,13 +1,25 @@
 import json
 import re
+import time
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 # 「key=」开头即视为已经带了键名的 Cookie 串
 _HAS_KEY_RE = re.compile(r"^\s*[A-Za-z0-9_\-.\[\]]+\s*=")
 
 # 各平台「只填值」时补哪个键名（B 站文档只说要 SESSDATA，用户常常只复制值）
 _BARE_VALUE_KEY = {"bilibili": "SESSDATA"}
+
+
+def extract_cookie_value(cookie_str: Optional[str], name: str) -> Optional[str]:
+    """从 `k=v; k=v` 形式的 Cookie 串里取指定键的值（没有则 None）。"""
+    for part in str(cookie_str or "").split(";"):
+        if "=" not in part:
+            continue
+        k, _, v = part.strip().partition("=")
+        if k.strip() == name:
+            return v.strip()
+    return None
 
 
 def normalize_cookie(platform: str, raw: Optional[str]) -> Optional[str]:
@@ -38,14 +50,14 @@ class CookieConfigManager:
         if not self.path.exists():
             self._write({})
 
-    def _read(self) -> Dict[str, Dict[str, str]]:
+    def _read(self) -> Dict[str, Dict[str, Any]]:
         try:
             with self.path.open("r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
 
-    def _write(self, data: Dict[str, Dict[str, str]]):
+    def _write(self, data: Dict[str, Dict[str, Any]]):
         with self.path.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -53,10 +65,64 @@ class CookieConfigManager:
         data = self._read()
         return normalize_cookie(platform, data.get(platform, {}).get("cookie"))
 
-    def set(self, platform: str, cookie: str):
+    def get_auth(self, platform: str) -> Dict[str, Any]:
+        """返回平台的完整登录凭据（cookie 字符串 + 续期元数据）。
+
+        旧结构（只有 cookie 键）天然兼容：缺的键按 None 处理。
+        """
+        entry = self._read().get(platform) or {}
+        return {
+            "cookie": normalize_cookie(platform, entry.get("cookie")),
+            "refresh_token": entry.get("refresh_token"),
+            "updated_at": entry.get("updated_at"),
+            "refreshed_at": entry.get("refreshed_at"),
+            "checked_at": entry.get("checked_at"),
+        }
+
+    def set_auth(
+        self,
+        platform: str,
+        cookie: str,
+        refresh_token: Optional[str] = None,
+        refreshed_at: Optional[float] = None,
+        checked_at: Optional[float] = None,
+    ):
+        """写入 Cookie 与续期凭据。
+
+        refresh_token 未显式给出时：优先从新 Cookie 串里解析 ac_time_value
+        （用户手动粘贴完整 Cookie 也能自动续期）；否则仅当 SESSDATA 没变才
+        沿用旧值——换了账号后旧 refresh_token 必然失配（刷新报 86095），不能留。
+        """
         data = self._read()
-        data[platform] = {"cookie": cookie}
+        old = data.get(platform) or {}
+        if refresh_token is None:
+            refresh_token = extract_cookie_value(cookie, "ac_time_value")
+        if refresh_token is None:
+            old_sess = extract_cookie_value(str(old.get("cookie") or ""), "SESSDATA")
+            new_sess = extract_cookie_value(cookie, "SESSDATA")
+            if old_sess and old_sess == new_sess:
+                refresh_token = old.get("refresh_token")
+        data[platform] = {
+            "cookie": cookie,
+            "refresh_token": refresh_token,
+            "updated_at": time.time(),
+            "refreshed_at": refreshed_at if refreshed_at is not None else old.get("refreshed_at"),
+            "checked_at": checked_at if checked_at is not None else old.get("checked_at"),
+        }
         self._write(data)
+
+    def mark_checked(self, platform: str):
+        """记录最近一次「Cookie 是否需要刷新」的探测时间（用于节流，不改动凭据）。"""
+        data = self._read()
+        entry = data.get(platform)
+        if not entry:
+            return
+        entry["checked_at"] = time.time()
+        self._write(data)
+
+    def set(self, platform: str, cookie: str):
+        # 兼容旧签名：手动保存走 set_auth（保留可用的续期凭据）
+        self.set_auth(platform, cookie)
 
     def delete(self, platform: str):
         data = self._read()

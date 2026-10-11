@@ -68,9 +68,19 @@ IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 # 「日志消失」时确认的根因。
 logger = get_logger(__name__)
 
-# 视频理解帧预算（见 _adapt_frame_budget）：超过时自动拉大间隔/加大拼图
-FRAME_BUDGET = 600   # 抽帧总数上限
-IMAGE_BUDGET = 150   # 拼图（每张拼图 = 1 个 image 块）数量上限
+# 视频理解帧预算（见 _adapt_frame_budget）：超过时自动拉大间隔/加大拼图。
+# 2026-10-11 默认从 600/150 提到 2400/500：转写+截图改为「时间对齐分批」喂给
+# 模型（每批 ≤20 张拼图，单请求体积不变），大上下文模型能吃下更密的采样；
+# 免费额度紧张/上游不稳时可设 FRAME_BUDGET=600、IMAGE_BUDGET=150 回到旧密度。
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name) or default))
+    except ValueError:
+        return default
+
+
+FRAME_BUDGET = _env_int("FRAME_BUDGET", 2400)   # 抽帧总数上限
+IMAGE_BUDGET = _env_int("IMAGE_BUDGET", 500)    # 拼图（每张拼图 = 1 个 image 块）数量上限
 
 # 非终态判定用（提交去重 / 任务列表）
 TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
@@ -525,8 +535,10 @@ class NoteGenerator:
 
         视频理解失败的头号原因是请求体过大：1 秒间隔 + 1×1 拼图时，20 分钟视频
         会生成 1200 张图、几百 MB 请求，免费上游必挂（2026-10-01 批量失败案例）。
-        这里按视频真实时长把「拼图数量」压到 IMAGE_BUDGET 以内：优先加大拼图
-        （4/9 帧拼一张，不降低覆盖密度），还不够再拉大采样间隔。
+        这里按视频真实时长把「拼图数量」压到 IMAGE_BUDGET 以内、帧数压进
+        FRAME_BUDGET。策略（2026-10-11 调整）：优先拉大采样间隔、保持格子尺寸
+        ——2×2 的单格 783×441 比 3×3 的 522×294 清晰得多（用户反馈「拼图尺寸
+        弄得很大」）；只有当间隔要被拉到设定值 2 倍以上时才升 3×3 换密度。
         """
         try:
             import ffmpeg as _ffmpeg
@@ -544,25 +556,36 @@ class NoteGenerator:
         def images_at(iv: int, a: int) -> float:
             return duration / iv / a
 
+        def required_interval(a: int) -> int:
+            """拼图面积 a 下，把拼图压进 IMAGE_BUDGET、帧数压进 FRAME_BUDGET 所需的最小间隔。"""
+            iv = interval
+            if images_at(iv, a) > IMAGE_BUDGET:
+                iv = max(iv, math.ceil(duration / (IMAGE_BUDGET * a)))
+            if duration / iv > FRAME_BUDGET:
+                iv = max(iv, math.ceil(duration / FRAME_BUDGET))
+            return iv
+
         frames_before = int(duration / interval)
         if images_at(interval, area) <= IMAGE_BUDGET and frames_before <= FRAME_BUDGET:
             return interval, grid
 
-        # 1) 先加大拼图（最多 3×3），不改变抽帧密度
-        while area < 9 and images_at(interval, area) > IMAGE_BUDGET:
+        iv_flat = required_interval(area)
+        if area < 9 and iv_flat > 2 * interval:
             side = int(area ** 0.5) + 1
-            grid = [side, side]
-            area = grid[0] * grid[1]
-        # 2) 还不够就拉大采样间隔
-        if images_at(interval, area) > IMAGE_BUDGET:
-            interval = max(interval, math.ceil(duration / (IMAGE_BUDGET * area)))
-        if frames_before > FRAME_BUDGET:
-            interval = max(interval, math.ceil(duration / FRAME_BUDGET))
+            iv_bigger = required_interval(side * side)
+            if iv_bigger < iv_flat:
+                grid = [side, side]
+                area = side * side
+                interval = iv_bigger
+            else:
+                interval = iv_flat
+        else:
+            interval = iv_flat
 
         images_after = int(images_at(interval, area))
         msg = (
             f"已自动调整采样：间隔 {interval}s / 拼图 {grid[0]}×{grid[1]}，"
-            f"预计 {images_after} 张拼图（原设置约 {frames_before} 帧，超出上游稳定承受范围）"
+            f"预计 {images_after} 张拼图（原设置约 {frames_before} 帧，超出预算 FRAME_BUDGET={FRAME_BUDGET}/IMAGE_BUDGET={IMAGE_BUDGET}）"
         )
         logger.info(msg)
         self._update_status(task_id, TaskStatus.DOWNLOADING, message=msg)
@@ -639,6 +662,7 @@ class NoteGenerator:
                             save_quality=80,
                             frame_dir=frame_dir,
                             grid_dir=grid_dir,
+                            max_frames=FRAME_BUDGET,
                         ).run()
                     else:
                         logger.warning(f"视频文件不在本地（{vp}），视频理解降级为纯文本总结")
@@ -681,6 +705,7 @@ class NoteGenerator:
                         save_quality=80,
                         frame_dir=frame_dir,
                         grid_dir=grid_dir,
+                        max_frames=FRAME_BUDGET,
                     ).run()
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
@@ -976,6 +1001,11 @@ class NoteGenerator:
         # 流式空闲超时兜底，但三级阶梯串起来最坏可拖 20-30 分钟且 UI 零反馈，
         # 看起来像卡死。超过死线就明确失败并写清原因，交给用户重试（有缓存，重试很快）。
         deadline_seconds = float(os.getenv("SUMMARIZE_LADDER_DEADLINE_SECONDS", "1500"))
+        # 分批喂图后长视频一次总结可能有几十个批次的模型调用，固定 1500s 必然
+        # 误杀：按预计批次数线性放宽（每批 +240s；设 0 可关掉放宽回到固定死线）。
+        est_chunks = max(1, math.ceil(len(video_img_urls) / 20)) if video_img_urls else 1
+        per_chunk_seconds = float(os.getenv("SUMMARIZE_LADDER_DEADLINE_PER_CHUNK", "240"))
+        deadline_seconds += max(0, est_chunks - 1) * per_chunk_seconds
         ladder_started_at = time.monotonic()
         strategy_labels = {"full": "原样（含视频帧）", "thinned": "减帧", "text_only": "纯文本"}
         for idx, (strategy, imgs, shot) in enumerate(attempts):
@@ -1039,6 +1069,7 @@ class NoteGenerator:
                 save_quality=80,
                 frame_dir=frame_dir,
                 grid_dir=grid_dir,
+                max_frames=FRAME_BUDGET,
             ).run()
         except Exception as e:
             logger.warning(f"减帧重建失败: {e}")

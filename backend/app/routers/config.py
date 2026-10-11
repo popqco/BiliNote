@@ -208,8 +208,19 @@ def automation_status():
 
 @router.get("/automation/check_login")
 def automation_check_login():
-    """快速校验 B 站 Cookie（拉一次稍后再看），供「运行一轮」前置检查与「测试连接」用。"""
+    """快速校验 B 站 Cookie（拉一次稍后再看），供「运行一轮」前置检查与「测试连接」用。
+
+    先做一次节流的 Cookie 体检+自动续期（需要刷新且有能力刷新时当场续），
+    再拉稍后再看——这样「运行一轮」按钮就不容易被「正好该刷新了」卡住。
+    """
+    from app.services.bilibili_auth import ensure_cookie_fresh
     from app.services.watchlater import fetch_watchlater
+
+    # 体检失败不在这里拦截：让 fetch_watchlater 的真实报错说话（-101 等）
+    try:
+        ensure_cookie_fresh()
+    except Exception as e:
+        logger.warning(f"check_login 前的 Cookie 体检异常（忽略，继续拉稍后再看）：{e}")
 
     try:
         items = fetch_watchlater(ps=20, max_items=100)
