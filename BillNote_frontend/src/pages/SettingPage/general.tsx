@@ -1,5 +1,7 @@
 import toast from 'react-hot-toast'
+import { useEffect, useState } from 'react'
 import { Switch } from '@/components/ui/switch.tsx'
+import { Input } from '@/components/ui/input.tsx'
 import {
   Select,
   SelectContent,
@@ -8,6 +10,7 @@ import {
   SelectValue,
 } from '@/components/ui/select.tsx'
 import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
+import { get_task_config, save_task_config, type TaskConfig } from '@/services/taskConfig.ts'
 
 /**
  * 「通用」设置：放不属于模型/转写/下载/自动化/外观的全局开关。
@@ -20,7 +23,49 @@ import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
  * 第三项：阅读区平滑滚动 —— 滚轮惯性（Lenis），消除一格一顿的跳变；
  * 手机触摸端本来就是原生惯性，不受影响。手感三档即时切换、现场试选；
  * 拖动滚动键（左键 / Shift+左键）可按用户习惯互换。
+ * 第四项：生成性能与预算 —— 同时生成笔记数、视频理解抽帧/拼图预算、分批总结
+ * 并发。落盘后端 config/task_config.json（2026-10-11 起 UI 化，不再依赖环境变量），
+ * 预算即时生效（每个任务启动时读取），并发数热切换不打断在途任务。
  */
+// 每个数值字段的 UI 上下限（后端还有更宽的夹取兜底）
+const TASK_CFG_LIMITS: Record<keyof TaskConfig, [number, number]> = {
+  max_workers: [1, 8],
+  frame_budget: [100, 200000],
+  image_budget: [10, 50000],
+  summarize_batch_concurrency: [1, 4],
+}
+
+const TASK_CFG_META: Array<{
+  key: keyof TaskConfig
+  label: string
+  desc: string
+  suffix: string
+}> = [
+  {
+    key: 'max_workers',
+    label: '同时生成笔记数',
+    desc: '全应用同时处理几条笔记任务（下载/转写/总结可互相重叠）。批量导入与自动化也受此约束；调大同时吃更多带宽/显存，上游模型也可能限流。',
+    suffix: '条',
+  },
+  {
+    key: 'frame_budget',
+    label: '抽帧预算',
+    desc: '单个任务最多抽多少帧。超出时自动逐级升格（2×2→3×3→拉间隔）兜底。调高长视频保留更多细节，代价是截图占盘与处理时间。',
+    suffix: '帧',
+  },
+  {
+    key: 'image_budget',
+    label: '拼图预算',
+    desc: '单任务最多喂给模型多少张拼图。拼图按时间对齐分批发送（每批 ≤20 张），预算越大批次数越多、总结越慢越耗额度。',
+    suffix: '张',
+  },
+  {
+    key: 'summarize_batch_concurrency',
+    label: '分批总结并发',
+    desc: '长视频分批总结时同时发几批。调大提速明显，但上游并发限流时会多失败重试；1 = 旧的逐批串行。',
+    suffix: '批',
+  },
+]
 const General = () => {
   const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
   const setPollEnabled = useSystemStore(s => s.setClipboardPollEnabled)
@@ -34,6 +79,41 @@ const General = () => {
   const setSmoothTier = useSystemStore(s => s.setSmoothScrollTier)
   const dragScroll = useSystemStore(s => s.dragScrollEnabled)
   const setDragScroll = useSystemStore(s => s.setDragScrollEnabled)
+
+  const [taskCfg, setTaskCfg] = useState<TaskConfig | null>(null)
+  useEffect(() => {
+    get_task_config()
+      .then(setTaskCfg)
+      .catch(() => setTaskCfg(null))
+  }, [])
+
+  const commitTaskCfg = async (patch: Partial<TaskConfig>) => {
+    try {
+      const saved = await save_task_config(patch)
+      setTaskCfg(saved)
+      toast.success('已保存，后续任务即时生效')
+    } catch (e: any) {
+      toast.error(e?.msg || '保存失败')
+    }
+  }
+
+  // 数字输入失焦时提交：范围内且真的变了才发请求，非法值回滚当前生效值
+  const commitTaskCfgNumber = (key: keyof TaskConfig, raw: string) => {
+    if (!taskCfg) return
+    const [lo, hi] = TASK_CFG_LIMITS[key]
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n < lo || n > hi) {
+      toast.error(`请输入 ${lo}–${hi} 之间的整数`)
+      setTaskCfg({ ...taskCfg })
+      return
+    }
+    const v = Math.round(n)
+    if (v !== taskCfg[key]) {
+      commitTaskCfg({ [key]: v } as Partial<TaskConfig>)
+    } else {
+      setTaskCfg({ ...taskCfg })
+    }
+  }
 
   const handleIntervalChange = (v: string) => {
     const n = Number(v)
@@ -180,6 +260,41 @@ const General = () => {
             disabled={!smoothEnabled}
           />
         </div>
+      </div>
+
+      <div className="border-border mt-4 max-w-3xl rounded-lg border p-4">
+        <div className="text-sm font-medium">生成性能与预算</div>
+        <div className="text-muted-foreground mt-1 text-xs">
+          全局生效（手动生成、批量导入、自动化共用），失焦自动保存。预算默认是
+          2026-10-10 定版的激进档（4800 帧 / 1000 张拼图），免费额度紧张时可调回旧档
+          （如 2400/500）。
+        </div>
+        {TASK_CFG_META.map(item => (
+          <div key={item.key} className="mt-3 flex items-center justify-between gap-4">
+            <div className="text-sm">
+              {item.label}
+              <div className="text-muted-foreground text-xs">{item.desc}</div>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <Input
+                type="number"
+                className="w-24"
+                disabled={!taskCfg}
+                value={taskCfg ? String(taskCfg[item.key]) : ''}
+                min={TASK_CFG_LIMITS[item.key][0]}
+                max={TASK_CFG_LIMITS[item.key][1]}
+                onChange={e => {
+                  if (!taskCfg) return
+                  // 打字过程只更新本地态，失焦才提交
+                  const n = Number(e.target.value)
+                  if (Number.isFinite(n)) setTaskCfg({ ...taskCfg, [item.key]: n })
+                }}
+                onBlur={e => commitTaskCfgNumber(item.key, e.target.value)}
+              />
+              <span className="text-muted-foreground w-4 text-xs">{item.suffix}</span>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )

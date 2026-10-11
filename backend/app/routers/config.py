@@ -152,6 +152,29 @@ def update_proxy_config(data: ProxyConfigRequest):
     })
 
 
+# ---- 生成性能与预算（见 docs：设置→通用「生成性能与预算」）----
+
+class TaskConfigRequest(BaseModel):
+    config: dict
+
+
+@router.get("/task_config")
+def get_task_config():
+    from app.services.task_config_manager import TaskConfigManager
+    return R.success(data=TaskConfigManager().get_config())
+
+
+@router.post("/task_config")
+def update_task_config(data: TaskConfigRequest):
+    from app.services.task_config_manager import TaskConfigManager
+    from app.services.task_serial_executor import task_serial_executor
+
+    cfg = TaskConfigManager().update_config(data.config or {})
+    # 并发数热生效：新任务进新池，在途任务不打断
+    task_serial_executor.set_max_workers(cfg["max_workers"])
+    return R.success(data=cfg, msg="已保存")
+
+
 # ---- 自动化：稍后再看定期检查 + 通知（见 docs/adr/0004）----
 
 class AutomationConfigRequest(BaseModel):

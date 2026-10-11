@@ -3,22 +3,39 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Any, Callable, Dict, Optional
 
+from app.services.task_config_manager import TaskConfigManager
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 
 class ConcurrentTaskExecutor:
     """线程池并发执行任务。
 
-    max_workers 默认 2（TASK_MAX_WORKERS 可覆盖）：下载/转写（吃本地 GPU）与
-    LLM 总结（等网络）可以重叠，整批吞吐约提升 40%。同一视频的并发文件锁冲突
-    （WinError 32）由 VideoTaskLocks + 提交去重消除，不靠全局串行（见 ADR-0001）。
+    max_workers 默认 2（config/task_config.json 的 max_workers 或 TASK_MAX_WORKERS
+    可覆盖）：下载/转写（吃本地 GPU）与 LLM 总结（等网络）可以重叠，整批吞吐约
+    提升 40%。同一视频的并发文件锁冲突（WinError 32）由 VideoTaskLocks + 提交
+    去重消除，不靠全局串行（见 ADR-0001）。
     同时登记排队顺序，供前端展示「排队中 · 第 N 位」。
     """
 
     def __init__(self, max_workers: int | None = None):
-        self._max_workers = max_workers or int(os.getenv("TASK_MAX_WORKERS", "2"))
+        self._max_workers = max_workers or TaskConfigManager().get("max_workers")
         self._pool = ThreadPoolExecutor(max_workers=self._max_workers)
         self._lock = threading.Lock()
         self._queued: list[str] = []           # 尚未开始执行的 task_id，按提交顺序
         self._states: Dict[str, str] = {}      # task_id -> queued | running
+
+    def set_max_workers(self, n: int):
+        """热换线程池（设置页改动即时生效）：新提交进新池，已提交的在途任务
+        在旧池继续跑完，不打断。"""
+        n = max(1, min(16, int(n)))
+        if n == self._max_workers:
+            return
+        old, self._max_workers = self._pool, n
+        self._pool = ThreadPoolExecutor(max_workers=n)
+        old.shutdown(wait=False)
+        logger.info(f"任务并发数已切换：{self._max_workers} 个 worker")
 
     def run(self, fn: Callable[..., Any], *args: Any, task_id: Optional[str] = None, **kwargs: Any) -> Any:
         if task_id:
@@ -76,9 +93,17 @@ class VideoTaskLocks:
             return lock
 
 
-# 转写阶段全局信号量：GPU/显存只允许一个 whisper 实例并发（见 ADR-0001）。
+# 转写信号量（2026-10-11 分离）：本地 whisper 吃 GPU/显存，全局只允许一个实例；
+# 在线引擎（Groq 等）等网络不受此限，放开到 TRANSCRIBE_ONLINE_CONCURRENCY
+# （默认 2）——在线转写本可并发，之前被全局锁死是提速点之一（见 ADR-0001）。
 # 下载与 LLM 总结阶段不受影响，可与转写重叠。
-transcribe_semaphore = threading.Semaphore(1)
+LOCAL_TRANSCRIBER_TYPES = {"whisper", "mlx_whisper"}
+local_transcribe_semaphore = threading.Semaphore(1)
+online_transcribe_semaphore = threading.Semaphore(
+    max(1, int(os.getenv("TRANSCRIBE_ONLINE_CONCURRENCY", "2") or 2))
+)
+# 向后兼容导出（旧的 note.py 引用点语义 = 本地信号量）
+transcribe_semaphore = local_transcribe_semaphore
 
 # 保持向后兼容的导出名
 SerialTaskExecutor = ConcurrentTaskExecutor

@@ -1,5 +1,6 @@
+import uuid as _uuid
+
 from fastapi.encoders import jsonable_encoder
-from kombu import uuid
 
 from app.db.models.providers import Provider
 from app.db.provider_dao import (
@@ -31,6 +32,7 @@ class ProviderService:
             "api_format": row.get("api_format") or "chat",
             "api_key": row.get("api_key"),
             "extra_headers": row.get("extra_headers") or "{}",
+            "thinking_effort": row.get("thinking_effort") or "",
             "created_at": jsonable_encoder(row.get("created_at")),
         }
     @staticmethod
@@ -50,6 +52,7 @@ class ProviderService:
             "api_key":  ProviderService.mask_key(row.get("api_key")),
             # 自定义请求头不是机密（会话 ID/路由标记类），回显明文供编辑
             "extra_headers": row.get("extra_headers") or "{}",
+            "thinking_effort": row.get("thinking_effort") or "",
             "created_at": jsonable_encoder(row.get("created_at")),
         }
     @staticmethod
@@ -58,7 +61,7 @@ class ProviderService:
             return '*' * len(key)
         return key[:4] + '*' * (len(key) - 8) + key[-4:]
     @staticmethod
-    def add_provider( name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat", extra_headers: str = "{}"):
+    def add_provider( name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat", extra_headers: str = "{}", thinking_effort: str = ""):
         try:
             # 内置供应商（type='built-in'）只能由 seed 流程写入；API 创建一律落到 'custom'，
             # 否则历史上出现过批量伪内置脏数据
@@ -67,9 +70,9 @@ class ProviderService:
             existing = get_provider_by_name(name)
             if existing is not None:
                 raise ValueError(f'供应商名称已存在: {name}')
-            id = uuid().lower()
+            id = _uuid.uuid4().hex.lower()
             logo = 'custom'
-            return insert_provider(id, name, api_key, base_url, logo, type_, enabled, api_format=api_format or 'chat', extra_headers=extra_headers or '{}')
+            return insert_provider(id, name, api_key, base_url, logo, type_, enabled, api_format=api_format or 'chat', extra_headers=extra_headers or '{}', thinking_effort=thinking_effort or '')
         except Exception as  e:
             print('创建模式失败',e)
             raise
@@ -84,6 +87,7 @@ class ProviderService:
             "base_url": p.base_url,
             "api_format": (getattr(p, "api_format", None) or "chat"),
             "extra_headers": (getattr(p, "extra_headers", None) or "{}"),
+            "thinking_effort": (getattr(p, "thinking_effort", None) or ""),
             "enabled": p.enabled,
             "created_at": p.created_at,
         }
