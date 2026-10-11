@@ -55,6 +55,9 @@ const ProviderSchema = z.object({
         return false
       }
     }, '必须是 JSON 对象，如 {"x-opencode-session": "…"}'),
+  // 思考强度（reasoning effort）：'' = 不传该参数（默认）；推理模型可调
+  // low/medium/high，部分网关还支持 minimal/xhigh/max。上游不支持时后端自动去参重试。
+  thinkingEffort: z.string().optional(),
 })
 
 type ProviderFormValues = z.infer<typeof ProviderSchema>
@@ -105,6 +108,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       type: 'custom',
       apiFormat: 'chat',
       extraHeaders: '',
+      thinkingEffort: '',
     },
   })
   const filteredModelOptions = modelOptions.filter(model => {
@@ -130,6 +134,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           ...data,
           apiFormat: (data as Record<string, unknown>)?.apiFormat as string || 'chat',
           extraHeaders: (data as Record<string, unknown>)?.extraHeaders as string || '',
+          thinkingEffort: (data as Record<string, unknown>)?.thinkingEffort as string || '',
         })
         setIsBuiltIn(data.type === 'built-in')
       } else {
@@ -140,6 +145,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           type: 'custom',
           apiFormat: 'chat',
           extraHeaders: '',
+          thinkingEffort: '',
         })
         setIsBuiltIn(false)
       }
@@ -357,6 +363,42 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
                   <p className="mt-1 text-xs text-muted-foreground">
                     可选，JSON 对象。OpenCode Go 要求带 x-opencode-session
                     （缺失会报 400 MissingSessionID）；每个请求都会附带这些头。
+                  </p>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={providerForm.control}
+            name="thinkingEffort"
+            render={({ field }) => (
+              <FormItem className="flex items-center gap-4">
+                <FormLabel className="w-24 text-right shrink-0">思考强度</FormLabel>
+                <div className="flex-1">
+                  {/* Radix Select 不允许空串 value，用 'none' 哨兵表示「不设置」 */}
+                  <Select
+                    value={field.value || 'none'}
+                    onValueChange={v => field.onChange(v === 'none' ? '' : v)}
+                    disabled={isBuiltIn}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="不设置" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">不设置（默认）</SelectItem>
+                      <SelectItem value="minimal">minimal</SelectItem>
+                      <SelectItem value="low">low</SelectItem>
+                      <SelectItem value="medium">medium</SelectItem>
+                      <SelectItem value="high">high</SelectItem>
+                      <SelectItem value="xhigh">xhigh</SelectItem>
+                      <SelectItem value="max">max</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    推理模型的思考预算（reasoning effort）：档位越高答得越深但越慢、越耗额度；
+                    deepseek/glm 等推理模型空回时可调 low 试试。非推理模型不支持该参数时后端会自动去参重试，
+                    笔记生成、AI 问答、自动化都生效。
                   </p>
                 </div>
                 <FormMessage />

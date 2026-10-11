@@ -21,5 +21,8 @@ class Provider(Base):
     # OpenCode Go 等网关要求每会话带稳定会话头（MissingSessionID 400），通用
     # 通道比按 base_url 硬编码干净。存 JSON 串而非 dict：SQLite 列存文本最稳。
     extra_headers = Column(String, nullable=True, server_default="{}")
+    # 思考强度（reasoning effort）："" / NULL = 不传该参数（默认，行为不变）；
+    # low/medium/high/xhigh/max 等原样透传给上游，不支持的模型由调用端去参重试兜底。
+    thinking_effort = Column(String, nullable=True, server_default="")
     enabled = Column(Integer, default=1)
     created_at = Column(DateTime, server_default=func.now())

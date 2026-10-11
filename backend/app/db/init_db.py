@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 _SQLITE_COLUMN_MIGRATIONS = [
     ("providers", "api_format", "VARCHAR NOT NULL DEFAULT 'chat'"),
     ("providers", "extra_headers", "VARCHAR DEFAULT '{}'"),
+    ("providers", "thinking_effort", "VARCHAR DEFAULT ''"),
 ]
 
 

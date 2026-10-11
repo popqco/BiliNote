@@ -9,6 +9,8 @@ export interface IProvider {
   apiFormat?: string
   /** 自定义请求头（JSON 对象字符串），如 '{"x-opencode-session": "<uuid>"}' */
   extraHeaders?: string
+  /** 思考强度（reasoning effort）：''（不设置）| minimal | low | medium | high | xhigh | max */
+  thinkingEffort?: string
   enabled: number
 }
 export interface IResponse<T> {

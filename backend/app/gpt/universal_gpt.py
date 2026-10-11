@@ -6,6 +6,7 @@ import os
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,10 +51,13 @@ class CompletionStalled(RuntimeError):
 
 
 class UniversalGPT(GPT):
-    def __init__(self, client, model: str, temperature: float = 0.7):
+    def __init__(self, client, model: str, temperature: float = 0.7, thinking_effort: Optional[str] = None):
         self.client = client
         self.model = model
         self.temperature = temperature
+        # 供应商级思考强度（reasoning effort，2026-10-11）：None = 不传该参数，
+        # 行为与从前完全一致；非法档位由上游报错 + 去参重试兜底。
+        self.thinking_effort = (thinking_effort or "").strip().lower() or None
         self.screenshot = False
         self.link = False
         self.max_request_bytes = int(os.getenv("OPENAI_MAX_REQUEST_BYTES", str(45 * 1024 * 1024)))
@@ -249,6 +253,23 @@ class UniversalGPT(GPT):
             or "only the default" in raw
         )
 
+    @staticmethod
+    def _is_reasoning_unsupported_error(exc: Exception) -> bool:
+        """网关/模型不认识 reasoning_effort（非推理模型、旧网关、规范外档位
+        xhigh/max 被拒等）：报错会同时出现参数名与「未知参数」类字样。只匹配
+        这类显式拒绝，避免把「推理预算超限」等无关报错误判成参数错误。"""
+        raw = str(exc).lower()
+        has_param = "reasoning" in raw or "effort" in raw
+        rejection = (
+            "unknown parameter" in raw
+            or "unrecognized" in raw
+            or "unsupported" in raw
+            or "does not support" in raw
+            or "not supported" in raw
+            or "invalid" in raw
+        )
+        return has_param and rejection
+
     def _do_create(self, messages: list):
         """单次调用（流式）。
 
@@ -257,24 +278,31 @@ class UniversalGPT(GPT):
         一个字节都不返回——超过 Cloudflare ~100s 的源站超时后连接被直接掐断
         （RemoteDisconnected），且生成时间随提示长度膨胀到数分钟。流式下 SSE
         响应头立刻到达、token 持续流动，不会被边缘超时误杀。
-        如果模型拒绝自定义 temperature，就地去掉该参数再试一次（不消耗外层
-        重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
+        如果模型拒绝自定义 temperature 或 reasoning_effort，就地去掉对应参数
+        再试一次（不消耗外层重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
+        effort = self.thinking_effort
         try:
-            return self._stream_create(messages, temperature=self.temperature)
+            return self._stream_create(messages, temperature=self.temperature, reasoning_effort=effort)
         except Exception as exc:
             if self._is_temperature_unsupported_error(exc):
                 print(f"[universal_gpt] 模型 {self.model} 不支持自定义 temperature，改用默认值重试")
-                return self._stream_create(messages, temperature=None)
+                return self._stream_create(messages, temperature=None, reasoning_effort=effort)
+            if effort and self._is_reasoning_unsupported_error(exc):
+                print(f"[universal_gpt] 模型 {self.model} 不接受 reasoning_effort={effort}，去参重试")
+                return self._stream_create(messages, temperature=self.temperature, reasoning_effort=None)
             raise
 
-    def _stream_create(self, messages: list, temperature):
+    def _stream_create(self, messages: list, temperature, reasoning_effort: Optional[str] = None):
         from types import SimpleNamespace
-        stream = self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=messages,
             temperature=temperature,
             stream=True,
         )
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        stream = self.client.chat.completions.create(**kwargs)
         parts: list[str] = []
         finish_reason = None
         # 两道闸，单位秒，可用环境变量覆盖：
@@ -483,7 +511,23 @@ class UniversalGPT(GPT):
         if len(partials) > len(chunks):
             partials = []
 
-        for chunk in chunks[len(partials):]:
+        # 分批执行（2026-10-11 起支持并发，task_config 的 summarize_batch_concurrency
+        # 控制）：各批之间无依赖，只是最后 merge 需要汇总。结果严格按批次索引归位，
+        # checkpoint 只落「连续前缀」——乱序并发完成时断点续跑语义与旧串行格式完全兼容。
+        base = len(partials)
+        remaining = chunks[base:]
+        results: list = list(partials) + [None] * len(remaining)
+
+        def _save_progress():
+            if not (checkpoint_key and source_signature):
+                return
+            end = base
+            while end < len(results) and results[end] is not None:
+                end += 1
+            if end > base:
+                self._save_checkpoint(checkpoint_key, source_signature, results[:end], "summarize")
+
+        def _run_chunk(chunk) -> str:
             messages = self.create_messages(
                 chunk.segments,
                 title=source.title,
@@ -494,16 +538,39 @@ class UniversalGPT(GPT):
                 extras=source.extras,
                 chunk_note=self._batch_note(getattr(chunk, "meta", None)),
             )
-            try:
-                response = self._chat_completion_create(messages)
-            except Exception as exc:
-                if checkpoint_key and source_signature:
-                    self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
-                raise
+            response = self._chat_completion_create(messages)
+            return response.choices[0].message.content.strip()
 
-            partials.append(response.choices[0].message.content.strip())
-            if checkpoint_key and source_signature:
-                self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
+        # 函数内导入：本文件会被测试用 stub 模块独立加载，顶部 import app.services
+        # 会让单独运行时炸 ImportError（app stub 无 __path__）。
+        from app.services.task_config_manager import TaskConfigManager
+
+        concurrency = max(1, TaskConfigManager().get("summarize_batch_concurrency"))
+        if concurrency > 1 and len(remaining) > 1:
+            logger.info(f"分批总结并发执行：{len(remaining)} 批，并发 {concurrency}")
+            with ThreadPoolExecutor(max_workers=min(concurrency, len(remaining))) as pool:
+                futures = {pool.submit(_run_chunk, c): base + i for i, c in enumerate(remaining)}
+                try:
+                    for fut in as_completed(futures):
+                        results[futures[fut]] = fut.result()
+                        _save_progress()
+                except Exception:
+                    # 任一批失败：取消未开跑的余批，已完成进度落 checkpoint，
+                    # 抛错交给上层降级阶梯（full→grid2→grid3→thinned→text_only）
+                    for f in futures:
+                        f.cancel()
+                    _save_progress()
+                    raise
+        else:
+            for i, chunk in enumerate(remaining):
+                try:
+                    results[base + i] = _run_chunk(chunk)
+                except Exception:
+                    _save_progress()
+                    raise
+                _save_progress()
+
+        partials = [r for r in results if r is not None]
 
         if len(partials) == 1:
             if checkpoint_key:

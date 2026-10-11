@@ -251,6 +251,10 @@ class _Completions:
             # Responses 用 max_output_tokens，且预算含推理 token；
             # 取调用方原值即可，太小的兜底交给上游报错。
             body["max_output_tokens"] = kwargs["max_tokens"]
+        if kwargs.get("reasoning_effort"):
+            # 供应商级思考强度（2026-10-11）：chat 形态的 reasoning_effort
+            # 翻译成 Responses 的 reasoning.effort；上游不认时由调用端去参重试。
+            body["reasoning"] = {"effort": kwargs["reasoning_effort"]}
 
         if stream:
             return self._stream(body)

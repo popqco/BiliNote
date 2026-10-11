@@ -16,4 +16,7 @@ class ModelConfig:
     api_format: Optional[str] = None  # 供应商 API 协议："chat"（默认 Chat Completions）| "responses"（OpenAI Responses，仅部分网关支持）
     # 自定义请求头（JSON 字符串，如 {"x-opencode-session": "<uuid>"}），None/空 = 不附加
     extra_headers: Optional[str] = None
+    # 思考强度（reasoning effort）：''/None = 不传该参数；low/medium/high/xhigh/max
+    # 等原样透传，不支持的模型由调用端去参重试兜底
+    thinking_effort: Optional[str] = None
     created_at: Optional[datetime] = None  # 可选：创建时间（从 SQLite 自动生成）

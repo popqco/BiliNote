@@ -19,4 +19,8 @@ class GPTFactory:
             # Responses-only 供应商（OpenCode 系网关等）：chat/completions
             # 会 502，包一层协议适配，调用面保持 chat 形态不变。
             client = ResponsesCompatClient(client)
-        return UniversalGPT(client=client, model=config.model_name)
+        return UniversalGPT(
+            client=client,
+            model=config.model_name,
+            thinking_effort=getattr(config, "thinking_effort", None),
+        )

@@ -161,14 +161,19 @@ def _finalize_answer(answer: str, sources: list[dict]) -> list[dict]:
 def _call_llm(gpt, messages: list, use_tools: bool):
     """单轮 LLM 调用，带两层就地降级。
 
-    免费推理模型（muse-spark 等）常见两类不兼容：不接受自定义
-    temperature、不支持 function calling——直接把原始报错抛给用户只会
-    让人以为“模型坏了”。这里识别这两类报错后去掉对应参数重试一次；
-    去掉 tools 后模型不会再回工具调用，本轮直接当最终回答返回。
+    免费推理模型（muse-spark 等）常见三类不兼容：不接受自定义
+    temperature、不支持 function calling、不认识 reasoning_effort——直接把
+    原始报错抛给用户只会让人以为"模型坏了"。这里识别后去掉对应参数重试
+    一次；去掉 tools 后模型不会再回工具调用，本轮直接当最终回答返回。
     """
     kwargs = {"model": gpt.model, "messages": messages}
     if use_tools:
         kwargs["tools"] = TOOLS
+    # 供应商级思考强度（2026-10-11）：responses 格式由 responses_compat 翻成
+    # body["reasoning"]；chat 格式是 OpenAI SDK 原生参数。
+    effort = getattr(gpt, "thinking_effort", None)
+    if effort:
+        kwargs["reasoning_effort"] = effort
     try:
         return gpt.client.chat.completions.create(temperature=0.7, **kwargs)
     except Exception as exc:
@@ -178,6 +183,14 @@ def _call_llm(gpt, messages: list, use_tools: bool):
         ):
             logger.warning(f"模型 {gpt.model} 不支持自定义 temperature，去参重试")
             return gpt.client.chat.completions.create(**kwargs)
+        if effort and "reasoning" in raw and (
+            "unknown" in raw or "unrecognized" in raw or "unsupported" in raw
+            or "invalid" in raw or "does not support" in raw or "not supported" in raw
+        ):
+            logger.warning(f"模型 {gpt.model} 不接受 reasoning_effort={effort}，去参重试")
+            return gpt.client.chat.completions.create(
+                **{k: v for k, v in kwargs.items() if k != "reasoning_effort"}
+            )
         if use_tools and ("tool" in raw or "function" in raw):
             logger.warning(
                 f"模型 {gpt.model} 疑似不支持 tools（{str(exc)[:150]}），去工具重试"
@@ -242,6 +255,7 @@ def chat(
         name=provider["name"],
         api_format=provider.get("api_format") or "chat",
         extra_headers=provider.get("extra_headers"),
+        thinking_effort=provider.get("thinking_effort"),
     )
     gpt = GPTFactory.from_config(config)
 
