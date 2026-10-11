@@ -27,7 +27,7 @@ export default function VideoBanner({ audioMeta, videoUrl }: VideoBannerProps) {
   const originalUrl = videoUrl || audioMeta.raw_info?.webpage_url || ''
 
   return (
-    <div className="relative mb-4 overflow-hidden rounded-lg">
+    <div className="bg-slate-800 relative mb-4 overflow-hidden rounded-lg">
       {/* 模糊背景封面 */}
       <div className="absolute inset-0">
         {coverUrl ? (
@@ -40,6 +40,9 @@ export default function VideoBanner({ audioMeta, videoUrl }: VideoBannerProps) {
         ) : (
           <div className="h-full w-full bg-gradient-to-r from-blue-600 to-indigo-700" />
         )}
+        {/* 暗化兜底层（2026-10-11）：封面加载失败/偏亮时，白字曾直接压在浅底上看不清；
+            容器 bg-slate-800 + 本层保证任何情况下白字对比度 ≥ 4.5:1 */}
+        <div className="absolute inset-0 bg-black/30" />
       </div>
 
       {/* 内容层：手机窄屏上下排（封面 16:9 全宽 + 标题全显两行），桌面端保持左右排。 */}

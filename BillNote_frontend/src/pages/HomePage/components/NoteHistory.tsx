@@ -21,18 +21,20 @@ interface NoteHistoryProps {
   selectedId: string | null
 }
 
-/** 状态徽章：区分排队/解析/下载/转写/总结/完成/失败（而不是笼统的「等待中」） */
+/** 状态徽章：区分排队/解析/下载/转写/总结/完成/失败（而不是笼统的「等待中」）
+    2026-10-11 亮色对比度修复：白字压 500 系纯色只有 2~3:1（徽标是 10px 小字），
+    亮色改「100 浅底 + 700/800 深字」（≥4.5:1），暗色保留原纯色白字方案 */
 const STATUS_META: Record<string, { label: string; cls: string }> = {
-  SUCCESS: { label: '已完成', cls: 'bg-primary' },
-  FAILED: { label: '失败', cls: 'bg-red-500' },
-  FAILD: { label: '失败', cls: 'bg-red-500' },
-  PENDING: { label: '排队中', cls: 'bg-amber-500' },
-  PARSING: { label: '解析中', cls: 'bg-sky-500' },
-  DOWNLOADING: { label: '下载中', cls: 'bg-sky-500' },
-  TRANSCRIBING: { label: '转写中', cls: 'bg-sky-500' },
-  SUMMARIZING: { label: '总结中', cls: 'bg-violet-500' },
-  SAVING: { label: '保存中', cls: 'bg-sky-500' },
-  RUNNING: { label: '生成中', cls: 'bg-sky-500' },
+  SUCCESS: { label: '已完成', cls: 'bg-primary text-white' },
+  FAILED: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500 dark:text-white' },
+  FAILD: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500 dark:text-white' },
+  PENDING: { label: '排队中', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-500 dark:text-white' },
+  PARSING: { label: '解析中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
+  DOWNLOADING: { label: '下载中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
+  TRANSCRIBING: { label: '转写中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
+  SUMMARIZING: { label: '总结中', cls: 'bg-violet-100 text-violet-700 dark:bg-violet-500 dark:text-white' },
+  SAVING: { label: '保存中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
+  RUNNING: { label: '生成中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
 }
 
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
@@ -89,7 +91,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
       </div>
       <div className="flex flex-col gap-2 overflow-hidden">
         {filteredTasks.map(task => {
-          const meta = STATUS_META[task.status] || { label: '等待中', cls: 'bg-neutral-400' }
+          const meta = STATUS_META[task.status] || { label: '等待中', cls: 'bg-neutral-200 text-neutral-700 dark:bg-neutral-500 dark:text-white' }
           const statusLabel =
             task.status === 'PENDING' && task.queuePosition
               ? `${meta.label} · 第${task.queuePosition}位`
@@ -148,14 +150,14 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
               <div className="flex shrink-0 items-center gap-1">
                 <div
                   className={cn(
-                    'min-w-10 rounded p-0.5 px-1.5 text-center whitespace-nowrap text-white',
+                    'min-w-10 rounded p-0.5 px-1.5 text-center whitespace-nowrap',
                     meta.cls,
                   )}
                 >
                   {statusLabel}
                 </div>
                 {task.origin === 'auto' && (
-                  <div className="rounded border border-orange-300 bg-orange-50 p-0.5 px-1 whitespace-nowrap text-orange-500 dark:border-orange-500/40 dark:bg-orange-500/15 dark:text-orange-300">
+                  <div className="rounded border border-orange-300 bg-orange-50 p-0.5 px-1 whitespace-nowrap text-orange-700 dark:border-orange-500/40 dark:bg-orange-500/15 dark:text-orange-300">
                     自动
                   </div>
                 )}

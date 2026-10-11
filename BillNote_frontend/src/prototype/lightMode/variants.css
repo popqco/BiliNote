@@ -79,7 +79,9 @@
   --sidebar-border: oklch(0.87 0.02 152);
 }
 
-/* ========== D 奶咖低饱和（Things 3 暖灰 #F6F5F4 + 雾蓝主色） ========== */
+/* ========== D 奶咖低饱和（Things 3 暖灰 #F6F5F4 + 雾蓝主色）
+   主色 2026-10-11 二轮校准：0.56→0.52，修「主色当文字 4.34 / 白字按钮 4.44 /
+   提示条白字」三处 <4.5 对比度问题（现文字 5.16、白字 5.51） ========== */
 .lm-greige {
   --background: oklch(0.966 0.004 70);
   --foreground: oklch(0.27 0.01 70);
@@ -87,8 +89,8 @@
   --card-foreground: oklch(0.27 0.01 70);
   --popover: oklch(0.982 0.003 70);
   --popover-foreground: oklch(0.27 0.01 70);
-  --primary: oklch(0.56 0.085 258);
-  --primary-light: oklch(0.93 0.025 258);
+  --primary: oklch(0.52 0.09 258);
+  --primary-light: oklch(0.925 0.028 258);
   --secondary: oklch(0.938 0.006 70);
   --secondary-foreground: oklch(0.3 0.01 70);
   --muted: oklch(0.938 0.006 70);
@@ -97,7 +99,7 @@
   --accent-foreground: oklch(0.3 0.01 70);
   --border: oklch(0.898 0.008 70);
   --input: oklch(0.892 0.008 70);
-  --ring: oklch(0.56 0.085 258);
+  --ring: oklch(0.52 0.09 258);
   --sidebar: oklch(0.948 0.005 70);
   --sidebar-foreground: oklch(0.27 0.01 70);
   --sidebar-primary: oklch(0.3 0.01 70);

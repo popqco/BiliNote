@@ -80,8 +80,8 @@ export const lightVariants: LightVariant[] = [
       colorBgBase: '#f6f4f0',
       colorBgLayout: '#efede8',
       colorBorderSecondary: '#e0ddd5',
-      colorPrimary: '#5d7cb8',
-      colorLink: '#5d7cb8',
+      colorPrimary: '#476a9c',
+      colorLink: '#476a9c',
     },
   },
 ]
