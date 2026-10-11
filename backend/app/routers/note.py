@@ -1,6 +1,7 @@
 # app/routers/note.py
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -317,11 +318,19 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                         },
                     },
                 )
-                background_tasks.add_task(
-                    run_note_task, tid, it["video_url"], "bilibili", data.quality, data.link,
-                    data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                    data.extras, data.video_understanding, data.video_interval, data.grid_size, bv,
-                )
+                # 并发提交（2026-10-11）：原来 background_tasks 按注册顺序同步逐条
+                # 跑，上一条全部完成才开始下一条，批量导入实际完全串行（2 个 worker
+                # 只用得上 1 个）。改为每条一个 daemon 线程提交（与自动化调度器同款
+                # 范式），线程内经 video_task_locks + 任务池排队，并发度仍受
+                # max_workers 约束，不会把上游打爆。
+                threading.Thread(
+                    target=run_note_task,
+                    args=(tid, it["video_url"], "bilibili", data.quality, data.link,
+                          data.screenshot, data.model_name, data.provider_id, data.format, data.style,
+                          data.extras, data.video_understanding, data.video_interval, data.grid_size, bv),
+                    name=f"batch-{tid[:8]}",
+                    daemon=True,
+                ).start()
                 created.append({"task_id": tid, "video_id": bv, "title": it.get("title")})
             return R.success({"batch": True, "created": created, "count": len(created)})
 
