@@ -247,6 +247,16 @@ def chat(
     if not provider:
         raise ValueError(f"未找到模型供应商: {provider_id}")
 
+    # 思考强度是模型级属性（不同模型档位不同），从 models 行读取
+    from app.db.model_dao import get_model_by_provider_and_name
+    model_effort = None
+    try:
+        _model_row = get_model_by_provider_and_name(provider["id"], model_name or "")
+        if _model_row:
+            model_effort = _model_row.get("thinking_effort") or None
+    except Exception:
+        model_effort = None
+
     config = ModelConfig(
         api_key=provider["api_key"],
         base_url=provider["base_url"],
@@ -255,7 +265,7 @@ def chat(
         name=provider["name"],
         api_format=provider.get("api_format") or "chat",
         extra_headers=provider.get("extra_headers"),
-        thinking_effort=provider.get("thinking_effort"),
+        thinking_effort=model_effort,
     )
     gpt = GPTFactory.from_config(config)
 

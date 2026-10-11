@@ -12,6 +12,7 @@ def get_model_by_provider_and_name(provider_id: int, model_name: str):
                 "id": model.id,
                 "provider_id": model.provider_id,
                 "model_name": model.model_name,
+                "thinking_effort": getattr(model, "thinking_effort", None) or "",
                 "created_at": model.created_at,
             }
         return None
@@ -19,10 +20,14 @@ def get_model_by_provider_and_name(provider_id: int, model_name: str):
         db.close()
 
 
-def insert_model(provider_id: int, model_name: str):
+def insert_model(provider_id: int, model_name: str, thinking_effort: str = ""):
     db = next(get_db())
     try:
-        model = Model(provider_id=provider_id, model_name=model_name)
+        model = Model(
+            provider_id=provider_id,
+            model_name=model_name,
+            thinking_effort=thinking_effort or "",
+        )
         db.add(model)
         db.commit()
         db.refresh(model)
@@ -30,6 +35,7 @@ def insert_model(provider_id: int, model_name: str):
             "id": model.id,
             "provider_id": model.provider_id,
             "model_name": model.model_name,
+            "thinking_effort": model.thinking_effort or "",
             "created_at": model.created_at,
         }
     finally:
@@ -40,7 +46,28 @@ def get_models_by_provider(provider_id: int):
     db = next(get_db())
     try:
         models = db.query(Model).filter_by(provider_id=provider_id).all()
-        return [{"id": m.id, "model_name": m.model_name} for m in models]
+        return [
+            {
+                "id": m.id,
+                "model_name": m.model_name,
+                "thinking_effort": getattr(m, "thinking_effort", None) or "",
+            }
+            for m in models
+        ]
+    finally:
+        db.close()
+
+
+def update_model_effort(model_id: int, thinking_effort: str) -> bool:
+    """改单个模型的思考强度；'' = 不传参（默认）。返回行是否存在。"""
+    db = next(get_db())
+    try:
+        model = db.query(Model).filter_by(id=model_id).first()
+        if not model:
+            return False
+        model.thinking_effort = thinking_effort or ""
+        db.commit()
+        return True
     finally:
         db.close()
 
@@ -90,7 +117,7 @@ def get_all_models():
         # 只查询启用状态供应商的模型
         models = db.query(Model).join(Provider, Model.provider_id == Provider.id).filter(Provider.enabled == 1).all()
         return [
-            {"id": m.id, "provider_id": m.provider_id, "model_name": m.model_name}
+            {"id": m.id, "provider_id": m.provider_id, "model_name": m.model_name, "thinking_effort": getattr(m, "thinking_effort", None) or ""}
             for m in models
         ]
     finally:

@@ -36,10 +36,15 @@ export const fetchEnableModelById = async (id: string) => {
 }
 
 export async function addModel(
-  data: { provider_id: string; model_name: string },
+  data: { provider_id: string; model_name: string; thinking_effort?: string },
   opts?: CallOpts,
 ) {
   return request.post('/models', data, cfg(opts))
+}
+
+// 思考强度是模型级属性（不同模型档位不同），单独改某个模型的档位；'' = 不传参
+export const updateModelEffort = async (modelId: number, thinkingEffort: string) => {
+  return await request.post(`/models/${modelId}/update`, { thinking_effort: thinkingEffort })
 }
 
 export const fetchEnableModels = async () => {

@@ -21,8 +21,6 @@ class ProviderRequest(BaseModel):
     api_format: Optional[str] = None
     # 自定义请求头，JSON 对象字符串，如 '{"x-opencode-session": "<uuid>"}'
     extra_headers: Optional[str] = None
-    # 思考强度：''（不设置）| minimal | low | medium | high | xhigh | max
-    thinking_effort: Optional[str] = None
 
 class TestRequest(BaseModel):
     id: str
@@ -38,7 +36,6 @@ class ProviderUpdateRequest(BaseModel):
     enabled:Optional[int] = None
     api_format: Optional[str] = None
     extra_headers: Optional[str] = None
-    thinking_effort: Optional[str] = None
 
 @router.post("/add_provider")
 def add_provider(data: ProviderRequest):
@@ -51,7 +48,6 @@ def add_provider(data: ProviderRequest):
             type_=data.type,
             api_format=data.api_format or 'chat',
             extra_headers=data.extra_headers or '{}',
-            thinking_effort=data.thinking_effort or '',
         )
         return R.success(msg='添加模型供应商成功',data=res)
     except Exception as e:
@@ -87,7 +83,7 @@ def update_provider(data: ProviderUpdateRequest):
     try:
         if all(
             field is None
-            for field in [data.name, data.api_key, data.base_url, data.logo, data.type,data.enabled,data.api_format,data.extra_headers,data.thinking_effort]
+            for field in [data.name, data.api_key, data.base_url, data.logo, data.type,data.enabled,data.api_format,data.extra_headers]
         ):
             return R.error(msg='请至少填写一个参数')
 

@@ -49,10 +49,11 @@ def seed_default_providers():
         db.close()
 
 
-def insert_provider(id: str, name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat", extra_headers: str = "{}", thinking_effort: str = ""):
+def insert_provider(id: str, name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat", extra_headers: str = "{}"):
     db = next(get_db())
     try:
-        provider = Provider(id=id, name=name, api_key=api_key, base_url=base_url, logo=logo, type=type_, enabled=enabled, api_format=api_format or "chat", extra_headers=extra_headers or "{}", thinking_effort=thinking_effort or "")
+        # thinking_effort 已迁到模型级（models.thinking_effort），供应商列仅作迁移遗留保留
+        provider = Provider(id=id, name=name, api_key=api_key, base_url=base_url, logo=logo, type=type_, enabled=enabled, api_format=api_format or "chat", extra_headers=extra_headers or "{}")
         db.add(provider)
         db.commit()
         logger.info(f"Provider inserted successfully. id: {id}, name: {name}, type: {type_}, api_format: {provider.api_format}")

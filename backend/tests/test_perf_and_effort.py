@@ -5,6 +5,8 @@
 - _summarize_text 升格优先 5 级阶梯的级次顺序与中间级跳过；
 - summarize 分批并发：乱序完成按索引归位、checkpoint 只落连续前缀；
 - 供应商级 thinking_effort：chat 链路注入 + 去参重试、responses 映射、工厂透传；
+- thinking_effort 归属迁移（2026-10-11 定版）：改挂模型级——_get_gpt 只读 models 行、
+  供应商遗留值不回读、init_db 一次性把供应商值搬迁到其模型行；
 - ConcurrentTaskExecutor.set_max_workers 热换池；
 - VideoReader.run(reuse_frames=True) 跳过重新抽帧 + 并行拼图/编码保序。
 """
@@ -457,6 +459,85 @@ def test_gpt_factory_passes_thinking_effort():
     )
     gpt2 = GPTFactory().from_config(cfg2)
     assert getattr(gpt2, "thinking_effort", None) is None
+
+
+# ---------------------------------------------------------------------------
+# thinking_effort 归属：模型级（2026-10-11 从供应商级迁来）
+# ---------------------------------------------------------------------------
+
+def test_get_gpt_effort_comes_from_model_row(monkeypatch):
+    """_get_gpt 只读 models 行的思考强度，供应商 dict 上的遗留值不许再回读。"""
+    captured = {}
+
+    class _FakeGPT:
+        pass
+
+    class _FakeFactory:
+        def from_config(self, cfg):
+            captured["cfg"] = cfg
+            return _FakeGPT()
+
+    monkeypatch.setattr(
+        note_mod, "ProviderService",
+        SimpleNamespace(get_provider_by_id=lambda pid: {
+            "id": pid, "api_key": "sk", "base_url": "https://x/v1", "type": "custom",
+            "name": "p", "api_format": "chat", "extra_headers": "{}",
+            "thinking_effort": "SHOULD_NOT_BE_READ",
+        }),
+    )
+    monkeypatch.setattr(note_mod, "GPTFactory", _FakeFactory)
+    rows = {"model-x": {"id": 1, "model_name": "model-x", "thinking_effort": "xhigh"}}
+    monkeypatch.setattr(note_mod, "get_model_by_provider_and_name", lambda pid, name: rows.get(name))
+
+    g = NoteGenerator.__new__(NoteGenerator)
+    g._get_gpt("model-x", "pid-1")
+    assert captured["cfg"].thinking_effort == "xhigh"
+
+    # 模型行缺失（如模型已删）：按未设置处理，绝不落回供应商遗留值
+    monkeypatch.setattr(note_mod, "get_model_by_provider_and_name", lambda pid, name: None)
+    g._get_gpt("ghost", "pid-1")
+    assert captured["cfg"].thinking_effort is None
+
+
+def test_init_db_migrates_provider_effort_to_models(tmp_path):
+    """一次性搬迁：供应商 effort 复制到其全部模型行（模型已有值不覆盖），随后清空供应商列。"""
+    from sqlalchemy import create_engine, text
+
+    from app.db import init_db as init_db_mod
+
+    eng = create_engine(f"sqlite:///{(tmp_path / 'db.sqlite3').as_posix()}")
+    with eng.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE providers (id TEXT PRIMARY KEY, thinking_effort VARCHAR DEFAULT '')"
+        ))
+        conn.execute(text(
+            "CREATE TABLE models (id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id INTEGER, "
+            "model_name TEXT, thinking_effort VARCHAR DEFAULT '')"
+        ))
+        conn.execute(text(
+            "INSERT INTO providers (id, thinking_effort) VALUES ('p-open', 'low'), ('p-none', ''), ('123', 'high')"
+        ))
+        conn.execute(text(
+            "INSERT INTO models (provider_id, model_name, thinking_effort) VALUES "
+            "('p-open', 'm1', ''), ('p-open', 'm2', 'max'), ('p-none', 'm3', ''), (123, 'm4', '')"
+        ))
+
+    init_db_mod._migrate_provider_effort_to_models(eng)
+    # 幂等：再跑一次不得改写
+    init_db_mod._migrate_provider_effort_to_models(eng)
+
+    with eng.connect() as conn:
+        provider_vals = conn.execute(
+            text("SELECT id, thinking_effort FROM providers ORDER BY id")
+        ).fetchall()
+        model_vals = conn.execute(
+            text("SELECT model_name, thinking_effort FROM models ORDER BY id")
+        ).fetchall()
+    assert [tuple(r) for r in provider_vals] == [("123", ""), ("p-none", ""), ("p-open", "")]
+    # m2 已有值不覆盖；m4 靠字符串/数字双形态匹配拿到 'high'
+    assert [tuple(r) for r in model_vals] == [
+        ("m1", "low"), ("m2", "max"), ("m3", ""), ("m4", "high"),
+    ]
 
 
 # ---------------------------------------------------------------------------

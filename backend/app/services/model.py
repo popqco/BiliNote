@@ -1,6 +1,6 @@
 
 
-from app.db.model_dao import insert_model, get_all_models, get_model_by_provider_and_name, delete_model
+from app.db.model_dao import insert_model, get_all_models, get_model_by_provider_and_name, delete_model, update_model_effort
 from app.db.provider_dao import get_enabled_providers
 from app.enmus.exception import ProviderErrorEnum
 from app.exceptions.provider import ProviderError
@@ -72,6 +72,7 @@ class ModelService:
                 "id": model.get("id"),
                 "provider_id": model.get("provider_id"),
                 "model_name": model.get("model_name"),
+                "thinking_effort": model.get("thinking_effort", ""),
                 "created_at": model.get("created_at", None),  # 如果有created_at字段
             })
         return formatted
@@ -189,7 +190,7 @@ class ModelService:
             print(f"[{model_id}] <UNK>: {e}")
             return False
     @staticmethod
-    def add_new_model(provider_id: int, model_name: str) -> bool:
+    def add_new_model(provider_id: int, model_name: str, thinking_effort: str = "") -> bool:
         try:
             # 先查供应商是否存在
             provider = ProviderService.get_provider_by_id(provider_id)
@@ -203,12 +204,21 @@ class ModelService:
                 print(f"模型 {model_name} 已存在于供应商ID {provider_id} 下，跳过插入")
                 return False
 
-            # 插入模型
-            insert_model(provider_id=provider_id, model_name=model_name)
+            # 插入模型（思考强度为模型级属性，添加时可一并指定）
+            insert_model(provider_id=provider_id, model_name=model_name, thinking_effort=thinking_effort or "")
             print(f"模型 {model_name} 已成功添加到供应商ID {provider_id}")
             return True
         except Exception as e:
             print(f"添加模型失败: {e}")
+            return False
+
+    @staticmethod
+    def update_model_effort(model_id: int, thinking_effort: str) -> bool:
+        """改单个模型的思考强度（'' = 不传参）。"""
+        try:
+            return update_model_effort(model_id, thinking_effort or "")
+        except Exception as e:
+            print(f"[{model_id}] 更新思考强度失败: {e}")
             return False
 
 if __name__ == '__main__':

@@ -55,9 +55,6 @@ const ProviderSchema = z.object({
         return false
       }
     }, '必须是 JSON 对象，如 {"x-opencode-session": "…"}'),
-  // 思考强度（reasoning effort）：'' = 不传该参数（默认）；推理模型可调
-  // low/medium/high，部分网关还支持 minimal/xhigh/max。上游不支持时后端自动去参重试。
-  thinkingEffort: z.string().optional(),
 })
 
 type ProviderFormValues = z.infer<typeof ProviderSchema>
@@ -108,7 +105,6 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       type: 'custom',
       apiFormat: 'chat',
       extraHeaders: '',
-      thinkingEffort: '',
     },
   })
   const filteredModelOptions = modelOptions.filter(model => {
@@ -134,7 +130,6 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           ...data,
           apiFormat: (data as Record<string, unknown>)?.apiFormat as string || 'chat',
           extraHeaders: (data as Record<string, unknown>)?.extraHeaders as string || '',
-          thinkingEffort: (data as Record<string, unknown>)?.thinkingEffort as string || '',
         })
         setIsBuiltIn(data.type === 'built-in')
       } else {
@@ -145,7 +140,6 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           type: 'custom',
           apiFormat: 'chat',
           extraHeaders: '',
-          thinkingEffort: '',
         })
         setIsBuiltIn(false)
       }
@@ -167,9 +161,26 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       console.log('🔧 删除结果:', res)
 
       toast.success('删除成功')
+      // 重新拉取已启用模型，chip 列表立即反映删除
+      const fresh = await loadModelsById(id!)
+      if (fresh) setModels(fresh)
 
     } catch (e) {
       toast.error('删除异常')
+    }
+  }
+
+  // 改单个模型的思考强度（模型级属性：不同模型档位不同）。
+  // Radix Select 不允许空串 value，'none' 哨兵表示「不设置」（'' = 后端不传参）
+  const changeModelEffort = useModelStore(state => state.changeModelEffort)
+  const handleEffortChange = async (modelId: number, effort: string) => {
+    try {
+      await changeModelEffort(modelId, effort)
+      toast.success(effort ? `思考强度已设为 ${effort}` : '思考强度已改为不设置')
+      const fresh = await loadModelsById(id!)
+      if (fresh) setModels(fresh)
+    } catch {
+      toast.error('更新思考强度失败')
     }
   }
   // 测试连通性
@@ -371,42 +382,6 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           />
           <FormField
             control={providerForm.control}
-            name="thinkingEffort"
-            render={({ field }) => (
-              <FormItem className="flex items-center gap-4">
-                <FormLabel className="w-24 text-right shrink-0">思考强度</FormLabel>
-                <div className="flex-1">
-                  {/* Radix Select 不允许空串 value，用 'none' 哨兵表示「不设置」 */}
-                  <Select
-                    value={field.value || 'none'}
-                    onValueChange={v => field.onChange(v === 'none' ? '' : v)}
-                    disabled={isBuiltIn}
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder="不设置" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">不设置（默认）</SelectItem>
-                      <SelectItem value="minimal">minimal</SelectItem>
-                      <SelectItem value="low">low</SelectItem>
-                      <SelectItem value="medium">medium</SelectItem>
-                      <SelectItem value="high">high</SelectItem>
-                      <SelectItem value="xhigh">xhigh</SelectItem>
-                      <SelectItem value="max">max</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    推理模型的思考预算（reasoning effort）：档位越高答得越深但越慢、越耗额度；
-                    deepseek/glm 等推理模型空回时可调 low 试试。非推理模型不支持该参数时后端会自动去参重试，
-                    笔记生成、AI 问答、自动化都生效。
-                  </p>
-                </div>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={providerForm.control}
             name="type"
             render={({ field }) => (
               <FormItem className="flex items-center gap-4">
@@ -454,12 +429,33 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
         </div>
         <div className="flex flex-col gap-2">
           <span className="font-bold">已启用模型</span>
+          <p className="text-xs text-muted-foreground">
+            每个模型可单独设置思考强度（reasoning effort）：档位越高答得越深但越慢、越耗额度；不同模型的档位不同，所以挂在模型而不是供应商上。
+            非推理模型不支持该参数时后端会自动去参重试，笔记生成、AI 问答、自动化都生效。
+          </p>
           <div className={'flex flex-wrap gap-2 rounded  p-2.5'}>
             {
               models && models.map(model => {
                 return (
                   <span key={model.id} className="inline-flex items-center gap-1 rounded-md bg-blue-100 px-2 py-0.5 text-sm text-blue-700 dark:bg-blue-500/15 dark:text-blue-300">
                     {model.model_name}
+                    <Select
+                      value={((model as Record<string, unknown>).thinking_effort as string) || 'none'}
+                      onValueChange={v => handleEffortChange(model.id, v === 'none' ? '' : v)}
+                    >
+                      <SelectTrigger className="h-5 w-auto gap-0.5 border-none bg-blue-200/60 px-1.5 text-xs text-blue-800 shadow-none focus:ring-0 dark:bg-blue-500/25 dark:text-blue-200 [&>svg]:h-3 [&>svg]:w-3">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">默认（不传参）</SelectItem>
+                        <SelectItem value="minimal">minimal</SelectItem>
+                        <SelectItem value="low">low</SelectItem>
+                        <SelectItem value="medium">medium</SelectItem>
+                        <SelectItem value="high">high</SelectItem>
+                        <SelectItem value="xhigh">xhigh</SelectItem>
+                        <SelectItem value="max">max</SelectItem>
+                      </SelectContent>
+                    </Select>
                     <button type="button" onClick={() => handelDelete(model.id)} className="hover:text-blue-900">
                       <X className="h-3 w-3" />
                     </button>

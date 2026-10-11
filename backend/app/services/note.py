@@ -19,6 +19,7 @@ from app.downloaders.douyin_downloader import DouyinDownloader
 from app.downloaders.local_downloader import LocalDownloader
 from app.downloaders.youtube_downloader import YoutubeDownloader
 from app.db.video_task_dao import delete_task_by_video, insert_video_task
+from app.db.model_dao import get_model_by_provider_and_name
 from app.enmus.exception import NoteErrorEnum, ProviderErrorEnum
 from app.enmus.task_status_enums import TaskStatus
 from app.enmus.note_enums import DownloadQuality
@@ -390,6 +391,15 @@ class NoteGenerator:
             logger.error(f"[get_gpt] 未找到模型供应商: provider_id={provider_id}")
             raise ProviderError(code=ProviderErrorEnum.NOT_FOUND,message=ProviderErrorEnum.NOT_FOUND.message)
         logger.info(f"创建 GPT 实例 {provider_id}")
+        # 思考强度是模型级属性（不同模型档位不同），从 models 行读取；
+        # 查不到模型行（异常库等边缘场景）时按未设置处理，不传参。
+        model_effort = None
+        try:
+            _model_row = get_model_by_provider_and_name(provider["id"], model_name or "")
+            if _model_row:
+                model_effort = _model_row.get("thinking_effort") or None
+        except Exception as e:
+            logger.warning(f"[get_gpt] 读取模型思考强度失败（按未设置处理）: {e}")
         config = ModelConfig(
             api_key=provider["api_key"],
             base_url=provider["base_url"],
@@ -398,7 +408,7 @@ class NoteGenerator:
             name=provider["name"],
             api_format=provider.get("api_format") or "chat",
             extra_headers=provider.get("extra_headers"),
-            thinking_effort=provider.get("thinking_effort"),
+            thinking_effort=model_effort,
         )
         return GPTFactory().from_config(config)
 

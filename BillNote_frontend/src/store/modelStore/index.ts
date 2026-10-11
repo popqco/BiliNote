@@ -5,7 +5,8 @@ import {
   addModel,
   fetchEnableModels,
   fetchEnableModelById,
-  deleteModelById
+  deleteModelById,
+  updateModelEffort,
 } from '@/services/model'
 
 interface IModel {
@@ -21,6 +22,8 @@ interface IModelListItem {
   id: string
   provider_id: string
   model_name: string
+  /** 思考强度（模型级属性）：''（不设置，默认）| minimal | low | medium | high | xhigh | max */
+  thinking_effort?: string
   created_at?: string
 }
 
@@ -33,7 +36,8 @@ interface ModelStore {
   loadModels: (providerId: string) => Promise<void>
   loadModelsById: (providerId: string) => Promise<IModelListItem[]>
   loadEnabledModels: () => Promise<void>
-  addNewModel: (providerId: string, modelId: string) => Promise<void>
+  addNewModel: (providerId: string, modelId: string, thinkingEffort?: string) => Promise<void>
+  changeModelEffort: (modelId: number, effort: string) => Promise<void>
   deleteModel: (modelId: number) => Promise<void>
   setSelectedModel: (modelId: string) => void
   clearModels: () => void
@@ -97,9 +101,9 @@ export const useModelStore = create<ModelStore>()(
     },
 
     //  新增模型逻辑
-    addNewModel: async (providerId: string, modelId: string) => {
+    addNewModel: async (providerId: string, modelId: string, thinkingEffort?: string) => {
       try {
-        const res = await addModel({ provider_id: providerId, model_name: modelId })
+        const res = await addModel({ provider_id: providerId, model_name: modelId, thinking_effort: thinkingEffort || '' })
 
         if (res.code === 0) {
           console.log('新增模型成功:', modelId)
@@ -121,6 +125,16 @@ export const useModelStore = create<ModelStore>()(
         }
       } catch (error) {
         console.error('添加模型出错', error)
+      }
+    },
+
+    //  改单个模型的思考强度（调用方负责刷新列表）
+    changeModelEffort: async (modelId: number, effort: string) => {
+      try {
+        await updateModelEffort(modelId, effort)
+      } catch (error) {
+        console.error('更新思考强度失败', error)
+        throw error
       }
     },
 
