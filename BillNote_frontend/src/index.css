@@ -28,39 +28,43 @@ html, body, #root {
   background-color: oklch(0.6 0 0 / 70%);
 }
 
+/* 亮色配色（2026-10-11 定版）：原纯白底 oklch(1 0 0) 太刺眼，
+   改为「奶咖低饱和」——暖灰底 + 暖黑字 + 雾蓝主色（用户四方案评审选定）。
+   参考 Things 3 暖灰 / 莫兰迪低饱和；主色与全部前景文字经对比度校验 ≥4.5:1。
+   暗色 token 见下方 .dark，未受影响。 */
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: #3c77fb;
-  --primary-light: #e0eeff;
+  --background: oklch(0.966 0.004 70);
+  --foreground: oklch(0.27 0.01 70);
+  --card: oklch(0.978 0.003 70);
+  --card-foreground: oklch(0.27 0.01 70);
+  --popover: oklch(0.982 0.003 70);
+  --popover-foreground: oklch(0.27 0.01 70);
+  --primary: oklch(0.52 0.09 258);
+  --primary-light: oklch(0.925 0.028 258);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.938 0.006 70);
+  --secondary-foreground: oklch(0.3 0.01 70);
+  --muted: oklch(0.938 0.006 70);
+  --muted-foreground: oklch(0.5 0.012 70);
+  --accent: oklch(0.932 0.008 70);
+  --accent-foreground: oklch(0.3 0.01 70);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: var(    --color-neutral-200);
-  --input: oklch(0.922 0 0);
-  --ring: #096dd9;
+  --border: oklch(0.898 0.008 70);
+  --input: oklch(0.892 0.008 70);
+  --ring: oklch(0.52 0.09 258);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar: oklch(0.948 0.005 70);
+  --sidebar-foreground: oklch(0.27 0.01 70);
+  --sidebar-primary: oklch(0.3 0.01 70);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-accent: oklch(0.918 0.008 70);
+  --sidebar-accent-foreground: oklch(0.3 0.01 70);
+  --sidebar-border: oklch(0.888 0.008 70);
   --sidebar-ring: oklch(0.708 0 0);
 }
 
@@ -157,6 +161,54 @@ html, body, #root {
 .markdown-body img {
   max-width: 100%;
   height: auto;
+}
+
+/* Markdown 正文亮色适配（2026-10-11 随亮色改版）：github-markdown-light.css
+   把正文钉死在纯白底/冷灰代码块，这里跟随亮色变量换成暖灰；html:not(.dark)
+   限定只作用亮色，暗色沿用下方 .dark 覆盖（那边优先级更高，属性一一对应） */
+html:not(.dark) .markdown-body {
+  background-color: var(--card);
+  color: var(--foreground);
+}
+html:not(.dark) .markdown-body h1,
+html:not(.dark) .markdown-body h2,
+html:not(.dark) .markdown-body h3,
+html:not(.dark) .markdown-body h4,
+html:not(.dark) .markdown-body h5,
+html:not(.dark) .markdown-body h6 {
+  color: var(--foreground);
+  border-bottom-color: var(--border);
+}
+html:not(.dark) .markdown-body a {
+  color: var(--primary);
+}
+html:not(.dark) .markdown-body code,
+html:not(.dark) .markdown-body tt {
+  background-color: var(--muted);
+}
+html:not(.dark) .markdown-body pre {
+  background-color: var(--muted);
+}
+html:not(.dark) .markdown-body pre code {
+  background-color: transparent;
+}
+html:not(.dark) .markdown-body table tr {
+  background-color: var(--card);
+  border-top-color: var(--border);
+}
+html:not(.dark) .markdown-body table tr:nth-child(2n) {
+  background-color: var(--muted);
+}
+html:not(.dark) .markdown-body table th,
+html:not(.dark) .markdown-body table td {
+  border-color: var(--border);
+}
+html:not(.dark) .markdown-body blockquote {
+  color: var(--muted-foreground);
+  border-left-color: var(--border);
+}
+html:not(.dark) .markdown-body hr {
+  background-color: var(--border);
 }
 
 /* Markdown 正文暗色适配：项目只引入 github-markdown-light.css，
