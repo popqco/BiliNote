@@ -21,6 +21,7 @@ class ModelService:
             provider=provider["name"],
             model_name='',
             name=provider["name"],
+            extra_headers=provider.get("extra_headers"),
         )
 
     @staticmethod
@@ -168,6 +169,7 @@ class ModelService:
             base_url=provider.get('base_url'),
             model=model,
             api_format=provider.get('api_format') or 'chat',
+            extra_headers=provider.get('extra_headers'),
         )
         if ok:
             return True

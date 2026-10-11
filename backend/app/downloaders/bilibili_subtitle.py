@@ -16,19 +16,13 @@ AI 字幕需要登录态 cookie（SESSDATA）；通过 CookieConfigManager 注�
 
 from typing import List, Optional
 
-import requests
-
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.cookie_manager import CookieConfigManager
+from app.utils.bilibili_http import bilibili_session
 from app.utils.logger import get_logger
 from app.utils.url_parser import extract_video_id, extract_bilibili_p_number, resolve_bilibili_short_url
 
 logger = get_logger(__name__)
-
-UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
 
 class BilibiliSubtitleFetcher:
@@ -38,8 +32,8 @@ class BilibiliSubtitleFetcher:
         self._cookie = CookieConfigManager().get("bilibili") or ""
 
     def _headers(self) -> dict:
+        # UA 由 bilibili_session 预置；这里只放 Referer/Cookie 业务头
         h = {
-            "User-Agent": UA,
             "Referer": "https://www.bilibili.com",
         }
         if self._cookie:
@@ -52,7 +46,7 @@ class BilibiliSubtitleFetcher:
         if p is not None and p >= 1:
             params["p"] = p
         try:
-            resp = requests.get(url, params=params, headers=self._headers(), timeout=10)
+            resp = bilibili_session().get(url, params=params, headers=self._headers(), timeout=10)
             data = resp.json()
         except Exception as e:
             logger.warning(f"获取 cid 失败: {e}")
@@ -79,7 +73,7 @@ class BilibiliSubtitleFetcher:
     def _list_subtitles(self, bvid: str, cid: int) -> List[dict]:
         url = "https://api.bilibili.com/x/player/wbi/v2"
         try:
-            resp = requests.get(url, params={"bvid": bvid, "cid": cid}, headers=self._headers(), timeout=10)
+            resp = bilibili_session().get(url, params={"bvid": bvid, "cid": cid}, headers=self._headers(), timeout=10)
             data = resp.json()
         except Exception as e:
             logger.warning(f"获取字幕列表失败: {e}")
@@ -118,7 +112,7 @@ class BilibiliSubtitleFetcher:
 
     def _fetch_body(self, subtitle_url: str) -> Optional[List[dict]]:
         try:
-            resp = requests.get(self._normalize_url(subtitle_url), headers=self._headers(), timeout=15)
+            resp = bilibili_session().get(self._normalize_url(subtitle_url), headers=self._headers(), timeout=15)
             data = resp.json()
             return data.get("body") or []
         except Exception as e:

@@ -217,14 +217,22 @@ class AutomationScheduler:
             result = self.run_round_once(cfg)
         except Exception as e:
             logger.error(f"检查轮失败: {e}", exc_info=True)
-            self._update_state(running=False, phase="失败", last_error=str(e))
+            # 失败轮也更新轮次时间戳：此前只记成功轮，监控/告警按 last_round_ts
+            # 判断「多久没跑过」时会把持续失败误读成「很久没跑」（2026-10-11）
+            self._update_state(
+                running=False, phase="失败", last_error=str(e),
+                last_round_ts=time.time(), last_round_at=datetime.now().isoformat(),
+            )
             self._alert_round_failure(str(e))
             return {"error": str(e)}
         finally:
             self._running_round = False
             self._round_lock.release()
         if isinstance(result, dict) and result.get("error"):
-            self._update_state(running=False, phase="失败", last_error=result["error"])
+            self._update_state(
+                running=False, phase="失败", last_error=result["error"],
+                last_round_ts=time.time(), last_round_at=datetime.now().isoformat(),
+            )
             self._alert_round_failure(result["error"])
         return result
 

@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useProviderStore } from '@/store/providerStore'
 import { useEffect, useState } from 'react'
@@ -39,6 +40,21 @@ const ProviderSchema = z.object({
   // 供应商 API 协议：chat=Chat Completions（绝大多数 OpenAI 兼容供应商）；
   // responses=OpenAI Responses（OpenCode 系网关等只提供该协议，走 chat 会 502）
   apiFormat: z.string(),
+  // 自定义请求头（JSON 对象字符串）。OpenCode Go 等网关要求每会话带
+  // x-opencode-session（缺了 400 MissingSessionID），这类网关专属头从这里进
+  extraHeaders: z
+    .string()
+    .optional()
+    .refine(v => {
+      const s = (v || '').trim()
+      if (!s) return true
+      try {
+        const parsed = JSON.parse(s)
+        return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      } catch {
+        return false
+      }
+    }, '必须是 JSON 对象，如 {"x-opencode-session": "…"}'),
 })
 
 type ProviderFormValues = z.infer<typeof ProviderSchema>
@@ -88,6 +104,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       baseUrl: '',
       type: 'custom',
       apiFormat: 'chat',
+      extraHeaders: '',
     },
   })
   const filteredModelOptions = modelOptions.filter(model => {
@@ -112,6 +129,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
         providerForm.reset({
           ...data,
           apiFormat: (data as Record<string, unknown>)?.apiFormat as string || 'chat',
+          extraHeaders: (data as Record<string, unknown>)?.extraHeaders as string || '',
         })
         setIsBuiltIn(data.type === 'built-in')
       } else {
@@ -121,6 +139,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           baseUrl: '',
           type: 'custom',
           apiFormat: 'chat',
+          extraHeaders: '',
         })
         setIsBuiltIn(false)
       }
@@ -315,6 +334,29 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
                   <p className="mt-1 text-xs text-muted-foreground">
                     只提供 OpenAI Responses 接口的网关（如 OpenCode Free 本地代理）选
                     Responses，否则调用会报 502；普通 OpenAI 兼容供应商保持默认即可。
+                  </p>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={providerForm.control}
+            name="extraHeaders"
+            render={({ field }) => (
+              <FormItem className="flex items-start gap-4">
+                <FormLabel className="w-24 text-right shrink-0 pt-2">自定义请求头</FormLabel>
+                <div className="flex-1">
+                  <Textarea
+                    {...field}
+                    rows={3}
+                    className="font-mono text-xs"
+                    disabled={isBuiltIn}
+                    placeholder={'{"x-opencode-session": "…"}'}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    可选，JSON 对象。OpenCode Go 要求带 x-opencode-session
+                    （缺失会报 400 MissingSessionID）；每个请求都会附带这些头。
                   </p>
                 </div>
                 <FormMessage />

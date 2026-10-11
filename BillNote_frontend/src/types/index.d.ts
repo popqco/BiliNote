@@ -7,6 +7,8 @@ export interface IProvider {
   baseUrl: string
   /** 供应商 API 协议：'chat'（Chat Completions，默认）| 'responses'（OpenAI Responses，OpenCode 系网关等） */
   apiFormat?: string
+  /** 自定义请求头（JSON 对象字符串），如 '{"x-opencode-session": "<uuid>"}' */
+  extraHeaders?: string
   enabled: number
 }
 export interface IResponse<T> {

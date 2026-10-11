@@ -13,7 +13,7 @@ from typing import Optional
 
 from openai import OpenAI
 
-from app.services.proxy_config_manager import ProxyConfigManager
+from app.services.proxy_config_manager import ProxyConfigManager, proxy_reachable
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -35,10 +35,18 @@ def _is_loopback_base_url(base_url: Optional[str]) -> bool:
 
 
 def _effective_proxy_url(base_url: Optional[str]) -> Optional[str]:
-    """该 base_url 当前应使用的代理 URL；回环地址恒为 None（本地网关直连）。"""
+    """该 base_url 当前应使用的代理 URL；回环地址恒为 None（本地网关直连）。
+
+    2026-10-11 加固：代理配置了但进程已死（TCP 探活失败）时降级直连并告警，
+    而不是让每个远程供应商请求都撞 ProxyError 10061——代理活着时行为不变。
+    """
     if _is_loopback_base_url(base_url):
         return None
-    return ProxyConfigManager().get_proxy_url()
+    proxy_url = ProxyConfigManager().get_proxy_url()
+    if proxy_url and not proxy_reachable(proxy_url):
+        logger.warning(f"配置的代理不可达，本次调用降级直连：{proxy_url}")
+        return None
+    return proxy_url
 
 
 def build_openai_client(
@@ -48,6 +56,7 @@ def build_openai_client(
     key_label: str = "API Key",
     timeout: Optional[float] = None,
     use_system_proxy: bool = False,
+    default_headers: Optional[dict] = None,
 ) -> OpenAI:
     """构造 OpenAI 客户端。api_key 为空直接抛清晰错误；代理已配置则注入。
 
@@ -57,11 +66,17 @@ def build_openai_client(
     直连（防 Clash 对流式 LLM 请求假死）；置 True 则改用 trust_env=True，
     让 httpx 读系统（注册表）代理设置——转写这类一次性大请求在中转站拒绝
     直连（403）时需要这条退路，见 transcriber/groq.py。
+
+    ``default_headers``：每个请求（chat/responses/models/流式）都附带的头，
+    来自供应商的「自定义请求头」配置——如 OpenCode Go 要求的
+    x-opencode-session（缺了报 400 MissingSessionID）。
     """
     if not api_key or not str(api_key).strip():
         raise ValueError(f"{key_label} 未配置，请先在「设置」里填写后再使用")
 
     kwargs = {"api_key": str(api_key).strip(), "base_url": base_url}
+    if default_headers:
+        kwargs["default_headers"] = dict(default_headers)
     # 分形状超时：连接 20s 快速失败（防代理或 CDN 假死把 worker 挂满），读取阶段
     # 默认 180s 空闲上限——流式下分片持续重置计时，见 _shaped_timeout 注释。
     if timeout is None:

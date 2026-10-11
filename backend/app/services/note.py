@@ -396,6 +396,7 @@ class NoteGenerator:
             provider=provider["type"],
             name=provider["name"],
             api_format=provider.get("api_format") or "chat",
+            extra_headers=provider.get("extra_headers"),
         )
         return GPTFactory().from_config(config)
 

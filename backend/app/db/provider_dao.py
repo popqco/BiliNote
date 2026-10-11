@@ -49,10 +49,10 @@ def seed_default_providers():
         db.close()
 
 
-def insert_provider(id: str, name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat"):
+def insert_provider(id: str, name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1, api_format: str = "chat", extra_headers: str = "{}"):
     db = next(get_db())
     try:
-        provider = Provider(id=id, name=name, api_key=api_key, base_url=base_url, logo=logo, type=type_, enabled=enabled, api_format=api_format or "chat")
+        provider = Provider(id=id, name=name, api_key=api_key, base_url=base_url, logo=logo, type=type_, enabled=enabled, api_format=api_format or "chat", extra_headers=extra_headers or "{}")
         db.add(provider)
         db.commit()
         logger.info(f"Provider inserted successfully. id: {id}, name: {name}, type: {type_}, api_format: {provider.api_format}")

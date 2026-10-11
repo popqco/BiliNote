@@ -51,6 +51,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         baseUrl: item.base_url,
         type: item.type,
         apiFormat: (item as Record<string, unknown>).api_format as string | undefined,
+        extraHeaders: ((item as Record<string, unknown>).extra_headers as string | undefined) ?? '',
         enabled: item.enabled,
       }
 
@@ -61,6 +62,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
       api_key: provider.apiKey,
       base_url: provider.baseUrl,
       api_format: provider.apiFormat || 'chat',
+      extra_headers: provider.extraHeaders || '{}',
     }
     try {
       const res = await addProvider(payload)
@@ -87,6 +89,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
         api_key: merged.apiKey,
         base_url: merged.baseUrl,
         api_format: merged.apiFormat || 'chat',
+        extra_headers: merged.extraHeaders ?? '',
       }
       // 拦截器已解包：成功时直接返回 data 部分
       await updateProviderById(data)

@@ -12,6 +12,7 @@ logger = get_logger(__name__)
 # 值必须与对应 ORM 模型上的 server_default 保持一致。
 _SQLITE_COLUMN_MIGRATIONS = [
     ("providers", "api_format", "VARCHAR NOT NULL DEFAULT 'chat'"),
+    ("providers", "extra_headers", "VARCHAR DEFAULT '{}'"),
 ]
 
 

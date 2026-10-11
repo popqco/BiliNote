@@ -1,7 +1,32 @@
 import json
 import os
+import socket
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def proxy_reachable(url: str, timeout: float = 0.5) -> bool:
+    """TCP 探活：代理的 host:port 现在能不能连上。
+
+    2026-10-11 实测：本地代理进程退出后，env/显式配置里的 127.0.0.1:7892 变成
+    「连接被拒」，吃代理的每一类调用（requests trust_env、yt-dlp、httpx 显式
+    proxy）全部撞死；而 B 站等直连目标本是通的。探活是所有降级判断的地基。
+    """
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host or not port:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
 
 
 class ProxyConfigManager:
@@ -69,9 +94,18 @@ class ProxyConfigManager:
         方法，把 UI 配的代理 export 到环境变量，HF 下载就能复用同一个代理。
 
         大小写别名都写，覆盖不同库的读取习惯。
+
+        2026-10-11 加固：注入前先 TCP 探活，代理进程死了就不注入——否则
+        watchlater 这类 trust_env=True 的 requests、yt-dlp 全部撞死代理
+        （ProxyError 10061），而直连目标（B 站 API）本是通的。
         """
         url = self.get_proxy_url()
         if not url:
+            return None
+        if not proxy_reachable(url):
+            logger.error(
+                f"配置的代理不可达，本次跳过注入环境变量（trust_env 的 requests/yt-dlp 将直连）：{url}"
+            )
             return None
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
                     "http_proxy", "https_proxy", "all_proxy"):

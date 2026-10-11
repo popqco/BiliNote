@@ -22,6 +22,7 @@ from Cryptodome.Hash import SHA256
 from Cryptodome.PublicKey import RSA
 
 from app.services.cookie_manager import CookieConfigManager, extract_cookie_value
+from app.utils.bilibili_http import bilibili_session
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,11 +53,6 @@ JNrRuoEUXpabUzGB8QIDAQAB
 # refresh_csrf 藏在 correspond 页面的 <div id="1-name">xxx</div> 里
 _REFRESH_CSRF_RE = re.compile(r'id="1-name">([^<]+)<')
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-
 _TIMEOUT = 15
 # 「是否需要刷新」探测的节流间隔：cookie/info 是廉价 GET，但没必要每轮自动化都打
 _CHECK_THROTTLE_SECONDS = 12 * 3600
@@ -67,11 +63,9 @@ class BilibiliAuthError(RuntimeError):
 
 
 def _session() -> requests.Session:
-    # B 站是境内服务，直连即可；显式关掉 trust_env 防止后端进程被环境代理变量
-    # 污染后把 passport 请求也塞进代理（2026-10-11 回环 502 事故的教训）
-    s = requests.Session()
-    s.trust_env = False
-    s.headers.update({"User-Agent": UA, "Referer": "https://www.bilibili.com/"})
+    # B 站官方接口一律直连：bilibili_session 已关 trust_env（环境/系统代理免疫）
+    s = bilibili_session()
+    s.headers.update({"Referer": "https://www.bilibili.com/"})
     return s
 
 

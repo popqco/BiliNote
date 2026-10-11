@@ -28,6 +28,8 @@
 
 ### Fixed
 
+- **OpenCode Go 订阅 400 MissingSessionID**：OpenCode Go 官方要求每个请求带稳定 `x-opencode-session` 会话头（用于路由与 prompt 缓存），Claude Code/Codex/ZCode 等客户端原生携带，而 BiliNote 的裸 OpenAI SDK 调用不带 → 网关 400 拒绝。供应商新增「自定义请求头」配置（SQLite 自动迁移 + UI JSON 编辑），在 `build_openai_client(default_headers=...)` 一处注入，问答/笔记生成/连通性测试/模型列表全部生效；Responses 协议经适配层透传同样受益。OpenCode Go 供应商已在部署时配好该头
+- **本地代理进程死亡拖垮全链路（自动化 ProxyError 连败）**：应用启动时按 proxy.json 把代理注入进程环境变量（为 HuggingFace 下载），本地代理退出后 watchlater 等 trust_env=True 的 requests 与 yt-dlp 全部撞 ProxyError 10061（B 站直连本是通的）——2026-10-11 13:42 起自动化每 5 分钟连败。三层加固：① B 站 API 调用（稍后再看/元信息/字幕/passport 登录续期）统一走 `bilibili_session()` 强制直连永不代理；② 代理注入环境变量前先 TCP 探活，死代理不注入；③ LLM 客户端对配置代理探活失败时降级直连并告警。另：自动化失败轮现在也更新 last_round_ts（此前只记成功轮，监控时间线失真）
 - **本地网关被系统代理误伤（502 全灭）**：后端进程若被带 `HTTP_PROXY` 的终端拉起（继承环境变量），`ProxyConfigManager` 的环境回退会把「走代理」决策套到 `http://127.0.0.1:8787`（本地 muse 网关）上头——httpx 经系统代理访问回环地址被代理层回 502 空响应（curl 同路径却正常；2026-10-11 实锤：23:49 起全部总结失败、网关日志里没有请求）。现对回环 base_url（127.0.0.1/localhost/::1）跳过一切代理注入恒直连；远端地址仍保留环境变量回退语义（docker/CLI 场景不回归）
 
 - **转写引擎直连被拒（403）自动降级系统代理**：中转站对国内直连 IP 一律返回 403（同一密钥走系统代理即 200），而应用 OpenAI 客户端默认绕系统代理直连（防 Clash 对流式请求假死），转写被误伤——自动化每轮重试全部失败、列表持续显示「失败」。现遇 403 自动用系统代理重建客户端重试一次（转写是一次性大请求，无流式假死风险）

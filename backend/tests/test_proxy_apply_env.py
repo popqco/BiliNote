@@ -3,6 +3,7 @@ import os
 import pathlib
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "app" / "services" / "proxy_config_manager.py"
@@ -38,7 +39,9 @@ class TestApplyToEnv(unittest.TestCase):
     def test_enabled_proxy_exported_to_env(self):
         mgr = ProxyConfigManager(filepath=self.cfg_path)
         mgr.update_config(enabled=True, url="http://127.0.0.1:7890")
-        returned = mgr.apply_to_env()
+        # 探活打桩：单测环境里 7890 没有真代理在听
+        with patch.object(pcm, "proxy_reachable", return_value=True):
+            returned = mgr.apply_to_env()
         self.assertEqual(returned, "http://127.0.0.1:7890")
         # huggingface_hub / requests 只认环境变量，必须 export 进去
         for k in PROXY_ENV_KEYS:
@@ -55,9 +58,20 @@ class TestApplyToEnv(unittest.TestCase):
         # 没配文件代理但环境已有代理：apply 应把它补全到所有别名（含小写）
         os.environ["HTTPS_PROXY"] = "http://10.0.0.1:1080"
         mgr = ProxyConfigManager(filepath=self.cfg_path)
-        returned = mgr.apply_to_env()
+        with patch.object(pcm, "proxy_reachable", return_value=True):
+            returned = mgr.apply_to_env()
         self.assertEqual(returned, "http://10.0.0.1:1080")
         self.assertEqual(os.environ.get("https_proxy"), "http://10.0.0.1:1080")
+
+    def test_dead_proxy_skips_injection(self):
+        """代理不可达时不注入环境变量（2026-10-11：死代理曾把自动化拖成整轮 ProxyError）。"""
+        mgr = ProxyConfigManager(filepath=self.cfg_path)
+        mgr.update_config(enabled=True, url="http://127.0.0.1:9")
+        with patch.object(pcm, "proxy_reachable", return_value=False):
+            returned = mgr.apply_to_env()
+        self.assertIsNone(returned)
+        for k in PROXY_ENV_KEYS:
+            self.assertIsNone(os.environ.get(k), k)
 
 
 if __name__ == "__main__":

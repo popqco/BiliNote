@@ -11,27 +11,21 @@
 """
 from typing import Optional
 
-import requests
-
 from app.services.cookie_manager import CookieConfigManager
+from app.utils.bilibili_http import bilibili_session
 from app.utils.logger import get_logger
 from app.utils.url_parser import extract_video_id, normalize_video_url
 
 logger = get_logger(__name__)
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
-
 
 def _bilibili_api_meta(bvid: str) -> Optional[dict]:
-    headers = {"User-Agent": UA, "Referer": "https://www.bilibili.com"}
+    headers = {"Referer": "https://www.bilibili.com"}
     cookie = CookieConfigManager().get("bilibili") or ""
     if cookie:
         headers["Cookie"] = cookie
     try:
-        resp = requests.get(
+        resp = bilibili_session().get(
             "https://api.bilibili.com/x/web-interface/view",
             params={"bvid": bvid},
             headers=headers,

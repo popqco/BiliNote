@@ -7,17 +7,11 @@
 import re
 from typing import List
 
-import requests
-
 from app.services.cookie_manager import CookieConfigManager
+from app.utils.bilibili_http import bilibili_session
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-)
 
 _WATCHLATER_RE = re.compile(r"bilibili\.com/list/watchlater", re.I)
 _BV_RE = re.compile(r"BV[0-9A-Za-z]{10}")
@@ -45,7 +39,6 @@ def fetch_watchlater(ps: int = 20, max_items: int = 100) -> List[dict]:
         raise RuntimeError("未配置 B 站 Cookie：请到「设置 → 下载配置」填写后重试")
 
     headers = {
-        "User-Agent": UA,
         "Referer": "https://www.bilibili.com/list/watchlater",
         "Cookie": cookie,
     }
@@ -54,7 +47,7 @@ def fetch_watchlater(ps: int = 20, max_items: int = 100) -> List[dict]:
     page = 1
     while len(items) < max_items:
         try:
-            resp = requests.get(
+            resp = bilibili_session().get(
                 "https://api.bilibili.com/x/v2/history/toview/web",
                 params={"ps": ps, "pn": page},
                 headers=headers,

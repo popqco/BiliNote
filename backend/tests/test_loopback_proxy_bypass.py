@@ -72,12 +72,20 @@ class TestEffectiveProxyUrl(unittest.TestCase):
 
     def test_env_proxy_still_used_for_remote(self):
         """远端地址仍按原语义吃环境变量回退（docker/CLI 场景不回归）。"""
-        with patch.object(_oai, "ProxyConfigManager") as mgr:
+        with patch.object(_oai, "ProxyConfigManager") as mgr, \
+                patch.object(_oai, "proxy_reachable", return_value=True):
             mgr.return_value.get_proxy_url.return_value = "http://127.0.0.1:7892"
             self.assertEqual(
                 _effective_proxy_url("https://api.groq.com/openai/v1"),
                 "http://127.0.0.1:7892",
             )
+
+    def test_dead_proxy_falls_back_to_direct(self):
+        """代理探活失败 → 远端调用降级直连（2026-10-11：死代理拖垮全链路）。"""
+        with patch.object(_oai, "ProxyConfigManager") as mgr, \
+                patch.object(_oai, "proxy_reachable", return_value=False):
+            mgr.return_value.get_proxy_url.return_value = "http://127.0.0.1:7892"
+            self.assertIsNone(_effective_proxy_url("https://api.groq.com/openai/v1"))
 
     def test_loopback_short_circuits_before_manager(self):
         """回环短路发生在读配置/环境之前——ProxyConfigManager 不应被调用。"""
