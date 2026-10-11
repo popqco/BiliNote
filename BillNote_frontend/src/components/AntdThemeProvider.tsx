@@ -1,6 +1,8 @@
 import { ConfigProvider, theme } from 'antd'
 import { useTheme } from 'next-themes'
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+// 【原型】亮色配色评审（2026-10-11）：从 ?variant= 读 antd token 覆盖；评审后随原型目录一起回退
+import { getVariantFromUrl } from '@/prototype/lightMode/variants'
 
 /**
  * 让 antd / @ant-design/x 组件跟随项目的明暗主题。
@@ -13,10 +15,19 @@ import type { ReactNode } from 'react'
 export default function AntdThemeProvider({ children }: { children: ReactNode }) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
+  // 【原型】亮色配色评审：跟随 ?variant= 给 antd 换底色 token
+  const [, bump] = useState(0)
+  useEffect(() => {
+    const onChange = () => bump((n) => n + 1)
+    window.addEventListener('lm-variant-change', onChange)
+    return () => window.removeEventListener('lm-variant-change', onChange)
+  }, [])
+  const lmToken = !isDark ? getVariantFromUrl().antdToken : undefined
   return (
     <ConfigProvider
       theme={{
         algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
+        token: lmToken,
       }}
     >
       {children}
