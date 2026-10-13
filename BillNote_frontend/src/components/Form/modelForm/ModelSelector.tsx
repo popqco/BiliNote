@@ -13,9 +13,11 @@ import toast from 'react-hot-toast'
 
 interface ModelSelectorProps {
   providerId: string
+  /** 新模型保存成功后回调（父组件借此刷新「已启用模型」chip 列表） */
+  onSaved?: () => void
 }
 
-export function ModelSelector({ providerId }: ModelSelectorProps) {
+export function ModelSelector({ providerId, onSaved }: ModelSelectorProps) {
   const { models, loading, selectedModel, loadModels, setSelectedModel, addNewModel } =
     useModelStore()
   const [search, setSearch] = useState('')
@@ -42,6 +44,7 @@ export function ModelSelector({ providerId }: ModelSelectorProps) {
       setSubmitting(true)
       await addNewModel(providerId, selectedModel)
       toast.success('保存模型成功 🎉')
+      onSaved?.()
     } catch (error) {
       toast.error('保存失败')
     } finally {

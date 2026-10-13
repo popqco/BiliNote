@@ -615,3 +615,199 @@ def test_encode_images_to_base64_parallel_preserves_order(tmp_path):
     urls = reader.encode_images_to_base64(paths)
     assert urls == reader.encode_images_to_base64(list(reversed(paths)))[::-1]
     assert all(u.startswith("data:image/jpeg;base64,") for u in urls)
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-13 修复：截图丢失（缓存无视频时静默降级为纯文本）与标记残留清扫
+# ---------------------------------------------------------------------------
+
+from app.enmus.task_status_enums import TaskStatus  # noqa: E402
+from app.models.audio_model import AudioDownloadResult  # noqa: E402
+from app.utils.screenshot_marker import strip_screenshot_markers  # noqa: E402
+
+
+class _FakeDownloader:
+    """记录 download_video / download 调用；返回真实存在的小文件。"""
+
+    def __init__(self, video_path, audio_path):
+        self.video_calls = []
+        self.audio_calls = []
+        self._video = video_path
+        self._audio = audio_path
+
+    def download_video(self, url):
+        self.video_calls.append(url)
+        Path(self._video).write_bytes(b"v")
+        return str(self._video)
+
+    def download(self, video_url, quality, output_dir, need_video, **kw):
+        self.audio_calls.append(video_url)
+        Path(self._audio).write_bytes(b"a")
+        return AudioDownloadResult(
+            file_path=str(self._audio), title="t", duration=10, cover_url=None,
+            platform="youtube", video_id="vid1", raw_info={}, video_path=None,
+        )
+
+
+def _make_download_gen(tmp_path, monkeypatch):
+    g = NoteGenerator.__new__(NoteGenerator)
+    g.video_img_urls = []
+    monkeypatch.setattr(g, "_update_status", lambda *a, **kw: None)
+    monkeypatch.setattr(g, "_task_scratch_dirs", lambda tid: (str(tmp_path / "f"), str(tmp_path / "g")))
+    # _adapt_frame_budget 需要摸真视频时长，这里直通（阶梯本身有专门用例）
+    monkeypatch.setattr(NoteGenerator, "_adapt_frame_budget", lambda self, **kw: (kw["frame_interval"], list(kw["grid_size"])))
+    return g
+
+
+def _write_audio_cache(path, video_path=None, audio_file=None):
+    path.write_text(json.dumps({
+        "file_path": audio_file, "title": "旧标题", "duration": 9,
+        "cover_url": None, "platform": "youtube", "video_id": "vid1",
+        "raw_info": {}, "video_path": video_path,
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def _download_media_call(g, tmp_path, dl, vu, grid_size=(2, [2, 2])):
+    return g._download_media(
+        downloader=dl, video_url="https://y/vid1", quality="medium",
+        audio_cache_file=tmp_path / "task-1_audio.json", status_phase=TaskStatus.DOWNLOADING,
+        platform="youtube", output_path=str(tmp_path),
+        screenshot=False, video_understanding=vu,
+        video_interval=grid_size[0], grid_size=grid_size[1],
+        skip_audio=False, task_id="task-1",
+    )
+
+
+def test_cache_without_video_and_vu_on_falls_through_to_redownload(tmp_path, monkeypatch):
+    """2026-10-13 用户实锤根因：缓存无 video_path 而本次开了视频理解时，
+    旧代码静默降级纯文本 → 笔记无截图。现在必须重新下载视频补帧，音频文件还在则复用。"""
+    _FakeVideoReader.calls = []
+    monkeypatch.setattr(note_mod, "VideoReader", _FakeVideoReader)
+    monkeypatch.setattr(note_mod, "_frame_budget", lambda: 2400)
+    video_file = tmp_path / "v.mp4"
+    audio_file = tmp_path / "a.m4a"
+    audio_file.write_bytes(b"a")  # 音频文件还在 → 应复用不重下
+    _write_audio_cache(tmp_path / "task-1_audio.json", video_path=None, audio_file=str(audio_file))
+
+    dl = _FakeDownloader(video_file, tmp_path / "new.m4a")
+    g = _make_download_gen(tmp_path, monkeypatch)
+    audio = _download_media_call(g, tmp_path, dl, vu=True)
+
+    assert dl.video_calls == ["https://y/vid1"], "视频必须重新下载补帧"
+    assert _FakeVideoReader.calls, "必须重新抽帧"
+    assert g.video_img_urls == ["grid.jpg"]
+    assert dl.audio_calls == [], "音频文件在本地应复用缓存，不重新下载"
+    assert audio.video_path == str(video_file)
+    # 缓存回写后带上 video_path：以后的重试可直接复用这份视频
+    payload = json.loads((tmp_path / "task-1_audio.json").read_text(encoding="utf-8"))
+    assert payload["video_path"] == str(video_file)
+
+
+def test_cache_with_live_video_rebuilds_frames_without_download(tmp_path, monkeypatch):
+    """缓存带本地视频：沿用原行为，重建帧、零下载。"""
+    _FakeVideoReader.calls = []
+    monkeypatch.setattr(note_mod, "VideoReader", _FakeVideoReader)
+    monkeypatch.setattr(note_mod, "_frame_budget", lambda: 2400)
+    video_file = tmp_path / "old.mp4"
+    video_file.write_bytes(b"v")
+    _write_audio_cache(tmp_path / "task-1_audio.json", video_path=str(video_file), audio_file=None)
+
+    dl = _FakeDownloader(tmp_path / "never.mp4", tmp_path / "never.m4a")
+    g = _make_download_gen(tmp_path, monkeypatch)
+    audio = _download_media_call(g, tmp_path, dl, vu=True)
+
+    assert dl.video_calls == [] and dl.audio_calls == []
+    assert _FakeVideoReader.calls and g.video_img_urls == ["grid.jpg"]
+    assert audio.video_path == str(video_file)
+
+
+def test_cache_hit_with_vu_off_returns_without_downloads(tmp_path, monkeypatch):
+    """没开视频理解：命中缓存即返回（原行为不变）。"""
+    _FakeVideoReader.calls = []
+    monkeypatch.setattr(note_mod, "VideoReader", _FakeVideoReader)
+    _write_audio_cache(tmp_path / "task-1_audio.json", video_path=None, audio_file=None)
+
+    dl = _FakeDownloader(tmp_path / "never.mp4", tmp_path / "never.m4a")
+    g = _make_download_gen(tmp_path, monkeypatch)
+    audio = _download_media_call(g, tmp_path, dl, vu=False)
+
+    assert dl.video_calls == [] and dl.audio_calls == []
+    assert _FakeVideoReader.calls == []
+    assert audio.title == "旧标题"
+
+
+def test_post_process_strips_markers_when_no_video(tmp_path, monkeypatch):
+    """无本地视频（视频理解降级）时，正文里的 Screenshot 标记必须被清掉。"""
+    g = NoteGenerator.__new__(NoteGenerator)
+    md = "开头\n*Screenshot-[00:03]\n中间 *Screenshot-[01:20]* 尾\n内容"
+    out = g._post_process_markdown(
+        markdown=md, video_path=None, formats=["toc", "screenshot"],
+        audio_meta=SimpleNamespace(video_id="x"), platform="youtube",
+    )
+    assert "Screenshot-" not in out
+    assert "开头" in out and "中间" in out and "内容" in out
+
+
+def test_post_process_inserts_and_sweeps_leftover_markers(tmp_path, monkeypatch):
+    """有视频时正常插图；个别生成失败留下的标记也不许残留。"""
+    def _fake_generate(video_path, out_dir, ts, idx):
+        p = tmp_path / f"shot_{idx}.jpg"
+        p.write_bytes(b"x")
+        return str(p)
+
+    monkeypatch.setattr(note_mod, "generate_screenshot", _fake_generate)
+    monkeypatch.setattr(note_mod, "IMAGE_BASE_URL", "/static/screenshots")
+    g = NoteGenerator.__new__(NoteGenerator)
+    md = "甲 *Screenshot-[00:05] 乙 *Screenshot-[01:02] 丙"
+    out = g._post_process_markdown(
+        markdown=md, video_path=str(tmp_path / "v.mp4"), formats=["screenshot"],
+        audio_meta=SimpleNamespace(video_id="x"), platform="youtube",
+    )
+    assert "Screenshot-" not in out
+    assert out.count("![") == 2
+
+
+def test_strip_screenshot_markers_handles_forms():
+    src = "a *Screenshot-[00:03] b Screenshot-1:02 c *Screenshot-[100:52]* d"
+    out = strip_screenshot_markers(src)
+    assert "Screenshot" not in out
+    assert "a " in out and " b " in out and " c " in out and " d" in out
+
+
+def test_meta_prefetch_merges_title_when_missing(tmp_path, monkeypatch):
+    """提交后的元信息预取：文件无标题时抓取并合并。"""
+    from app.routers import note as note_router_mod
+
+    monkeypatch.setattr(note_mod, "NOTE_OUTPUT_DIR", tmp_path)
+    merged = []
+    monkeypatch.setattr(NoteGenerator, "_merge_status_meta", lambda self, tid, extra: merged.append((tid, extra)))
+    monkeypatch.setattr(
+        note_router_mod, "fetch_video_meta",
+        lambda url, platform: {"title": "抓到啦", "cover_url": "http://c/1.jpg",
+                               "video_id": "vid1", "duration": 60, "platform": platform},
+    )
+    (tmp_path / "t-1.status.json").write_text(json.dumps({"status": "PENDING"}), encoding="utf-8")
+    note_router_mod._spawn_meta_prefetch("t-1", "https://y/watch?v=1", "youtube")
+
+    deadline = time.time() + 3
+    while not merged and time.time() < deadline:
+        time.sleep(0.05)
+    assert merged, "预取线程应合并元信息"
+    tid, extra = merged[0]
+    assert tid == "t-1"
+    assert extra["audio_meta"]["title"] == "抓到啦"
+
+
+def test_meta_prefetch_skips_when_title_present(tmp_path, monkeypatch):
+    from app.routers import note as note_router_mod
+
+    monkeypatch.setattr(note_mod, "NOTE_OUTPUT_DIR", tmp_path)
+    called = []
+    monkeypatch.setattr(note_router_mod, "fetch_video_meta", lambda url, platform: called.append(url))
+    monkeypatch.setattr(NoteGenerator, "_merge_status_meta", lambda self, tid, extra: called.append(tid))
+    (tmp_path / "t-2.status.json").write_text(
+        json.dumps({"status": "PENDING", "audio_meta": {"title": "已有"}}), encoding="utf-8"
+    )
+    note_router_mod._spawn_meta_prefetch("t-2", "https://y/watch?v=2", "youtube")
+    time.sleep(0.4)
+    assert called == [], "已有标题不应再抓取/合并"

@@ -153,6 +153,12 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
     }
     load()
   }, [id])
+  // 删除/新增模型后重新拉取「已启用模型」chip 列表
+  const refreshEnabledModels = async () => {
+    const fresh = await loadModelsById(id!)
+    if (fresh) setModels(fresh)
+  }
+
   const handelDelete=async (modelId)=>{
     if (!window.confirm('确定要删除这个模型吗？')) return
 
@@ -162,8 +168,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
 
       toast.success('删除成功')
       // 重新拉取已启用模型，chip 列表立即反映删除
-      const fresh = await loadModelsById(id!)
-      if (fresh) setModels(fresh)
+      await refreshEnabledModels()
 
     } catch (e) {
       toast.error('删除异常')
@@ -177,8 +182,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
     try {
       await changeModelEffort(modelId, effort)
       toast.success(effort ? `思考强度已设为 ${effort}` : '思考强度已改为不设置')
-      const fresh = await loadModelsById(id!)
-      if (fresh) setModels(fresh)
+      await refreshEnabledModels()
     } catch {
       toast.error('更新思考强度失败')
     }
@@ -419,7 +423,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
             <h2 className={'font-bold'}>注意!</h2>
             <span>请确保已经保存供应商信息,以及通过测试连通性.</span>
           </div>
-          <ModelSelector providerId={id!} />
+          <ModelSelector providerId={id!} onSaved={refreshEnabledModels} />
 
           {/*<datalist id="model-options">*/}
           {/*  {modelOptions.map(model => (*/}

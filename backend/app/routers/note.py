@@ -44,6 +44,50 @@ from app.enmus.task_status_enums import TaskStatus
 router = APIRouter()
 
 
+def _spawn_meta_prefetch(task_id: str, video_url: str, platform: str) -> None:
+    """提交后后台轻量抓一次标题/封面并合并进状态文件。
+
+    手动单条提交不等元信息（yt-dlp 需数秒）也不阻塞响应：先写 PENDING 让卡片
+    出现，元信息到手后合并刷新（前端轮询 /tasks/recent 即可显示标题/封面）。
+    2026-10-13 用户实拍：手动粘贴的 YouTube 链接排了几十个，卡片全是
+    「未命名笔记」。任务真正开跑后拿到的元信息更权威，会自然覆盖这份。
+    """
+
+    def _work():
+        try:
+            # 已有标题（重试/复用历史任务）就不再抓
+            from app.services.note import NOTE_OUTPUT_DIR
+
+            sf = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
+            if sf.exists():
+                try:
+                    cur = json.loads(sf.read_text(encoding="utf-8"))
+                    if (cur.get("audio_meta") or {}).get("title"):
+                        return
+                except Exception:
+                    pass
+            meta = fetch_video_meta(video_url, platform) or {}
+            if not meta.get("title"):
+                return
+            NoteGenerator()._merge_status_meta(
+                task_id,
+                {
+                    "audio_meta": {
+                        "title": meta.get("title"),
+                        "cover_url": meta.get("cover_url"),
+                        "video_id": meta.get("video_id"),
+                        "duration": meta.get("duration"),
+                        "platform": platform,
+                    }
+                },
+            )
+            logger.info(f"已补排队任务元信息 {task_id[:8]} ← {str(meta.get('title'))[:32]}")
+        except Exception as e:
+            logger.debug(f"补排队任务元信息失败（忽略，任务开跑后仍会拿到）: {e}")
+
+    threading.Thread(target=_work, name=f"meta-{task_id[:8]}", daemon=True).start()
+
+
 class RecordRequest(BaseModel):
     # 删除任务的入参：至少给 task_id 或 video_id 之一。
     # 旧前端只传 {video_id, platform}，且 platform 可能是 undefined（整个键被
@@ -423,8 +467,22 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                 "model_name": data.model_name,
                 "provider_id": data.provider_id,
                 "style": data.style,
+                # 提交时的完整参数：状态文件落盘后，即使进程重启（reap 会把非终态
+                # 任务判失败）也能凭这份记录忠实重提，不必让用户重填表单。
+                "request": {
+                    "quality": str(data.quality),
+                    "link": bool(data.link),
+                    "screenshot": bool(data.screenshot),
+                    "format": list(data.format or []),
+                    "extras": data.extras,
+                    "video_understanding": bool(data.video_understanding),
+                    "video_interval": data.video_interval,
+                    "grid_size": list(data.grid_size or []),
+                },
             },
         )
+        # 排队卡片的标题/封面：后台轻量补一次（不阻塞提交）
+        _spawn_meta_prefetch(task_id, str(data.video_url), data.platform)
 
         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
         if data.prefetched_transcript:

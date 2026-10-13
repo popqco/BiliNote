@@ -58,6 +58,14 @@ def _ytdlp_meta(url: str, platform: str) -> Optional[dict]:
         # B 站 CDN 走直连（与下载器一致，见 bilibili_downloader._resolve_proxy_opt）
         from app.downloaders.bilibili_downloader import _resolve_proxy_opt
         opts["proxy"] = _resolve_proxy_opt()
+    else:
+        # YouTube 等平台国内必须走用户配置的代理（与 youtube_downloader 一致）；
+        # 之前这里不设代理 → 元信息抓取在国内直连必失败（2026-10-13 排队卡片
+        # 「未命名笔记」的元信息补偿依赖此路径）
+        from app.services.proxy_config_manager import ProxyConfigManager
+        proxy = ProxyConfigManager().get_proxy_url()
+        if proxy:
+            opts["proxy"] = proxy
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)

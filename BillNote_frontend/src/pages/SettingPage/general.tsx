@@ -1,5 +1,5 @@
 import toast from 'react-hot-toast'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Switch } from '@/components/ui/switch.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import {
@@ -81,37 +81,62 @@ const General = () => {
   const setDragScroll = useSystemStore(s => s.setDragScrollEnabled)
 
   const [taskCfg, setTaskCfg] = useState<TaskConfig | null>(null)
+  // 服务器确认过的基线。注意不能拿 taskCfg 当比较基准：onChange 打字过程
+  // 已把输入值同步进 taskCfg，失焦时 v !== taskCfg[key] 恒为 false，POST 永远
+  // 发不出去（2026-10-11 的"设置不保存"bug 根因）。savedRef 只被
+  // 加载成功 / 保存成功两条路径改写。
+  const savedRef = useRef<TaskConfig | null>(null)
+  // 提交序号：慢响应回来时若已有更新的提交，只用它更新基线，不回写编辑态
+  const commitSeqRef = useRef(0)
   useEffect(() => {
     get_task_config()
-      .then(setTaskCfg)
-      .catch(() => setTaskCfg(null))
+      .then(cfg => {
+        savedRef.current = cfg
+        setTaskCfg(cfg)
+      })
+      .catch(() => {
+        savedRef.current = null
+        setTaskCfg(null)
+      })
   }, [])
 
   const commitTaskCfg = async (patch: Partial<TaskConfig>) => {
+    const mySeq = ++commitSeqRef.current
     try {
       const saved = await save_task_config(patch)
-      setTaskCfg(saved)
+      savedRef.current = saved
+      if (mySeq === commitSeqRef.current) setTaskCfg(saved)
       toast.success('已保存，后续任务即时生效')
     } catch (e: any) {
       toast.error(e?.msg || '保存失败')
+      if (mySeq === commitSeqRef.current) {
+        setTaskCfg(savedRef.current ? { ...savedRef.current } : null)
+      }
     }
   }
 
-  // 数字输入失焦时提交：范围内且真的变了才发请求，非法值回滚当前生效值
+  // 数字输入失焦时提交：与「服务器基线」比较，范围内且真的变了才发请求，
+  // 非法值回滚到基线（而不是把脏本地值原样写回）
   const commitTaskCfgNumber = (key: keyof TaskConfig, raw: string) => {
-    if (!taskCfg) return
+    const base = savedRef.current
+    if (!base) return
     const [lo, hi] = TASK_CFG_LIMITS[key]
+    if (raw.trim() === '') {
+      // 清空后失焦：静默回滚到基线
+      setTaskCfg({ ...base })
+      return
+    }
     const n = Number(raw)
     if (!Number.isFinite(n) || n < lo || n > hi) {
       toast.error(`请输入 ${lo}–${hi} 之间的整数`)
-      setTaskCfg({ ...taskCfg })
+      setTaskCfg({ ...base })
       return
     }
     const v = Math.round(n)
-    if (v !== taskCfg[key]) {
+    if (v !== base[key]) {
       commitTaskCfg({ [key]: v } as Partial<TaskConfig>)
     } else {
-      setTaskCfg({ ...taskCfg })
+      setTaskCfg({ ...base })
     }
   }
 

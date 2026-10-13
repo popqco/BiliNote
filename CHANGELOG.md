@@ -15,6 +15,10 @@
 
 ### Fixed
 
+- **「生成性能与预算」改动不保存（2026-10-13 用户实锤）**：失焦提交拿输入值跟「已被 onChange 同步过的本地态」比较，`v !== taskCfg[key]` 恒为 false，POST 永远发不出去——离开页面再回来数值全部回弹。改为与服务器基线（savedRef）比较，提交序号防止慢响应回写覆盖新编辑，非法值真回滚到基线；顺带修复「已启用模型」chip 在添加新模型后不刷新
+- **开着视频理解却出无截图笔记（2026-10-13 用户实锤）**：命中音频缓存但缓存里没有可用本地视频（旧缓存来自未开视频理解的运行）时，旧逻辑静默降级纯文本 → 无帧、无截图，且 `*Screenshot-[mm:ss]` 标记原样残留在正文。现在改为继续走视频帧流程重新下载视频补帧（音频文件还在则复用、不重下）；截图插入环节无论整段跳过还是个别失败，标记一律兜底清扫
+- **排队卡片「未命名笔记」（2026-10-13 用户实拍）**：手动单条提交写 PENDING 时不含标题/封面，几十条排队卡全是未命名。现在提交后后台轻量预取元信息合并进状态文件（YouTube 元信息路径补上用户配置代理——此前不设代理国内必失败），排队几秒内即显示标题封面；提交参数同时落盘进状态文件，进程重启后（reap 会把非终态任务判失败）可凭记录忠实重提。顺手清掉 51 个旧版遗留的 `*_markdown.status.json` 僵尸文件
+
 - **kombu 隐性死依赖**：`services/provider.py` 顶部 `from kombu import uuid` 是 celery 时代遗留的唯一真实引用（其余 celery/redis/amqp/billiard/kombu/vine 零引用已从 requirements 移除、venv 已卸载），换标准库 `uuid4().hex`
 
 - **B 站扫码登录 + Cookie 自动续期**：手动粘贴的裸 SESSDATA 没有 refresh_token，B 站服务端一失效就只能反复手动更新——现在「设置 → 下载配置 → B 站」支持扫码登录（passport qrcode/generate+poll），登录即保存完整 Cookie 并拿到 refresh_token，此后每轮自动化/检查登录前按 B 站官方 Cookie 刷新协议自动续期（RSA-OAEP correspondPath → correspond 页取 refresh_csrf → cookie/refresh 换发 → confirm/refresh 作废旧凭据，12h 节流），登录态可无限保持。手动粘贴完整 Cookie 串时自动解析 `ac_time_value` 作为续期凭据；「检查并续期」按钮可手动触发。协议参考 bilibili-API-collect（原仓库已下架，取自备份仓库文档），零新增依赖（pycryptodomex/qrcode.react 均已在依赖内）

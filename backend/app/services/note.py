@@ -47,7 +47,7 @@ from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link, normalize_math_delimiters
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
-from app.utils.screenshot_marker import extract_screenshot_timestamps
+from app.utils.screenshot_marker import extract_screenshot_timestamps, strip_screenshot_markers
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import VideoReader
@@ -650,15 +650,20 @@ class NoteGenerator:
         need_video = bool(screenshot or video_understanding)
 
         # 已有缓存，尝试加载
+        cached_audio: Optional[AudioDownloadResult] = None
         if audio_cache_file.exists():
             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
-                audio = AudioDownloadResult(**data)
-                # 缓存命中也补齐视频帧：视频理解开着且本地视频文件还在时重新抽帧；
-                # 视频文件已不在则自动按纯文本继续（降级链的下限兜底）
+                cached_audio = AudioDownloadResult(**data)
+                # 缓存命中也补齐视频帧：视频理解开着且本地视频文件还在时重新抽帧。
+                # 缓存里没有可用视频（旧缓存来自未开视频理解的运行，或视频文件已
+                # 被清理）时**不再静默降级纯文本**——本次请求明确要了视频理解，
+                # 继续往下走 need_video 分支重新下载视频再抽帧。2026-10-13 实锤：
+                # 旧的"降级为纯文本总结"让开着视频理解的笔记一张截图都没有，
+                # 且 *Screenshot-[mm:ss] 标记原样残留正文。
                 if video_understanding and grid_size:
-                    vp = getattr(audio, "video_path", None)
+                    vp = getattr(cached_audio, "video_path", None)
                     if vp and Path(vp).exists():
                         frame_interval, grid_size = self._adapt_frame_budget(
                             video_path=Path(vp),
@@ -681,11 +686,15 @@ class NoteGenerator:
                             grid_dir=grid_dir,
                             max_frames=_frame_budget(),
                         ).run()
-                    else:
-                        logger.warning(f"视频文件不在本地（{vp}），视频理解降级为纯文本总结")
-                return audio
+                        return cached_audio
+                    logger.info(
+                        f"视频理解开启但缓存无可用本地视频（video_path={vp}），转入视频帧流程重新获取视频"
+                    )
+                else:
+                    return cached_audio
             except Exception as e:
                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
+                cached_audio = None
 
         # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
         if skip_audio and not need_video:
@@ -747,6 +756,21 @@ class NoteGenerator:
 
         # 下载音频
         try:
+            # 视频帧补取走后落到这里（缓存命中但缺视频的重试）：音频文件还在
+            # 就直接复用，不必把整条音轨再下一遍
+            if (
+                cached_audio is not None
+                and getattr(cached_audio, "file_path", None)
+                and Path(cached_audio.file_path).exists()
+            ):
+                logger.info("复用缓存音频文件，跳过音频下载")
+                audio = cached_audio
+                if self.video_path and Path(self.video_path).exists():
+                    audio.video_path = str(self.video_path)
+                audio_cache_file.write_text(
+                    json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                return audio
             logger.info("开始下载音频")
             audio = downloader.download(
                 video_url=video_url,
@@ -1140,11 +1164,18 @@ class NoteGenerator:
         :param platform: 平台标识，用于链接替换
         :return: 处理后的 Markdown 字符串
         """
-        if "screenshot" in formats and video_path:
-            try:
-                markdown = self._insert_screenshots(markdown, video_path)
-            except Exception as exc:
-                logger.warning("截图插入失败，跳过该步骤")
+        if "screenshot" in formats:
+            if video_path:
+                try:
+                    markdown = self._insert_screenshots(markdown, video_path)
+                except Exception as exc:
+                    logger.warning("截图插入失败，跳过该步骤")
+            else:
+                logger.warning("已选截图格式但没有可用的本地视频（视频理解被降级），移除未兑现的截图标记")
+            # 兜底清扫：无论插入是整段跳过还是个别失败，Screenshot 标记一律不许
+            # 留在正文（2026-10-13 用户实锤：抽帧没跑成时 6 行 *Screenshot-[mm:ss]
+            # 原样出现在笔记里且一张图都没有）
+            markdown = strip_screenshot_markers(markdown)
 
         if "link" in formats:
             try:
