@@ -44,7 +44,12 @@ from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
 from app.transcriber.segmented import SAFETY_FACTOR, FLOOR_BYTES_PER_SEC, cleanup_part_caches, probe_duration, transcribe_segmented
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
-from app.utils.note_helper import replace_content_markers, prepend_source_link, normalize_math_delimiters
+from app.utils.note_helper import (
+    cleanup_marker_residue,
+    normalize_math_delimiters,
+    prepend_source_link,
+    replace_content_markers,
+)
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 from app.utils.screenshot_marker import extract_screenshot_timestamps, strip_screenshot_markers
@@ -105,35 +110,6 @@ def _should_segment(audio_file: str, max_bytes: int) -> bool:
 
 
 import re as _re
-
-
-def _cleanup_marker_residue(markdown: str) -> str:
-    """清理截图/原片标记替换后残留的孤立星号。
-
-    模型有时把标记写成斜体包裹形态（`*Content-[02:10]*`），替换只消费标记
-    本体，留下包在外面的 `*`——用户看到的就是"标题后多个星号"、"段落之间
-    一行孤零零的 *"、"图片后挂个 *"（2026-10-05 用户截图实锤）。三条规则都很保守：
-    1. 整行只有 1-2 个星号加空白 → 整行删除（合法 markdown 不存在这种行）；
-    2. 含视频跳转链接的行尾跟 1-2 个星号 → 摘掉星号（闭合被标记打断的斜体）；
-    3. 图片链接行尾跟 1-2 个星号 → 摘掉星号但保留图片（截图必须留在正文里）。
-    """
-    if not markdown:
-        return markdown
-    # 整行孤星
-    cleaned = _re.sub(r"(?m)^[ \t]*\*{1,2}[ \t]*\r?\n", "", markdown)
-    # 行尾孤星（仅限含跳转链接的行，避免误伤正常斜体收尾）
-    cleaned = _re.sub(
-        r"(?m)^([^\n]*\[(?:原片|▶)?[^\]]*\]\([^\)]*(?:\?t=|/video/)[^\)]*\))\s*\*{1,2}[ \t]*$",
-        r"\1",
-        cleaned,
-    )
-    # 图片行尾孤星（图片本体保留，只摘残留星号）
-    cleaned = _re.sub(
-        r"(?m)^(!\[[^\]]*\]\([^\)]*\))[ \t]*\*{1,2}[ \t]*$",
-        r"\1",
-        cleaned,
-    )
-    return cleaned
 
 
 class NoteGenerator:
@@ -386,31 +362,7 @@ class NoteGenerator:
         :param provider_id: 供应商 ID
         :return: GPT 实例
         """
-        provider = ProviderService.get_provider_by_id(provider_id)
-        if not provider:
-            logger.error(f"[get_gpt] 未找到模型供应商: provider_id={provider_id}")
-            raise ProviderError(code=ProviderErrorEnum.NOT_FOUND,message=ProviderErrorEnum.NOT_FOUND.message)
-        logger.info(f"创建 GPT 实例 {provider_id}")
-        # 思考强度是模型级属性（不同模型档位不同），从 models 行读取；
-        # 查不到模型行（异常库等边缘场景）时按未设置处理，不传参。
-        model_effort = None
-        try:
-            _model_row = get_model_by_provider_and_name(provider["id"], model_name or "")
-            if _model_row:
-                model_effort = _model_row.get("thinking_effort") or None
-        except Exception as e:
-            logger.warning(f"[get_gpt] 读取模型思考强度失败（按未设置处理）: {e}")
-        config = ModelConfig(
-            api_key=provider["api_key"],
-            base_url=provider["base_url"],
-            model_name=model_name,
-            provider=provider["type"],
-            name=provider["name"],
-            api_format=provider.get("api_format") or "chat",
-            extra_headers=provider.get("extra_headers"),
-            thinking_effort=model_effort,
-        )
-        return GPTFactory().from_config(config)
+        return build_gpt(model_name, provider_id)
 
     def _get_downloader(self, platform: str) -> Downloader:
         """
@@ -1183,7 +1135,7 @@ class NoteGenerator:
             except Exception as e:
                 logger.warning(f"链接插入失败，跳过该步骤：{e}")
 
-        return _cleanup_marker_residue(markdown)
+        return cleanup_marker_residue(markdown)
 
     def _insert_screenshots(self, markdown: str, video_path: Path) -> str | None | Any:
         """
@@ -1241,6 +1193,105 @@ class NoteGenerator:
 
 
 # ---------------- 模块级辅助（供路由 / 自动化复用） ----------------
+
+def build_gpt(model_name: Optional[str], provider_id: Optional[str]) -> GPT:
+    """按供应商 + 模型名构建 GPT 实例（NoteGenerator 与存量笔记重整理共用）。"""
+    provider = ProviderService.get_provider_by_id(provider_id)
+    if not provider:
+        logger.error(f"[build_gpt] 未找到模型供应商: provider_id={provider_id}")
+        raise ProviderError(code=ProviderErrorEnum.NOT_FOUND, message=ProviderErrorEnum.NOT_FOUND.message)
+    logger.info(f"创建 GPT 实例 {provider_id}")
+    # 思考强度是模型级属性（不同模型档位不同），从 models 行读取；
+    # 查不到模型行（异常库等边缘场景）时按未设置处理，不传参。
+    model_effort = None
+    try:
+        _model_row = get_model_by_provider_and_name(provider["id"], model_name or "")
+        if _model_row:
+            model_effort = _model_row.get("thinking_effort") or None
+    except Exception as e:
+        logger.warning(f"[build_gpt] 读取模型思考强度失败（按未设置处理）: {e}")
+    config = ModelConfig(
+        api_key=provider["api_key"],
+        base_url=provider["base_url"],
+        model_name=model_name,
+        provider=provider["type"],
+        name=provider["name"],
+        api_format=provider.get("api_format") or "chat",
+        extra_headers=provider.get("extra_headers"),
+        thinking_effort=model_effort,
+    )
+    return GPTFactory().from_config(config)
+
+
+def refinalize_stored_note(
+    task_id: str,
+    model_name: Optional[str] = None,
+    provider_id: Optional[str] = None,
+    formats: Optional[list] = None,
+) -> dict:
+    """对已生成的笔记重跑「合并后整理」：摘掉目录/总结残留 → 重建目录 → 重写 AI 总结。
+
+    只读结果文件 + 一次纯文本模型调用（不重新下载/转写/喂图），几秒到一分钟完成。
+    用于把存量笔记修复到新版整理逻辑（2026-10-14：合并阶段产出的
+    「本段/本批」堆叠式总结与目录残留，无需让用户重新生成整条笔记）。
+    默认沿用结果文件里记录的模型；调用方可显式指定（原模型不可用时换用可用模型）。
+    """
+    task_id = (task_id or "").strip()
+    result_path = NOTE_OUTPUT_DIR / f"{task_id}.json"
+    if not task_id or not result_path.exists():
+        raise FileNotFoundError(f"结果文件不存在：{task_id}.json")
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+    md = data.get("markdown") or ""
+    if isinstance(md, list):  # 兼容多版本文档形态
+        md = ((md[0] or {}).get("content", "") if md else "")
+    if not isinstance(md, str) or not md.strip():
+        raise FileNotFoundError("结果文件里没有可整理的 markdown 正文")
+
+    fmt = list(formats or data.get("format") or [])
+    if not fmt:
+        # 老结果文件没记录格式：按正文实际带没带这两段推断
+        if _re.search(r"(?m)^#{1,6}\s*目录", md):
+            fmt.append("toc")
+        if _re.search(r"(?m)^#{1,6}\s*AI\s*总结", md):
+            fmt.append("summary")
+
+    model = model_name or data.get("model_name")
+    provider = provider_id or data.get("provider_id")
+    if not model or not provider:
+        raise ValueError("结果文件缺少 model_name/provider_id，需在请求里显式提供")
+
+    gpt = build_gpt(model, provider)
+    gpt._format = fmt
+    # 是否保留 *Content 标记形态取决于正文是否已有跳转链接（存量笔记都已转换过）
+    gpt.link = "[原片 @" in md
+    new_md = gpt.finalize_note(md) if hasattr(gpt, "finalize_note") else md
+    new_md = cleanup_marker_residue(normalize_math_delimiters(new_md) or new_md)
+
+    data["markdown"] = new_md
+    tmp = result_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(result_path)
+    # markdown 缓存文件同步（与生成流程落盘的位置一致）
+    (NOTE_OUTPUT_DIR / f"{task_id}_markdown.md").write_text(new_md, encoding="utf-8")
+    # 触碰状态文件 mtime：前端 /tasks/recent 同步钩子的 updated_at 靠它，
+    # 不触碰的话内容变了前端也感知不到、要等下次别的事件才会刷新
+    status_path = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
+    if status_path.exists():
+        try:
+            os.utime(status_path, None)
+        except OSError:
+            pass
+    logger.info(
+        f"存量笔记重整理完成 (task_id={task_id}, formats={fmt}, {len(md)} → {len(new_md)} 字符)"
+    )
+    return {
+        "task_id": task_id,
+        "model_name": model,
+        "provider_id": provider,
+        "formats": fmt,
+        "markdown": new_md,
+    }
+
 
 def find_active_task_by_video(video_id: str) -> Optional[dict]:
     """查找同一 video_id 的未终态任务（提交去重用）。

@@ -20,7 +20,7 @@ import rehypeSlug from 'rehype-slug'
 import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
-import { normalizeMathDelimiters } from '@/lib/utils'
+import { normalizeMathDelimiters, stripScreenshotImages, extractTocSection } from '@/lib/utils'
 import { useTaskStore } from '@/store/taskStore'
 import { useChatJumpStore, type SourceJumpTarget } from '@/store/chatStore'
 import { noteStyles } from '@/constant/note.ts'
@@ -29,6 +29,7 @@ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import { useSmoothScroll } from '@/hooks/useSmoothScroll'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
+import TocPanel from '@/pages/HomePage/components/TocPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
 import { toPng } from 'html-to-image'
 import PosterCard, { type PosterData } from '@/pages/HomePage/components/PosterCard.tsx'
@@ -433,6 +434,23 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
   const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
+
+  // 正文预处理：隐藏截图时在 markdown 层摘掉截图标记（只靠 CSS 隐藏会留下
+  // 截图外层的大边距，全篇莫名空行）；来源链接行不展示。
+  const renderedMarkdown = useMemo(
+    () =>
+      normalizeMathDelimiters(
+        (showScreenshots || exportForceShow
+          ? selectedContent
+          : stripScreenshotImages(selectedContent)
+        ).replace(/^>\s*来源链接：[^\n]*\n*/m, ''),
+      ),
+    [selectedContent, showScreenshots, exportForceShow],
+  )
+
+  // 「## 目录」段抽出来单独渲染成紧凑网格（2026-10-14 用户反馈：几十条目录
+  // 单列铺满整屏）。items 为 null 时按原样渲染整个 markdown。
+  const tocSection = useMemo(() => extractTocSection(renderedMarkdown), [renderedMarkdown])
 
   // 多版本内容处理
   useEffect(() => {
@@ -1084,17 +1102,22 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                   />
                 </div>
                 <div className={'markdown-body w-full px-2'}>
+                  {/* 目录段抽出来单独渲染成紧凑网格（可点击跳转）；正文里不再
+                      重复渲染原目录段——历史笔记存在 IndexedDB 里是 \(...\) /
+                      \[...\] 旧写法，渲染时归一化成 remark-math 能识别的
+                      $ / $$ 即可显示，不用做数据迁移（新笔记后端入库时已归一化）。
+                      隐藏截图查看时直接在 markdown 层摘掉截图标记——只靠 CSS
+                      隐藏会留下截图外层的大边距，笔记里全是莫名空行
+                      （2026-10-14 用户反馈）。 */}
+                  {tocSection.items && <TocPanel items={tocSection.items} />}
                   <ReactMarkdown
                     remarkPlugins={remarkPlugins}
                     rehypePlugins={rehypePlugins}
                     components={markdownComponents}
                   >
-                    {/* 历史笔记存在 IndexedDB 里是 \(...\) / \[...\] 旧写法，
-                        渲染时归一化成 remark-math 能识别的 $ / $$ 即可显示，
-                        不用做数据迁移（新笔记后端入库时已归一化） */}
-                    {normalizeMathDelimiters(
-                      selectedContent.replace(/^>\s*来源链接：[^\n]*\n*/m, ''),
-                    )}
+                    {tocSection.items
+                      ? `${tocSection.before}\n\n${tocSection.after}`
+                      : renderedMarkdown}
                   </ReactMarkdown>
                 </div>
                 </div>

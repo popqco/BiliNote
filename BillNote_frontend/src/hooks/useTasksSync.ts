@@ -21,6 +21,11 @@ const DAY_MS = 24 * 3600 * 1000
 const rankForDedupe = (t: any) =>
   ACTIVE.includes(t?.status) ? 2 : t?.status === 'SUCCESS' ? 1 : 0
 
+/** 每个任务「上次见到的后端 updated_at」（会话级）。
+ *  外部（API / 自动化 / MCP）重新生成完成后，任务状态可能仍是 SUCCESS，
+ *  仅靠状态比较无法发现内容已更新——用 updated_at 变化当内容水位线。 */
+const seenUpdatedAt = new Map<string, number>()
+
 /**
  * 清理「后端已按视频去重隐藏」的本地卡（仅本地移除，不删后端文件）：
  * 失败风暴时代同一视频留下几十条 FAILED 状态文件，/tasks/recent 以前全量
@@ -114,6 +119,12 @@ export const useTasksSync = (interval = 30000) => {
       for (const bt of list) {
         if (stopped || !bt?.task_id || !fresh(bt)) continue
         const local = useTaskStore.getState().tasks.find(t => t.id === bt.task_id)
+        // 内容水位线：后端 updated_at 变化 = 这条任务被重跑/改写过（无论谁触发）。
+        // 首次见到只记录基线，不触发拉取（避免每次启动把历史结果全拉一遍）。
+        const upd = Number(bt.updated_at || 0)
+        const prevUpd = seenUpdatedAt.get(bt.task_id)
+        const contentChanged = prevUpd !== undefined && prevUpd !== upd
+        seenUpdatedAt.set(bt.task_id, upd)
 
         if (!local) {
           if (ACTIVE.includes(bt.status)) {
@@ -126,7 +137,35 @@ export const useTasksSync = (interval = 30000) => {
               console.warn('同步后端成功任务失败:', bt.task_id, e)
             }
           }
-        } else if (bt.status === 'SUCCESS' && local.status !== 'SUCCESS' && bt.has_result) {
+          continue
+        }
+
+        // ① 外部把任务重新拉起（终态 → 进行中）：本地要跟着变成「生成中」，
+        //    否则界面一直显示已成功，用户完全看不到外部重跑在发生。
+        if (bt.status && ACTIVE.includes(bt.status) && !ACTIVE.includes(local.status)) {
+          useTaskStore.getState().updateTaskContent(bt.task_id, {
+            status: bt.status,
+            message: bt.message || undefined,
+            queuePosition: undefined,
+          })
+          continue
+        }
+        // ② 外部把任务记为失败（进行中 → FAILED，且本地还停留在旧状态）
+        if (bt.status === 'FAILED' && local.status !== 'FAILED' && local.status !== 'FAILD') {
+          useTaskStore.getState().updateTaskContent(bt.task_id, {
+            status: 'FAILED',
+            message: bt.message || undefined,
+          })
+          continue
+        }
+
+        // ③ 有结果的任务内容被外部重写（updated_at 变化）：
+        //    本地已是 SUCCESS 时旧逻辑不会刷新正文，必须靠水位线补拉。
+        const needsResultPull =
+          bt.has_result && contentChanged && (bt.status === 'SUCCESS' || bt.status === 'FAILED')
+        const successFirstSeen =
+          bt.status === 'SUCCESS' && local.status !== 'SUCCESS' && bt.has_result
+        if (needsResultPull || successFirstSeen) {
           try {
             const res: any = await get_task_status(bt.task_id)
             if (res?.result) {
@@ -163,10 +202,18 @@ export const useTasksSync = (interval = 30000) => {
     backfill()
     run()
     const timer = setInterval(run, interval)
+    // 窗口重新获得焦点立即同步一次：外部改过状态时不用等下一个轮询周期
+    const onFocus = () => {
+      if (document.visibilityState === 'visible') run()
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
     return () => {
       stopped = true
       clearInterval(timer)
       window.removeEventListener('bilinote:worker-paired', backfill)
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
     }
   }, [interval])
 }

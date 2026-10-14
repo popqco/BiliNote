@@ -39,7 +39,11 @@ const GlobalClipboardWatcher = lazy(() => import('@/components/GlobalClipboardWa
 
 function App() {
   useTaskPolling(3000) // 每 3 秒轮询一次
-  useTasksSync(30000) // 每 30 秒与后端任务列表增量同步（自动化任务 / 重启恢复）
+  // 与后端任务列表增量同步：桌面端 5 秒一次——外部（API / 自动化 / MCP 工具）
+  // 触发的新任务、重跑与结果更新必须立刻反映到界面，不能等用户手动刷新；
+  // 浏览器/手机 Viewer（经 Tailscale）保持 30 秒，省流量与电量。
+  const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  useTasksSync(isDesktopApp ? 5000 : 30000)
   const { loading, initialized, failed, lastError, retry } = useCheckBackend()
 
   // 在后端初始化完成后执行系统检查

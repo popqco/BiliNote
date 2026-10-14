@@ -500,6 +500,45 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RefinalizeRequest(BaseModel):
+    """存量笔记重整理入参（2026-10-14）：默认沿用结果文件记录的模型，可覆盖。"""
+    task_id: str
+    model_name: Optional[str] = None
+    provider_id: Optional[str] = None
+    format: Optional[list] = None
+
+
+@router.post("/refinalize_note")
+def refinalize_note(data: RefinalizeRequest):
+    """对已生成的笔记重跑「合并后整理」：摘掉目录/总结残留 → 重建目录 → 重写 AI 总结。
+
+    只读结果文件 + 一次纯文本模型调用，不重新下载/转写/喂图——用于把存量
+    笔记修复到新版整理逻辑（合并阶段产出的「本段/本批」堆叠式总结），
+    不必让用户重新生成整条笔记。
+    """
+    from app.services.note import refinalize_stored_note
+    try:
+        out = refinalize_stored_note(
+            data.task_id,
+            model_name=data.model_name,
+            provider_id=data.provider_id,
+            formats=data.format,
+        )
+    except FileNotFoundError as e:
+        return R.error(msg=str(e), code=404)
+    except Exception as e:
+        logger.error(f"重整理笔记失败 (task_id={data.task_id}): {e}", exc_info=True)
+        return R.error(msg=f"重整理失败：{e}", code=500)
+    md = out["markdown"]
+    return R.success({
+        "task_id": out["task_id"],
+        "formats": out["formats"],
+        "model_name": out["model_name"],
+        "length": len(md),
+        "preview": md[:1500],
+    })
+
+
 @router.get("/task_status/{task_id}")
 def get_task_status(task_id: str):
     status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")

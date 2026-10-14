@@ -5,6 +5,7 @@ import logging
 import os
 import hashlib
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -135,7 +136,20 @@ class UniversalGPT(GPT):
         return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
 
     def _build_merge_messages(self, partials: list) -> list:
-        merge_text = MERGE_PROMPT + "\n\n" + "\n\n---\n\n".join(partials)
+        prompt = MERGE_PROMPT
+        # 分批喂图时每批笔记都自带目录/总结段，多层合并的去重会整段丢掉它们
+        # （2026-10-14 实测：55 批合并后最终笔记或缺「AI 总结」或缺「目录」）。
+        # 这些段落本身就是分批阶段的临时产物（每批一份「本段指出…」），
+        # 现在统一在合并后由 finalize_note 确定性重建，合并阶段全部丢弃。
+        fmt = getattr(self, "_format", None) or []
+        if "toc" in fmt or "summary" in fmt:
+            prompt += (
+                "- 各片段中自带的「## 目录」与「## AI 总结」段落请**全部丢弃**"
+                "（包括片段里出现的多条目录/总结），不要在合并结果里保留："
+                "它们会由系统在合并完成后统一重新生成\n"
+                "- 正文里也不要出现「本段」「本批」这类措辞\n"
+            )
+        merge_text = prompt + "\n\n" + "\n\n---\n\n".join(partials)
         # 合并阶段没有图片，直接用 string content 兼容非多模态模型（issue #282）
         return [{
             "role": "user",
@@ -438,11 +452,77 @@ class UniversalGPT(GPT):
             f"{self._format_batch_ts(meta.get('time_end'))}）。"
             "请只基于本批的转写与截图撰写这一段的笔记（仍按完整格式输出），"
             "系统随后会把各批笔记合并成整篇。"
+            "本批只写正文：**不要输出「## 目录」与「## AI 总结」**"
+            "（这两个整篇级段落由系统在合并后统一生成），也不要用「本段」「本批」"
+            "这类措辞描述整体。"
         )
+
+    def _write_summary(self, body: str) -> str:
+        """基于整篇笔记正文重新生成一份 AI 总结（合并后整理的第二步）。
+
+        分批阶段每批各写一份的「本段…」小结拼贴成不了总结；这里合并完成后
+        用一次纯文本调用统一重写：总览 + 关键要点，供读者快速浏览取用。
+        """
+        prompt = (
+            "以下是一条视频的完整笔记（Markdown）。请你**只基于笔记内容**写一份"
+            "「AI 总结」，供读者快速浏览时取用：\n"
+            "- 先用 2~4 句话概括：这条视频讲了什么、作者的最终观点或结论是什么；\n"
+            "- 然后列出 3~6 条最值得记住的关键信息（每条独立一行，以「- 」开头，"
+            "一条一句话，点到信息本体而非“讲了什么话题”）；\n"
+            "- 直接输出总结正文的 Markdown：不要输出标题「AI 总结」，不要用代码块包裹；\n"
+            "- 严禁出现「本段」「本批」「本条视频」「整篇笔记」这类措辞；"
+            "不要罗列章节流程或写作过程，只写结论与要点。\n\n"
+            "笔记正文如下：\n\n" + body
+        )
+        response = self._chat_completion_create([{"role": "user", "content": prompt}])
+        text = (response.choices[0].message.content or "").strip()
+        # 兜底：模型偶尔仍自带标题或代码块围栏
+        text = re.sub(r"^```[a-zA-Z]*\s*\n", "", text)
+        text = re.sub(r"\n```\s*$", "", text)
+        text = re.sub(r"^#{1,4}\s*AI\s*总结[：:]?\s*\n+", "", text)
+        return text.strip()
+
+    def finalize_note(self, markdown: str) -> str:
+        """合并完成后的确定性整理（2026-10-14 用户实拍「本段指出」堆叠总结的修复）。
+
+        1. 摘掉正文里所有「## 目录」「## AI 总结」段落（含各批残留的多份）；
+        2. 勾了目录 → 从二级标题确定性重建一份目录（带时间入口，不调模型）；
+        3. 勾了总结 → 统一重写一份 AI 总结（纯文本调用；失败则回退保留旧总结）。
+        幂等：整理过的笔记再整理一次结果不变（目录/总结是重建出来的）。
+        """
+        from app.utils.note_helper import build_toc_block, strip_global_sections
+
+        fmt = list(getattr(self, "_format", None) or [])
+        body, old_summary = strip_global_sections(markdown)
+        if not body.strip():
+            logger.warning("[universal_gpt] finalize：正文为空，按原样返回")
+            return markdown
+
+        blocks: list[str] = []
+        if "toc" in fmt:
+            toc = build_toc_block(body, link_enabled=bool(self.link))
+            if toc:
+                blocks.append(toc)
+            else:
+                logger.info("[universal_gpt] finalize：正文没有可用的二级标题，跳过目录重建")
+        blocks.append(body.strip())
+        if "summary" in fmt:
+            summary = ""
+            try:
+                summary = self._write_summary(body)
+            except Exception as e:
+                logger.warning(f"[universal_gpt] AI 总结重写失败，回退保留原总结：{e}")
+                summary = old_summary
+            if summary.strip():
+                blocks.append("## AI 总结\n\n" + summary.strip())
+        return "\n\n".join(blocks).strip() + "\n"
 
     def summarize(self, source: GPTSource) -> str:
         self.screenshot = source.screenshot
         self.link = source.link
+        # 记下用户勾选的格式（toc/link/screenshot/summary）——合并阶段要用它决定
+        # 是否在最终笔记里保留/补上「AI 总结」段落
+        self._format = list(source._format or [])
         source.segment = self.ensure_segments_type(source.segment)
         checkpoint_key = source.checkpoint_key
         source_signature = self._build_source_signature(source) if checkpoint_key else None
@@ -528,12 +608,16 @@ class UniversalGPT(GPT):
                 self._save_checkpoint(checkpoint_key, source_signature, results[:end], "summarize")
 
         def _run_chunk(chunk) -> str:
+            # 分批阶段不产出「目录」「AI 总结」：这两个是整篇级段落，每批各写
+            # 一份会在合并后堆成拼贴（2026-10-14 实拍：55 批「本段指出…」
+            # 叠在最终笔记的 AI 总结里）。合并完成后由 finalize_note 统一重建。
+            batch_format = [f for f in (source._format or []) if f not in ("toc", "summary")]
             messages = self.create_messages(
                 chunk.segments,
                 title=source.title,
                 tags=source.tags,
                 video_img_urls=chunk.image_urls,
-                _format=source._format,
+                _format=batch_format,
                 style=source.style,
                 extras=source.extras,
                 chunk_note=self._batch_note(getattr(chunk, "meta", None)),
@@ -579,4 +663,10 @@ class UniversalGPT(GPT):
         merged = self._merge_partials(partials, checkpoint_key, source_signature)
         if checkpoint_key:
             self._clear_checkpoint(checkpoint_key)
+        # 合并完成后的确定性整理：摘掉各批堆积的目录/总结、重建目录、重写 AI 总结
+        # （最终返回的已是整理后的整篇笔记；整理失败按未整理内容返回，不拖垮任务）
+        try:
+            merged = self.finalize_note(merged)
+        except Exception as e:
+            logger.warning(f"[universal_gpt] 合并后整理失败，按原样返回：{e}")
         return merged

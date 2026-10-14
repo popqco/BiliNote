@@ -329,3 +329,6 @@ ffmpeg*/
 ffmpg*/
 # 安装包构建资源：后端产物(bin/)由 build.bat/本地 spec 打包生成, viewer-dist 为 /api 构建产物, 均不入库
 /BillNote_frontend/src-tauri/viewer-dist/
+
+# 源码直跑时的运行时配置目录（如 downloader.json），不入库
+/config/

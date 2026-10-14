@@ -66,6 +66,138 @@ def prepend_source_link(markdown: str | None, source_url: str) -> str | None:
     return header
 
 
+def cleanup_marker_residue(markdown: str) -> str:
+    """清理截图/原片标记替换后残留的孤立星号。
+
+    模型有时把标记写成斜体包裹形态（`*Content-[02:10]*`），替换只消费标记
+    本体，留下包在外面的 `*`——用户看到的就是"标题后多个星号"、"段落之间
+    一行孤零零的 *"、"图片后挂个 *"（2026-10-05 用户截图实锤）。三条规则都很保守：
+    1. 整行只有 1-2 个星号加空白 → 整行删除（合法 markdown 不存在这种行）；
+    2. 含视频跳转链接的行尾跟 1-2 个星号 → 摘掉星号（闭合被标记打断的斜体）；
+    3. 图片链接行尾跟 1-2 个星号 → 摘掉星号但保留图片（截图必须留在正文里）。
+    """
+    if not markdown:
+        return markdown
+    # 整行孤星
+    cleaned = re.sub(r"(?m)^[ \t]*\*{1,2}[ \t]*\r?\n", "", markdown)
+    # 行尾孤星（仅限含跳转链接的行，避免误伤正常斜体收尾）。
+    # 2026-10-14 补 YouTube：时间链接是 `?v=…&t=0s`，旧正则只认 `?t=`/`/video/`，
+    # YouTube 笔记里标题行尾的残留星号一直没被摘掉（实拍：`## 1. xxx [原片 @ 00:00](…&t=0s)*`）。
+    cleaned = re.sub(
+        r"(?m)^([^\n]*\[(?:原片|▶)?[^\]]*\]\([^\)]*(?:[?&]t=|/video/)[^\)]*\))\s*\*{1,2}[ \t]*$",
+        r"\1",
+        cleaned,
+    )
+    # 图片行尾孤星（图片本体保留，只摘残留星号）
+    cleaned = re.sub(
+        r"(?m)^(!\[[^\]]*\]\([^\)]*\))[ \t]*\*{1,2}[ \t]*$",
+        r"\1",
+        cleaned,
+    )
+    return cleaned
+
+
+# ---------------- 目录 / AI 总结「后整理」（2026-10-14） ----------------
+# 背景：分批喂图时每个批次都会按格式要求产出自己的「## 目录」与「## AI 总结」
+# （且带着「本段/本批」口吻），55 批经多层合并后这些段落会成堆残留——用户看到
+# 的 AI 总结是十几段「本段指出…」的拼贴。prompt 层面的去重指令模型经常不遵守，
+# 唯一可靠的收敛点是合并完成后做确定性整理：摘掉旧的，重建目录、重写一份总结。
+
+_SECTION_TITLE_NOISE = re.compile(r"[\s:：*]+")
+
+
+def _norm_section_title(title: str) -> str:
+    return _SECTION_TITLE_NOISE.sub("", title or "").lower()
+
+
+def strip_global_sections(markdown: str | None, names=("目录", "AI 总结")) -> tuple[str, str]:
+    """移除「## 目录」「## AI 总结」段落，返回 (剩余正文, 被移除的总结正文)。
+
+    标题按「去空白/标点后前缀匹配」识别（`## AI总结`、`## AI 总结：` 都能认），
+    段落内容直到下一个同级或更高级标题为止。被移除的总结正文拼起来返回，
+    供调用方在重写总结失败时兜底。
+    """
+    if not markdown:
+        return markdown or "", ""
+    targets = [_norm_section_title(n) for n in names]
+    summary_key = _norm_section_title("AI 总结")
+    lines = markdown.split("\n")
+    out: list[str] = []
+    removed: list[str] = []
+    i = 0
+    while i < len(lines):
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", lines[i])
+        hit = None
+        if m:
+            norm = _norm_section_title(m.group(2))
+            hit = next((t for t in targets if norm.startswith(t)), None)
+        if not hit:
+            out.append(lines[i])
+            i += 1
+            continue
+        level = len(m.group(1))
+        i += 1
+        buf: list[str] = []
+        while i < len(lines):
+            m2 = re.match(r"^(#{1,6})\s+", lines[i])
+            if m2 and len(m2.group(1)) <= level:
+                break
+            buf.append(lines[i])
+            i += 1
+        if hit == summary_key:
+            text = "\n".join(buf).strip()
+            if text:
+                removed.append(text)
+    body = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip("\n")
+    return body, "\n\n".join(removed)
+
+
+_H2_LINE = re.compile(r"^##\s+(.*?)\s*$", re.M)
+_CONTENT_MARKER = re.compile(
+    r"\*?Content-(?:\[(\d{1,3}:\d{2}(?::\d{2})?)\]|(\d{1,3}:\d{2}(?::\d{2})?))\*?"
+)
+_ORIGIN_LINK = re.compile(r"\[原片 @ (\d{1,3}:\d{2}(?::\d{2})?)\]\(([^)]+)\)")
+
+
+def build_toc_block(body: str, link_enabled: bool = True) -> str | None:
+    """从正文的二级标题重建「## 目录」段落（确定性，不调模型）。
+
+    条目 = 标题（保留模型写的编号）+ 时间入口：
+    - 标题里已有 `[原片 @ mm:ss](url)`（存量笔记）→ 原样带上；
+    - 只有 `*Content-[mm:ss]` 标记时：link_enabled 则保留标记（后续
+      replace_content_markers 会换成跳转链接），否则写成纯文本（mm:ss）。
+    有效标题少于 2 个时返回 None（不生成空目录）。
+    """
+    entries: list[str] = []
+    for raw_title in _H2_LINE.findall(body or ""):
+        title = raw_title
+        time_label: str | None = None
+        url: str | None = None
+        m = _ORIGIN_LINK.search(title)
+        if m:
+            time_label, url = m.group(1), m.group(2)
+            title = title[: m.start()] + title[m.end():]
+        else:
+            m = _CONTENT_MARKER.search(title)
+            if m:
+                time_label = m.group(1) or m.group(2)
+                title = title[: m.start()] + title[m.end():]
+        title = title.strip().strip("*").strip()
+        if not title:
+            continue
+        if url:
+            entries.append(f"- {title} [原片 @ {time_label}]({url})")
+        elif time_label and link_enabled:
+            entries.append(f"- {title} *Content-[{time_label}]")
+        elif time_label:
+            entries.append(f"- {title}（{time_label}）")
+        else:
+            entries.append(f"- {title}")
+    if len(entries) < 2:
+        return None
+    return "## 目录\n\n" + "\n".join(entries)
+
+
 def replace_content_markers(markdown: str, video_id: str, platform: str = 'bilibili') -> str:
     """
     替换 *Content-04:16*、Content-04:16 或 Content-[04:16] 为超链接，跳转到对应平台视频的时间位置
