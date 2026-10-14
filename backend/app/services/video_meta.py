@@ -54,6 +54,7 @@ def _ytdlp_meta(url: str, platform: str) -> Optional[dict]:
     except Exception:
         return None
     opts = {"quiet": True, "skip_download": True, "noplaylist": True, "no_warnings": True}
+    cookiefile = None
     if platform == "bilibili":
         # B 站 CDN 走直连（与下载器一致，见 bilibili_downloader._resolve_proxy_opt）
         from app.downloaders.bilibili_downloader import _resolve_proxy_opt
@@ -66,12 +67,24 @@ def _ytdlp_meta(url: str, platform: str) -> Optional[dict]:
         proxy = ProxyConfigManager().get_proxy_url()
         if proxy:
             opts["proxy"] = proxy
+        if platform == "youtube":
+            # 年龄限制视频不带登录 Cookie 连元信息都拿不到（排队卡片会显示「未命名」）
+            from app.downloaders.youtube_downloader import apply_youtube_cookie, apply_youtube_extras
+            apply_youtube_extras(opts)
+            cookiefile = apply_youtube_cookie(opts)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         logger.warning(f"video_meta yt-dlp 兜底失败: {e}")
         return None
+    finally:
+        if cookiefile:
+            import os
+            try:
+                os.remove(cookiefile)
+            except OSError:
+                pass
     if not info:
         return None
     return {

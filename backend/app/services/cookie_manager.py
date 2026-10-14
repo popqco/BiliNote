@@ -11,6 +11,38 @@ _HAS_KEY_RE = re.compile(r"^\s*[A-Za-z0-9_\-.\[\]]+\s*=")
 _BARE_VALUE_KEY = {"bilibili": "SESSDATA"}
 
 
+def iter_cookie_pairs(raw: Optional[str]):
+    """把用户粘贴的 Cookie 文本解析成 (name, value) 序列，兼容两种常见格式：
+
+    1) `k=v; k=v` 的 Cookie 请求头串（B站/小红书等平台的手工粘贴方式）；
+    2) 浏览器扩展导出的 Netscape cookies.txt 全文（含制表符分隔行，跳过 # 注释）。
+
+    YouTube 年龄限制类视频需要完整登录 cookie，用户通常用扩展导出 cookies.txt，
+    这里让两种格式都能被同一套消费方（yt-dlp cookiefile / requests session）使用。
+    """
+    text = str(raw or "")
+    if not text.strip():
+        return
+    if "# Netscape" in text or "\t" in text:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 7:
+                name, value = parts[5].strip(), parts[6].strip()
+                if name:
+                    yield name, value
+        return
+    for part in text.split(";"):
+        if "=" not in part:
+            continue
+        k, _, v = part.strip().partition("=")
+        k, v = k.strip(), v.strip()
+        if k:
+            yield k, v
+
+
 def extract_cookie_value(cookie_str: Optional[str], name: str) -> Optional[str]:
     """从 `k=v; k=v` 形式的 Cookie 串里取指定键的值（没有则 None）。"""
     for part in str(cookie_str or "").split(";"):

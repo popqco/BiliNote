@@ -9,6 +9,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.services.proxy_config_manager import ProxyConfigManager
+from app.services.youtube_profile_cookies import resolve_youtube_cookie_pairs
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,15 +22,31 @@ class YouTubeSubtitleFetcher:
         # 配了全局代理就给 youtube-transcript-api 套一个带 proxies 的 requests.Session，
         # 否则国内拉字幕同样会超时。代理未配置时退回默认无代理客户端。
         proxy = ProxyConfigManager().get_proxy_url()
+        # 年龄限制视频不带登录 Cookie 时 InnerTube 会直接拒答（拉字幕同样失败），
+        # Cookie 来源与下载器一致（专用浏览器配置优先，其次手工粘贴）；都没有时行为不变。
+        cookie_map, cookie_src = resolve_youtube_cookie_pairs()
         if proxy:
             try:
                 import requests
                 session = requests.Session()
                 session.proxies = {"http": proxy, "https": proxy}
+                for name, value in cookie_map:
+                    session.cookies.set(name, value, domain=".youtube.com")
                 self._api = YouTubeTranscriptApi(http_client=session)
-                logger.info(f"YouTube 字幕走代理: {proxy}")
+                logger.info(f"YouTube 字幕走代理: {proxy}（Cookie 来源: {cookie_src}，条目: {len(cookie_map)}）")
             except Exception as e:
                 logger.warning(f"为 youtube-transcript-api 注入代理失败，回退无代理: {e}")
+                self._api = YouTubeTranscriptApi()
+        elif cookie_map:
+            try:
+                import requests
+                session = requests.Session()
+                for name, value in cookie_map:
+                    session.cookies.set(name, value, domain=".youtube.com")
+                self._api = YouTubeTranscriptApi(http_client=session)
+                logger.info(f"YouTube 字幕携带 Cookie 条目: {len(cookie_map)}")
+            except Exception as e:
+                logger.warning(f"为 youtube-transcript-api 注入 Cookie 失败，回退匿名: {e}")
                 self._api = YouTubeTranscriptApi()
         else:
             self._api = YouTubeTranscriptApi()

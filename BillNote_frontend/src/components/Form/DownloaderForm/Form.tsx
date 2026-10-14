@@ -11,6 +11,7 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
@@ -39,6 +40,7 @@ const DownloaderForm = () => {
   })
   const { id } = useParams()
   const isBilibili = id === 'bilibili'
+  const isYoutube = id === 'youtube'
 
   const [loading, setLoading] = useState(true)
   const [authStatus, setAuthStatus] = useState<any>(null)
@@ -185,7 +187,21 @@ const DownloaderForm = () => {
               <FormItem className="flex flex-col gap-2">
                 <FormLabel>Cookie</FormLabel>
                 <FormControl>
-                  <Input {...field} placeholder="输入 Cookie（也可粘贴完整 Cookie 串）" />
+                  {isYoutube ? (
+                    <Textarea
+                      {...field}
+                      rows={8}
+                      className="font-mono text-xs"
+                      placeholder={
+                        '粘贴 youtube.com 的登录 Cookie。\n' +
+                        '推荐：浏览器装 “Get cookies.txt LOCALLY” 扩展导出 cookies.txt，整段粘贴到此处；' +
+                        '也可以仅粘贴一行 Cookie 串（k=v; k=v; …）。\n' +
+                        '年龄限制视频（提示 Sign in to confirm your age）必须填写。'
+                      }
+                    />
+                  ) : (
+                    <Input {...field} placeholder="输入 Cookie（也可粘贴完整 Cookie 串）" />
+                  )}
                 </FormControl>
                 <FormMessage />
               </FormItem>
