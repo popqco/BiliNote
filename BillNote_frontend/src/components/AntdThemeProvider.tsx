@@ -1,6 +1,9 @@
 import { ConfigProvider, theme } from 'antd'
 import { useTheme } from 'next-themes'
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
+// 【原型】暗色配色评审：非对照变体时给 antd 换整套暗色 token
+//（2026-10-15，评审后此 import 与 DARK_VARIANT_TOKENS 逻辑一起删除）
+import { darkVariants, getVariantFromUrl, type DarkVariant } from '@/prototype/darkMode/variants.ts'
 
 /** 亮色暖灰 token（2026-10-11 亮色配色定版，用户四方案评审选定「奶咖低饱和」）：
  *  antd / @ant-design/x 组件不读项目的 CSS 变量，必须在这里对齐底色与主色，
@@ -25,11 +28,21 @@ const LIGHT_TOKENS = {
 export default function AntdThemeProvider({ children }: { children: ReactNode }) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
+
+  // 【原型】跟随 ?variant= 的暗色 token；切换条 dispatch 'dm-variant-change' 时刷新
+  const [variant, setVariant] = useState<DarkVariant>(() => getVariantFromUrl())
+  useEffect(() => {
+    const onChange = () => setVariant(getVariantFromUrl())
+    window.addEventListener('dm-variant-change', onChange)
+    return () => window.removeEventListener('dm-variant-change', onChange)
+  }, [])
+  const darkToken = isDark ? darkVariants.find((v) => v.id === variant.id)?.antdToken : undefined
+
   return (
     <ConfigProvider
       theme={{
         algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: isDark ? undefined : LIGHT_TOKENS,
+        token: isDark ? darkToken : LIGHT_TOKENS,
       }}
     >
       {children}

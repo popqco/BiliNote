@@ -1,6 +1,8 @@
 import type { ReactNode, FC } from 'react'
 // import "@/global.css"
 import { Toaster } from 'react-hot-toast'
+// 【原型】暗色配色评审切换条（2026-10-15，评审后连同 src/prototype/darkMode/ 一起删除）
+import DarkModePrototype from '@/prototype/darkMode/DarkModePrototype.tsx'
 
 interface RootLayoutProps {
   children: ReactNode
@@ -25,6 +27,7 @@ const RootLayout: FC<RootLayoutProps> = ({ children }) => {
         }}
       />
       {children}
+      <DarkModePrototype />
     </div>
   )
 }

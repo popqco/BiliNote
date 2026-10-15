@@ -1,0 +1,237 @@
+/*
+ * 【原型】暗色配色变体（2026-10-15，随 src/prototype/darkMode/ 一起评审后删除）
+ *
+ * 挂载类：html.dm-proto.dark = 原型生效中（.dark 来自 next-themes，必须同时在场）；
+ *         dm-dim / dm-graphite / dm-warm / dm-m3 = 具体方案（A/B/C/D）。
+ * 变量语义与 src/index.css 的 .dark 完全一致，仅覆盖暗色 token。
+ * 所有规则都带 .dm-proto 前提：对照（base）时类名被摘掉，原暗色观感不受影响。
+ * 对比度目标（脚本 work/darkmode-palette-calc.py 校验）：
+ *   正文 8~13:1（现状 18.96）、次级文字 ≥4.5:1、深色字压主色按钮 ≥6:1。
+ */
+
+/* ========== A 冷灰蓝（GitHub Dark Dimmed / Linear 借鉴，低对比阅读向） ========== */
+html.dm-proto.dark.dm-dim {
+  --background: oklch(0.253 0.011 245);
+  --foreground: oklch(0.79 0.014 235);
+  --card: oklch(0.285 0.012 245);
+  --card-foreground: oklch(0.79 0.014 235);
+  --popover: oklch(0.305 0.013 245);
+  --popover-foreground: oklch(0.79 0.014 235);
+  --primary: oklch(0.68 0.11 245);
+  --primary-light: color-mix(in oklab, var(--primary) 18%, transparent);
+  --primary-foreground: oklch(0.2 0.01 245);
+  --secondary: oklch(0.34 0.013 245);
+  --secondary-foreground: oklch(0.85 0.012 235);
+  --muted: oklch(0.34 0.013 245);
+  --muted-foreground: oklch(0.717 0.013 235);
+  --accent: oklch(0.325 0.013 245);
+  --accent-foreground: oklch(0.85 0.012 235);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.68 0.11 245);
+  --sidebar: oklch(0.275 0.012 245);
+  --sidebar-foreground: oklch(0.79 0.014 235);
+  --sidebar-primary: oklch(0.68 0.11 245);
+  --sidebar-primary-foreground: oklch(0.2 0.01 245);
+  --sidebar-accent: oklch(0.325 0.013 245);
+  --sidebar-accent-foreground: oklch(0.85 0.012 235);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.68 0.11 245);
+  /* 原型扩展：正文代码底 / 导图三色 */
+  --dm-code-bg: oklch(0.315 0.012 245);
+  --dm-markmap-line: oklch(0.52 0.02 245);
+  --dm-markmap-node: oklch(0.68 0.11 245);
+  --dm-markmap-text: oklch(0.84 0.012 235);
+}
+
+/* ========== B 中性石墨（VS Code Dark+ / Obsidian 借鉴，标准暗色的柔化版） ========== */
+html.dm-proto.dark.dm-graphite {
+  --background: oklch(0.218 0.002 260);
+  --foreground: oklch(0.845 0.004 260);
+  --card: oklch(0.262 0.002 260);
+  --card-foreground: oklch(0.845 0.004 260);
+  --popover: oklch(0.285 0.003 260);
+  --popover-foreground: oklch(0.845 0.004 260);
+  --primary: oklch(0.68 0.1 258);
+  --primary-light: color-mix(in oklab, var(--primary) 18%, transparent);
+  --primary-foreground: oklch(0.2 0.006 258);
+  --secondary: oklch(0.315 0.003 260);
+  --secondary-foreground: oklch(0.9 0.004 260);
+  --muted: oklch(0.315 0.003 260);
+  --muted-foreground: oklch(0.692 0.005 260);
+  --accent: oklch(0.3 0.003 260);
+  --accent-foreground: oklch(0.9 0.004 260);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.68 0.1 258);
+  --sidebar: oklch(0.25 0.002 260);
+  --sidebar-foreground: oklch(0.845 0.004 260);
+  --sidebar-primary: oklch(0.68 0.1 258);
+  --sidebar-primary-foreground: oklch(0.2 0.006 258);
+  --sidebar-accent: oklch(0.3 0.003 260);
+  --sidebar-accent-foreground: oklch(0.9 0.004 260);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.68 0.1 258);
+  --dm-code-bg: oklch(0.29 0.002 260);
+  --dm-markmap-line: oklch(0.5 0.01 260);
+  --dm-markmap-node: oklch(0.68 0.1 258);
+  --dm-markmap-text: oklch(0.88 0.004 260);
+}
+
+/* ========== C 暖夜奶咖（与亮色定版「奶咖低饱和」同源，去冷蓝光） ========== */
+html.dm-proto.dark.dm-warm {
+  --background: oklch(0.225 0.009 70);
+  --foreground: oklch(0.865 0.016 78);
+  --card: oklch(0.263 0.01 70);
+  --card-foreground: oklch(0.865 0.016 78);
+  --popover: oklch(0.287 0.011 70);
+  --popover-foreground: oklch(0.865 0.016 78);
+  --primary: oklch(0.68 0.082 258);
+  --primary-light: color-mix(in oklab, var(--primary) 18%, transparent);
+  --primary-foreground: oklch(0.21 0.01 70);
+  --secondary: oklch(0.318 0.011 70);
+  --secondary-foreground: oklch(0.9 0.014 78);
+  --muted: oklch(0.318 0.011 70);
+  --muted-foreground: oklch(0.695 0.016 78);
+  --accent: oklch(0.3 0.011 70);
+  --accent-foreground: oklch(0.9 0.014 78);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.68 0.082 258);
+  --sidebar: oklch(0.25 0.01 70);
+  --sidebar-foreground: oklch(0.865 0.016 78);
+  --sidebar-primary: oklch(0.68 0.082 258);
+  --sidebar-primary-foreground: oklch(0.21 0.01 70);
+  --sidebar-accent: oklch(0.3 0.011 70);
+  --sidebar-accent-foreground: oklch(0.9 0.014 78);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.68 0.082 258);
+  --dm-code-bg: oklch(0.29 0.01 70);
+  --dm-markmap-line: oklch(0.52 0.02 70);
+  --dm-markmap-node: oklch(0.68 0.082 258);
+  --dm-markmap-text: oklch(0.89 0.014 78);
+}
+
+/* ========== D 层叠微紫（Material 3 借鉴：底色微紫 + 亮度分层 + 主色 tone-80） ========== */
+html.dm-proto.dark.dm-m3 {
+  --background: oklch(0.235 0.012 300);
+  --foreground: oklch(0.905 0.008 300);
+  --card: oklch(0.28 0.014 300);
+  --card-foreground: oklch(0.905 0.008 300);
+  --popover: oklch(0.305 0.015 300);
+  --popover-foreground: oklch(0.905 0.008 300);
+  --primary: oklch(0.8 0.08 250);
+  --primary-light: color-mix(in oklab, var(--primary) 18%, transparent);
+  --primary-foreground: oklch(0.22 0.02 300);
+  --secondary: oklch(0.345 0.015 300);
+  --secondary-foreground: oklch(0.92 0.008 300);
+  --muted: oklch(0.345 0.015 300);
+  --muted-foreground: oklch(0.79 0.011 300);
+  --accent: oklch(0.33 0.014 300);
+  --accent-foreground: oklch(0.92 0.008 300);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.8 0.08 250);
+  --sidebar: oklch(0.262 0.013 300);
+  --sidebar-foreground: oklch(0.905 0.008 300);
+  --sidebar-primary: oklch(0.8 0.08 250);
+  --sidebar-primary-foreground: oklch(0.22 0.02 300);
+  --sidebar-accent: oklch(0.33 0.014 300);
+  --sidebar-accent-foreground: oklch(0.92 0.008 300);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.8 0.08 250);
+  --dm-code-bg: oklch(0.31 0.014 300);
+  --dm-markmap-line: oklch(0.55 0.02 300);
+  --dm-markmap-node: oklch(0.8 0.08 250);
+  --dm-markmap-text: oklch(0.92 0.008 300);
+}
+
+/* ================== 变体共享的收尾（一律跟随上方各方案 token） ==================
+   index.css 的暗色正文里有一批硬编码色（链接 #7aa7ff、代码底、表格斑马底），
+   这里改回变量以跟随变体；选择器带 .dm-proto 且比原规则多一级类名，稳定胜出。 */
+
+/* 正文标题（h1~h6）不额外改色：跟随 --foreground（与现状一致，只是变体里
+   --foreground 本身变柔和）；行内 **粗体** / 链接跟随 --primary（现状是
+   #3c77fb 高饱和亮蓝，变体里随主色降饱和）。 */
+
+html.dm-proto.dark .markdown-body a {
+  color: var(--primary);
+}
+html.dm-proto.dark .markdown-body code,
+html.dm-proto.dark .markdown-body tt {
+  background-color: var(--muted);
+  color: var(--foreground);
+}
+html.dm-proto.dark .markdown-body pre {
+  background-color: var(--dm-code-bg);
+}
+html.dm-proto.dark .markdown-body table tr:nth-child(2n) {
+  background-color: var(--muted);
+}
+/* Prism 代码块底色是内联样式（atomDark 主题），容器底色需 !important 才能跟随；
+   语法高亮 token 色不变（对任何暗底都可读），落地实现时应换配色的 Prism 主题 */
+html.dm-proto.dark .markdown-body pre[class*='language-'],
+html.dm-proto.dark .markdown-body code[class*='language-'] {
+  background-color: var(--dm-code-bg) !important;
+}
+
+/* 思维导图三色跟随变体（index.css 里是硬编码 #6b7a90/#818cf8/#dde3ec） */
+html.dm-proto.dark .markmap-box svg path {
+  stroke: var(--dm-markmap-line);
+}
+html.dm-proto.dark .markmap-box svg circle,
+html.dm-proto.dark .markmap-box svg g.markmap-node > circle {
+  fill: var(--dm-markmap-node);
+}
+html.dm-proto.dark .markmap-box svg foreignObject div {
+  color: var(--dm-markmap-text);
+}
+
+/* ================== 徽标柔和化（仅原型变体，对照不受影响） ==================
+   原暗色：状态徽标是 500 系纯色实心 + 白字（白字对比度只有 2~3:1 且很扎眼）。
+   变体统一改为：同色相 20% 低透明底 + 200 系浅色文字。文字要比"主色"亮得多
+   才有 4.5:1 —— 10px 小字 + 低透明底，深色系文字（如 primary 本体 3.75:1）
+   在浏览器审计里会挂；浅色系文字实测 ≥5:1。 */
+html.dm-proto.dark .dark\:bg-sky-500 {
+  background-color: color-mix(in oklab, #38bdf8 20%, transparent);
+  color: #bae6fd;
+}
+html.dm-proto.dark .dark\:bg-red-500 {
+  background-color: color-mix(in oklab, #f87171 20%, transparent);
+  color: #fecaca;
+}
+html.dm-proto.dark .dark\:bg-amber-500 {
+  background-color: color-mix(in oklab, #fbbf24 20%, transparent);
+  color: #fde68a;
+}
+html.dm-proto.dark .dark\:bg-violet-500 {
+  background-color: color-mix(in oklab, #a78bfa 20%, transparent);
+  color: #ddd6fe;
+}
+html.dm-proto.dark .dark\:bg-neutral-500 {
+  background-color: color-mix(in oklab, #a3a3a3 20%, transparent);
+  color: #e5e5e5;
+}
+/* 「已完成」徽标 / 步骤条激活圆点：主色实心 + 白字（现状 4.02:1）→ 主色浅底 +
+   主色提亮到 200 级当文字（白字压浅蓝底才有对比，深色字压浅蓝底只有 ~3:1） */
+html.dm-proto.dark .bg-primary.text-white {
+  background-color: color-mix(in oklab, var(--primary) 22%, transparent);
+  color: color-mix(in oklab, var(--primary) 35%, #ffffff 65%);
+}
+
+/* ================== AI 问答面板（antd-x Bubble） ==================
+   用户消息气泡是硬编码 inline 样式（#3b82f6 底 + 白字，3.7:1 且饱和刺眼），
+   内联样式只能用 !important 覆盖；.ant-bubble-end 只命中用户侧，不影响 AI 气泡。
+   头像同样从 bg-blue-500 换成主色（跟随变体的柔化蓝）。 */
+html.dm-proto.dark .ant-bubble-end .ant-bubble-content {
+  background-color: var(--primary) !important;
+  color: var(--primary-foreground) !important;
+}
+html.dm-proto.dark .bg-blue-500.text-white {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+}
