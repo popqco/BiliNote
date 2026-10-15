@@ -5,9 +5,12 @@ import { useTaskStore } from '@/store/taskStore'
 import { useChatJumpStore } from '@/store/chatStore'
 
 /**
- * 笔记「目录」的紧凑渲染（2026-10-14 用户反馈：三四十条的单列目录铺满整屏，
- * 占地方、不优雅也不高效）。改为多列网格 + 紧凑行高：
+ * 笔记「目录」的紧凑渲染（2026-10-14 用户反馈：三四十条的单列目录铺满整屏）。
+ * - 多列「按列填充」（CSS columns）：条目沿第一列往下排满再进第二列——
+ *   按行填充时读序在列间来回折返，长目录读起来很累（2026-10-15 用户实拍，
+ *   53 条要折返 18 次），按列填充则是三段连续下行；
  * - 点击条目 → 走问答来源徽章同一套定位机制跳到对应章节（自动高亮 2s）；
+ * - 左侧序号：条目自带编号优先，没有就按阅读顺序补序号（列填序 = 读序）；
  * - 带原片时间入口的条目，行尾显示时间徽标，点击直接开原视频对应时间点。
  */
 const TocPanel: FC<{ items: TocEntry[] }> = ({ items }) => {
@@ -24,9 +27,9 @@ const TocPanel: FC<{ items: TocEntry[] }> = ({ items }) => {
         <span className="text-primary text-sm font-semibold">目录</span>
         <span className="text-muted-foreground text-xs">{items.length} 节 · 点击跳转</span>
       </div>
-      <ol className="grid grid-cols-1 gap-x-6 gap-y-0.5 sm:grid-cols-2 xl:grid-cols-3">
+      <ol className="list-none gap-x-6 sm:columns-2 xl:columns-3">
         {items.map((it, idx) => (
-          <li key={`${it.title}-${idx}`} className="min-w-0">
+          <li key={`${it.title}-${idx}`} className="mb-0.5 min-w-0 break-inside-avoid">
             <div
               role="button"
               tabIndex={0}
@@ -37,11 +40,9 @@ const TocPanel: FC<{ items: TocEntry[] }> = ({ items }) => {
               }}
               className="hover:bg-accent group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-[3px] transition-colors"
             >
-              {it.num && (
-                <span className="text-muted-foreground w-5 shrink-0 text-right text-[11px] tabular-nums">
-                  {it.num}
-                </span>
-              )}
+              <span className="text-muted-foreground w-5 shrink-0 text-right text-[11px] tabular-nums">
+                {it.num ?? idx + 1}
+              </span>
               <span className="group-hover:text-primary truncate text-[13px] leading-5">
                 {it.title}
               </span>

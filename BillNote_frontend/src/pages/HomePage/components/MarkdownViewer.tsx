@@ -1101,15 +1101,22 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                     videoUrl={currentTask?.formData?.video_url}
                   />
                 </div>
+                {/* 目录段抽出来单独渲染成紧凑网格（可点击跳转）；正文里不再
+                    重复渲染原目录段。放在 .markdown-body 外面渲染：github-markdown-css
+                    的 ol 默认样式会给它叠一层行序编号，与面板自己的序号列打架
+                    （2026-10-15 用户实拍）。 */}
+                {tocSection.items && (
+                  <div className="px-2">
+                    <TocPanel items={tocSection.items} />
+                  </div>
+                )}
                 <div className={'markdown-body w-full px-2'}>
-                  {/* 目录段抽出来单独渲染成紧凑网格（可点击跳转）；正文里不再
-                      重复渲染原目录段——历史笔记存在 IndexedDB 里是 \(...\) /
-                      \[...\] 旧写法，渲染时归一化成 remark-math 能识别的
-                      $ / $$ 即可显示，不用做数据迁移（新笔记后端入库时已归一化）。
+                  {/* 历史笔记存在 IndexedDB 里是 \(...\) / \[...\] 旧写法，
+                      渲染时归一化成 remark-math 能识别的 $ / $$ 即可显示，
+                      不用做数据迁移（新笔记后端入库时已归一化）。
                       隐藏截图查看时直接在 markdown 层摘掉截图标记——只靠 CSS
                       隐藏会留下截图外层的大边距，笔记里全是莫名空行
                       （2026-10-14 用户反馈）。 */}
-                  {tocSection.items && <TocPanel items={tocSection.items} />}
                   <ReactMarkdown
                     remarkPlugins={remarkPlugins}
                     rehypePlugins={rehypePlugins}
