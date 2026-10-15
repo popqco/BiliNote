@@ -1,9 +1,6 @@
 import { ConfigProvider, theme } from 'antd'
 import { useTheme } from 'next-themes'
-import { useEffect, useState, type ReactNode } from 'react'
-// 【原型】暗色配色评审：非对照变体时给 antd 换整套暗色 token
-//（2026-10-15，评审后此 import 与 DARK_VARIANT_TOKENS 逻辑一起删除）
-import { darkVariants, getVariantFromUrl, type DarkVariant } from '@/prototype/darkMode/variants.ts'
+import type { ReactNode } from 'react'
 
 /** 亮色暖灰 token（2026-10-11 亮色配色定版，用户四方案评审选定「奶咖低饱和」）：
  *  antd / @ant-design/x 组件不读项目的 CSS 变量，必须在这里对齐底色与主色，
@@ -17,6 +14,21 @@ const LIGHT_TOKENS = {
   colorLink: '#476a9c',
 }
 
+/** 暗色石墨 token（2026-10-15 暗色配色定版，用户四方案评审选定「中性石墨」）：
+ *  与 src/index.css 的 .dark 变量同源（#1a1a1b 底 / #242425 面板 / 降饱和石墨蓝主色）。
+ *  colorTextBase 决定 antd 派生文字色阶（85%/65%/45% 透明度），
+ *  设成柔和亮灰而非默认纯白，问答面板才不会出现刺眼的纯白字。 */
+const DARK_TOKENS = {
+  colorBgBase: '#1a1a1b',
+  colorBgLayout: '#1a1a1b',
+  colorBgContainer: '#242425',
+  colorBgElevated: '#292a2c',
+  colorBorderSecondary: '#38393b',
+  colorPrimary: '#719ad6',
+  colorLink: '#719ad6',
+  colorTextBase: '#cacccf',
+}
+
 /**
  * 让 antd / @ant-design/x 组件跟随项目的明暗主题。
  *
@@ -28,21 +40,11 @@ const LIGHT_TOKENS = {
 export default function AntdThemeProvider({ children }: { children: ReactNode }) {
   const { resolvedTheme } = useTheme()
   const isDark = resolvedTheme === 'dark'
-
-  // 【原型】跟随 ?variant= 的暗色 token；切换条 dispatch 'dm-variant-change' 时刷新
-  const [variant, setVariant] = useState<DarkVariant>(() => getVariantFromUrl())
-  useEffect(() => {
-    const onChange = () => setVariant(getVariantFromUrl())
-    window.addEventListener('dm-variant-change', onChange)
-    return () => window.removeEventListener('dm-variant-change', onChange)
-  }, [])
-  const darkToken = isDark ? darkVariants.find((v) => v.id === variant.id)?.antdToken : undefined
-
   return (
     <ConfigProvider
       theme={{
         algorithm: isDark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-        token: isDark ? darkToken : LIGHT_TOKENS,
+        token: isDark ? DARK_TOKENS : LIGHT_TOKENS,
       }}
     >
       {children}

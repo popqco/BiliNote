@@ -23,18 +23,21 @@ interface NoteHistoryProps {
 
 /** 状态徽章：区分排队/解析/下载/转写/总结/完成/失败（而不是笼统的「等待中」）
     2026-10-11 亮色对比度修复：白字压 500 系纯色只有 2~3:1（徽标是 10px 小字），
-    亮色改「100 浅底 + 700/800 深字」（≥4.5:1），暗色保留原纯色白字方案 */
+    亮色改「100 浅底 + 700/800 深字」（≥4.5:1）。
+    2026-10-15 暗色配色改版：暗色同样改「同色相 20% 低透明底 + 200 系浅字」——
+    原「500 系纯色实心 + 白字」白字只有 2~3:1，而且一片纯色小方块在暗底上很扎眼。
+    文字必须用 200 系浅色：主色/深色系当文字压同色浅底只有 3.75:1 不达标。 */
 const STATUS_META: Record<string, { label: string; cls: string }> = {
-  SUCCESS: { label: '已完成', cls: 'bg-primary text-white' },
-  FAILED: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500 dark:text-white' },
-  FAILD: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500 dark:text-white' },
-  PENDING: { label: '排队中', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-500 dark:text-white' },
-  PARSING: { label: '解析中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
-  DOWNLOADING: { label: '下载中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
-  TRANSCRIBING: { label: '转写中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
-  SUMMARIZING: { label: '总结中', cls: 'bg-violet-100 text-violet-700 dark:bg-violet-500 dark:text-white' },
-  SAVING: { label: '保存中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
-  RUNNING: { label: '生成中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500 dark:text-white' },
+  SUCCESS: { label: '已完成', cls: 'bg-primary text-white dark:bg-primary/20 dark:text-primary-soft' },
+  FAILED: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200' },
+  FAILD: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200' },
+  PENDING: { label: '排队中', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200' },
+  PARSING: { label: '解析中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
+  DOWNLOADING: { label: '下载中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
+  TRANSCRIBING: { label: '转写中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
+  SUMMARIZING: { label: '总结中', cls: 'bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-200' },
+  SAVING: { label: '保存中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
+  RUNNING: { label: '生成中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
 }
 
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
@@ -91,7 +94,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
       </div>
       <div className="flex flex-col gap-2 overflow-hidden">
         {filteredTasks.map(task => {
-          const meta = STATUS_META[task.status] || { label: '等待中', cls: 'bg-neutral-200 text-neutral-700 dark:bg-neutral-500 dark:text-white' }
+          const meta = STATUS_META[task.status] || { label: '等待中', cls: 'bg-neutral-200 text-neutral-700 dark:bg-neutral-500/20 dark:text-neutral-200' }
           const statusLabel =
             task.status === 'PENDING' && task.queuePosition
               ? `${meta.label} · 第${task.queuePosition}位`

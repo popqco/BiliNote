@@ -26,7 +26,9 @@ const StepBar: FC<StepBarProps> = ({ steps, currentStep }) => {
             <div className="relative flex flex-col items-center justify-center">
               <div
                 className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold ${
-                  isActive ? 'bg-primary text-white' : 'bg-muted text-muted-foreground'
+                  isActive
+                    ? 'bg-primary text-white dark:bg-primary/20 dark:text-primary-soft'
+                    : 'bg-muted text-muted-foreground'
                 }`}
               >
                 {index + 1}

@@ -42,6 +42,8 @@ html, body, #root {
   --popover-foreground: oklch(0.27 0.01 70);
   --primary: oklch(0.52 0.09 258);
   --primary-light: oklch(0.925 0.028 258);
+  /* 亮色下「低透明主色底 + 文字」用主色本身即达标（5.16:1），暗色另见 .dark */
+  --primary-soft: oklch(0.52 0.09 258);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.938 0.006 70);
   --secondary-foreground: oklch(0.3 0.01 70);
@@ -68,41 +70,52 @@ html, body, #root {
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* 暗色配色（2026-10-15 定版）：原 shadcn 默认「近纯黑底 + 近纯白字」
+   （正文对比度 18.96:1）刺眼，改为「中性石墨」——微冷中性底 + 柔和亮字
+   （正文 10.8:1，次级文字 ≥4.5:1，暗色主色降饱和，用户四方案评审选定）。
+   参考 VS Code Dark+（#1e1e1e 底 / #d4d4d4 字）与 Obsidian 默认暗色。
+   对比度数字由 src/prototype 的 palette-calc.py 计算、browser-use 审计校验。 */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: #3c77fb;
+  --background: oklch(0.218 0.002 260);
+  --foreground: oklch(0.845 0.004 260);
+  --card: oklch(0.262 0.002 260);
+  --card-foreground: oklch(0.845 0.004 260);
+  --popover: oklch(0.285 0.003 260);
+  --popover-foreground: oklch(0.845 0.004 260);
+  /* 主色：原 #3c77fb 纯饱和蓝在暗底上扎眼，降饱和为石墨蓝（同色相 L 0.68） */
+  --primary: #719ad6;
   /* 暗色下的选中态底色：半透明主色，替代亮色的浅蓝 */
-  --primary-light: rgba(60, 119, 251, 0.18);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --primary-light: rgba(113, 154, 214, 0.18);
+  /* 低透明主色底上的文字色（如「已完成」徽标）：亮色下即主色本身，
+     暗色下需要比主色亮得多才有 4.5:1（实测主色本体压浅底只有 3.75:1） */
+  --primary-soft: oklch(0.888 0.035 258);
+  --primary-foreground: oklch(0.2 0.006 258);
+  --secondary: oklch(0.315 0.003 260);
+  --secondary-foreground: oklch(0.9 0.004 260);
+  --muted: oklch(0.315 0.003 260);
+  /* 次级文字 0.708→0.692 并随新底色：问答面板分段控件是 muted-fg 压 bg-muted
+     底，原值在该组合下只有 4.15:1（浏览器审计发现） */
+  --muted-foreground: oklch(0.692 0.005 260);
+  --accent: oklch(0.3 0.003 260);
+  --accent-foreground: oklch(0.9 0.004 260);
   --destructive: oklch(0.704 0.191 22.216);
   /* 修复上游笔误：暗色下边框原本是接近白色的 #e6f7ff，会明显刺眼 */
   --border: oklch(1 0 0 / 12%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --ring: oklch(0.68 0.1 258);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar: oklch(0.25 0.002 260);
+  --sidebar-foreground: oklch(0.845 0.004 260);
+  --sidebar-primary: oklch(0.68 0.1 258);
+  --sidebar-primary-foreground: oklch(0.2 0.006 258);
+  --sidebar-accent: oklch(0.3 0.003 260);
+  --sidebar-accent-foreground: oklch(0.9 0.004 260);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-ring: oklch(0.68 0.1 258);
 }
 
 @theme inline {
@@ -118,6 +131,7 @@ html, body, #root {
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-light: var(--primary-light);
+  --color-primary-soft: var(--primary-soft);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
@@ -212,7 +226,9 @@ html:not(.dark) .markdown-body hr {
 }
 
 /* Markdown 正文暗色适配：项目只引入 github-markdown-light.css，
-   这里用暗色覆盖补足（.dark 作用域下生效，跟随 next-themes 切换） */
+   这里用暗色覆盖补足（.dark 作用域下生效，跟随 next-themes 切换）。
+   2026-10-15 随暗色改版：原硬编码色（链接 #7aa7ff、代码底/表格斑马底 oklch(.23/.25/.3)）
+   改回变量或对齐新调色（石墨底），否则与整体石墨色温割裂。 */
 .dark .markdown-body {
   color: var(--foreground);
   background-color: transparent;
@@ -227,15 +243,15 @@ html:not(.dark) .markdown-body hr {
   border-bottom-color: var(--border);
 }
 .dark .markdown-body a {
-  color: #7aa7ff;
+  color: var(--primary);
 }
 .dark .markdown-body code,
 .dark .markdown-body tt {
-  background-color: oklch(0.3 0 0);
+  background-color: var(--muted);
   color: var(--foreground);
 }
 .dark .markdown-body pre {
-  background-color: oklch(0.23 0 0);
+  background-color: oklch(0.29 0.002 260);
 }
 .dark .markdown-body pre code {
   background-color: transparent;
@@ -245,7 +261,7 @@ html:not(.dark) .markdown-body hr {
   border-top-color: var(--border);
 }
 .dark .markdown-body table tr:nth-child(2n) {
-  background-color: oklch(0.25 0 0);
+  background-color: var(--muted);
 }
 .dark .markdown-body table th,
 .dark .markdown-body table td {
@@ -271,31 +287,33 @@ html:not(.dark) .markdown-body hr {
    markmap 0.18 的连线/圆点颜色是逐元素内联属性，CSS 直接覆盖即可；
    文字在 foreignObject 裸 div 里（无 markmap-foreign 类名），也要直接命中。
    预览用 .markmap-box 作用域限定；导出的 SVG 由 createExportSvg 注入
-   同色 <style>，保证所见即所得。 */
+   同色 <style>，保证所见即所得。
+   2026-10-15 随暗色改版：暗色三色对齐石墨调色（线/文字原 #6b7a90/#dde3ec），
+   圆点跟随暗色主色。导出（白底）走的是组件里另一套浅色，不受影响。 */
 .markmap-box svg path {
   stroke: #64748b;
 }
 .dark .markmap-box svg path {
-  stroke: #6b7a90;
+  stroke: oklch(0.5 0.01 260);
 }
 .markmap-box svg circle {
   fill: #6366f1;
 }
 .dark .markmap-box svg circle {
-  fill: #818cf8;
+  fill: var(--primary);
 }
 .markmap-box svg foreignObject div {
   color: #26303e;
 }
 .dark .markmap-box svg foreignObject div {
-  color: #dde3ec;
+  color: oklch(0.88 0.004 260);
 }
 /* 展开/折叠圆点的背景（markmap 自带变量在裸 div 场景不生效，直接指定） */
 .markmap-box svg g.markmap-node > circle {
   fill: #6366f1;
 }
 .dark .markmap-box svg g.markmap-node > circle {
-  fill: #818cf8;
+  fill: var(--primary);
 }
 
 /* ===== 原片截图显隐开关（2026-10-05 用户需求：看笔记时可一键隐藏截图） =====
