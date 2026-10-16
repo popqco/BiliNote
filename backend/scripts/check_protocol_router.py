@@ -173,6 +173,21 @@ def test_live_router():
     check("重启/重建后直接命中记忆（chat）",
           gpt2.client._order("space-bunny-free")[0] == "chat")
 
+    # 2b) 非流式路径（AI 问答用的 chat 形态）也要能自愈：换一个没记忆的
+    #     chat-only 模型 exo-free，同样故意配到 responses
+    gpt_ns = build("exo-free", "responses")
+    try:
+        resp = gpt_ns.client.chat.completions.create(
+            model="exo-free",
+            messages=[{"role": "user", "content": "只回答两个字：好的"}],
+            max_tokens=64,
+        )
+        text = resp.choices[0].message.content or ""
+        check("非流式：exo-free 配错 responses 仍成功（自动换 chat）", bool(text.strip()),
+              f"回答={text.strip()[:40]!r}")
+    except Exception as e:
+        check("非流式：exo-free 配错 responses 仍成功（自动换 chat）", False, repr(e))
+
     # 3) responses-only 模型配到 chat：应自动换 responses（上游偶发 502，容忍）
     gpt3 = build("muse-spark-1.3-contributor-free", "chat")
     try:

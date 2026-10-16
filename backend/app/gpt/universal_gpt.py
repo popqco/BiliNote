@@ -346,12 +346,16 @@ class UniversalGPT(GPT):
         #   OPENAI_STREAM_STALL_SECONDS    多久没收到任何增量就判定上游假死
         #                                  （默认 120；Responses 链路按 600，见 _resolve_stall_limit）
         #   OPENAI_STREAM_DEADLINE_SECONDS 单次调用总时长上限（默认 900）
-        stall_limit = self._resolve_stall_limit()
+        stall_limit: Optional[float] = None
         total_limit = float(os.getenv("OPENAI_STREAM_DEADLINE_SECONDS", "900") or 900)
         started_at = time.monotonic()
         last_activity_at = started_at
         for chunk in stream:
             now = time.monotonic()
+            if stall_limit is None:
+                # 首个增量到达时才解析：此时协议路由已定（可能刚发生过换协议），
+                # 按实际链路取静默预算——思考期不可见的 responses 链路要宽得多。
+                stall_limit = self._resolve_stall_limit()
             if now - last_activity_at > stall_limit:
                 raise CompletionStalled(
                     f"上游 {stall_limit:.0f}s 没有任何增量（静默超时，model={self.model}）"
