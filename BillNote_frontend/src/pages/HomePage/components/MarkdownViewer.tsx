@@ -597,7 +597,69 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       activeJumpRef.current = null
       return
     }
-    const normalize = (s: string) => s.replace(/[-：:\s*[\]]/g, '').toLowerCase()
+    // 时间片段两边同口径剥掉再比：heading 文本里带「原片（00:03）」pill、
+    // 目录/引用标题可能带「（00:03）」尾缀（老条目在 parseTocItem 就剥了，
+    // 这里对 heading 侧和任何漏网形态兜底）。不剥的话「原片」二字插在标题
+    // 中间，双向 substring 全失配（2026-10-16 实锤：全库 365/3453 条目录
+    // 点不动，78% 出自「标题（00:03）」vs「标题 原片（00:03）」这一对）。
+    const stripTimeBits = (s: string) =>
+      s
+        .replace(/原片\s*[（(]\s*\d{1,3}:\d{2}(?::\d{2})?\s*[）)]/g, '')
+        .replace(/[（(]\s*\d{1,3}:\d{2}(?::\d{2})?\s*[）)]/g, '')
+    const normalize = (s: string) =>
+      stripTimeBits(s).replace(/[-：:\s*[\]]/g, '').toLowerCase()
+    // 目录/引用标题是模型转写的自由文本，常与正文标题措辞不一致（改写、
+    // 两节合并）。严格 substring 失败后的兜底：先按「A / B」拆复合标题
+    // 逐段严格匹配，再退到最长公共子串（≥8 个规范化字符、且唯一最佳领先
+    // 亚军 ≥2）——8 连字在中文里几乎不可能是巧合。把「前缀/后缀相同、
+    // 中段改写」这类条目救回来，仍不命中才报「未找到对应章节」。
+    const lcsLen = (a: string, b: string): number => {
+      if (!a || !b) return 0
+      let prev: number[] = new Array(b.length + 1).fill(0)
+      let best = 0
+      for (let i = 1; i <= a.length; i++) {
+        const cur: number[] = new Array(b.length + 1).fill(0)
+        for (let j = 1; j <= b.length; j++) {
+          if (a.charCodeAt(i - 1) === b.charCodeAt(j - 1)) {
+            cur[j] = prev[j - 1] + 1
+            if (cur[j] > best) best = cur[j]
+          }
+        }
+        prev = cur
+      }
+      return best
+    }
+    const fuzzyFindSection = (rawTitle: string): Element | null => {
+      const cands: { el: Element; norm: string }[] = []
+      for (const h of (contentCaptureRef.current || document).querySelectorAll(
+        'h1, h2, h3, h4, h5, h6',
+      )) {
+        const nn = normalize(h.textContent || '')
+        if (nn) cands.push({ el: h, norm: nn })
+      }
+      const findByStrict = (q: string) =>
+        cands.find(c => c.norm.includes(q) || q.includes(c.norm)) || null
+      const parts = rawTitle
+        .split(/\s*[/／]\s*/)
+        .map(p => p.trim())
+        .filter(Boolean)
+      if (parts.length > 1) {
+        for (const p of parts) {
+          const q = normalize(p)
+          if (!q) continue
+          const m = findByStrict(q)
+          if (m) return m.el
+        }
+      }
+      const q = normalize(rawTitle)
+      if (!q) return null
+      const scored = cands
+        .map(c => ({ el: c.el, score: lcsLen(q, c.norm) }))
+        .sort((x, y) => y.score - x.score)
+      if (!scored.length || scored[0].score < 8) return null
+      if (scored.length > 1 && scored[0].score - scored[1].score < 2) return null
+      return scored[0].el
+    }
     // intro/开头 块（正文首个 H2 之前的引言、或标题清洗后为空的章节）
     // 没有可匹配的 heading——旧实现拿 "intro" 去 fuzzy 匹配必败，点击
     // 必报「未找到对应章节」。现在直接定位到笔记顶部（首个 heading）。
@@ -644,6 +706,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
             hit = h
             break
           }
+        }
+        if (!hit) {
+          // 严格 substring 不中时走模糊兜底（复合标题 / 最长公共子串）。
+          // 内容异步加载期间 heading 集合会变，每 tick 都重算，加载完成
+          // 后自然收敛到正确目标。
+          hit = fuzzyFindSection(sectionTitle)
         }
         if (!hit) {
           if (tries >= 40 || Date.now() > deadline) {

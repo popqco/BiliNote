@@ -108,6 +108,16 @@ function parseTocItem(raw: string): TocEntry | null {
     num = nm[1]
     text = text.slice(nm[0].length)
   }
+  // 模型自写目录的时间尾缀「（00:03）」/「(00:03)」：上面两种形态只吃
+  // 重建目录的 *Content-[00:03] / [原片 @ 00:03](url)。不剥掉的话标题
+  // 带着时间后缀，而正文标题渲染成「… 原片（00:03）」pill（原片二字插在
+  // 中间），双向 substring 都不包含——点目录必报「未找到对应章节」。
+  // 2026-10-16 全库统计：365/3453 条目录点不动，其中 78% 出自这一形态。
+  const tailTime = /[（(]\s*(\d{1,3}:\d{2}(?::\d{2})?)\s*[）)]\s*$/.exec(text)
+  if (tailTime) {
+    if (!time) time = tailTime[1]
+    text = text.slice(0, tailTime.index).trim()
+  }
   text = text.replace(/[：:]\s*$/, '').trim()
   if (!text) return null
   return { num, title: text, time, href }
