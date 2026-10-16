@@ -51,11 +51,30 @@ class BiliNoteError(Exception):
     """带业务语义的错误：msg 面向 harness 可读。"""
 
 
+def _is_loopback_url(url: str) -> bool:
+    """url 是否指向本机回环（127.0.0.1 / localhost / ::1）。"""
+    import urllib.parse
+
+    try:
+        host = urllib.parse.urlparse(str(url or "")).hostname or ""
+    except Exception:
+        return False
+    return host.lower() in ("127.0.0.1", "localhost", "::1")
+
+
 def _client() -> httpx.Client:
     headers = {}
     if TOKEN:
         headers["X-Pairing-Token"] = TOKEN
-    return httpx.Client(base_url=BASE_URL, timeout=_TIMEOUT, headers=headers)
+    kwargs = {}
+    if _is_loopback_url(BASE_URL):
+        # 回环地址永远直连：httpx 的 trust_env 在 Windows 上会读系统注册表代理
+        # 且不尊重 ProxyOverride 例外列表——Clash 等系统代理开着时，
+        # http://127.0.0.1:8483 会被塞给代理层（7892）拿回 502 空响应
+        # （2026-10-16 实拍：MCP list_notes 全挂在 502；与后端 a6b2523
+        # 「回环不走代理」同一根因）。trust_env=False 关掉 env+注册表两路代理。
+        kwargs["trust_env"] = False
+    return httpx.Client(base_url=BASE_URL, timeout=_TIMEOUT, headers=headers, **kwargs)
 
 
 def _call(method: str, path: str, payload: Optional[dict] = None) -> dict:

@@ -54,6 +54,10 @@ def _ytdlp_meta(url: str, platform: str) -> Optional[dict]:
     except Exception:
         return None
     opts = {"quiet": True, "skip_download": True, "noplaylist": True, "no_warnings": True}
+    # 输出接 app.log，不写 stdout（否则 sidecar 孤儿场景下 write_string 抛
+    # OSError 22；no_warnings 挡不住 report_error → to_stderr）
+    from app.utils.ydl_log import ydl_logger
+    opts["logger"] = ydl_logger()
     cookiefile = None
     if platform == "bilibili":
         # B 站 CDN 走直连（与下载器一致，见 bilibili_downloader._resolve_proxy_opt）

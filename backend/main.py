@@ -2,6 +2,15 @@ import os
 import time
 from contextlib import asynccontextmanager
 
+# 最先安装 stdout/stderr 容错代理，再 import 其余模块（应用模块导入链里任何
+# 一次 stderr 写入在坏流下都会把进程带走）。桌面端被强杀后 sidecar 成孤儿，
+# 其 stdout/stderr 管道读端消失，之后任何 print / yt-dlp to_screen 都会抛
+# OSError 22 打崩下载任务（2026-10-16 实拍：B 站字幕获取与音视频下载整链全灭）。
+# safe_stdio 放在 backend 顶层（不 import app 包），保证守卫最早生效。
+from safe_stdio import install as _install_safe_stdio
+
+_install_safe_stdio()
+
 import uvicorn
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware

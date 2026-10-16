@@ -6,6 +6,7 @@ from typing import Optional, Union
 from app.enmus.note_enums import DownloadQuality
 from app.models.notes_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult
+from app.utils.ydl_log import ydl_logger
 from os import getenv
 QUALITY_MAP = {
     "fast": "32",
@@ -20,10 +21,17 @@ QUALITY_MAP = {
 # upos-sz-mirror*.bilivideo.com 读超时）都会让整个笔记任务直接失败。
 #
 # 这里的值偏保守：笔记任务是用户在前台等的，重试太多不如早点失败让用户重来。
+#
+# `logger`（2026-10-16）：yt-dlp 输出不再写 stdout/stderr 而是进 app.log。
+# sidecar 孤儿的 stdout 管道会失效（app 被强杀后），届时 yt-dlp 的
+# to_screen 写失败直接抛 OSError 22 打崩下载；挂 logger 后该路径整体消失。
+# 进度/调试走 DEBUG（默认不落盘），警告/错误按级别进 app.log。
+_YDL_LOGGER = ydl_logger()
 YDL_RETRY_OPTS = {
     "retries": 3,
     "fragment_retries": 3,
     "socket_timeout": 30,
+    "logger": _YDL_LOGGER,
 }
 
 
