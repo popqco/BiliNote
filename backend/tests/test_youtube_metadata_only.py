@@ -43,6 +43,13 @@ class _Downloader:
     def __init__(self):
         self.cache_data = "/tmp"
 
+    # 与 app.downloaders.base.Downloader 的取消契约保持同步：yt-dlp 调用点
+    # 会先经它挂取消进度回调（未注入 cancel_check 时原样返回 options）
+    cancel_check = None
+
+    def _ydl_opts_with_cancel(self, ydl_opts):
+        return ydl_opts
+
 
 class _AudioDownloadResult:
     def __init__(self, **kwargs):

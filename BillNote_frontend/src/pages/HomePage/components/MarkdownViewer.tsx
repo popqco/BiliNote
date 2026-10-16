@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo, memo, useCallback, FC } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
-import { Copy, ArrowRight, Play, ExternalLink } from 'lucide-react'
+import { Copy, ArrowRight, Play, ExternalLink, Square } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
@@ -50,7 +50,7 @@ interface VersionNote {
 
 interface MarkdownViewerProps {
   content: string | VersionNote[]
-  status: 'idle' | 'loading' | 'success' | 'failed'
+  status: 'idle' | 'loading' | 'success' | 'failed' | 'stopped'
 }
 
 const steps = [
@@ -405,6 +405,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   )
   // 导出（PDF/Word/长图/海报）状态与 DOM 引用
   const [exporting, setExporting] = useState<ExportFormat | null>(null)
+  // 「停止生成」请求进行中：按钮转「正在停止…」并防连点
+  const [stopping, setStopping] = useState(false)
   const [posterData, setPosterData] = useState<PosterData | null>(null)
   const contentCaptureRef = useRef<HTMLDivElement>(null)
   const posterRef = useRef<HTMLDivElement>(null)
@@ -998,6 +1000,62 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     }
   }, [posterData])
 
+  /**
+   * 停止正在生成/排队中的任务（后端立即中止 + 状态落「已停止」）。
+   * 生成中/已停止视图共用；stopping 状态给按钮即时反馈。
+   */
+  const handleStop = async (taskId: string) => {
+    if (stopping) return
+    setStopping(true)
+    try {
+      await useTaskStore.getState().cancelTask(taskId)
+    } finally {
+      setStopping(false)
+    }
+  }
+
+  /**
+   * 失败/已停止页的「重试」：不要直接拿老任务 formData 去发——参数快照前的
+   * 老任务没有 model_name/provider_id，直接发只会复现"后台炸响应已发出、任务
+   * 永远排队中"（且新版 taskStore 会弹红 toast 拦截）。这里先自动补齐一次可用
+   * 模型，补不上才提示去选（摘自 mobile-split 4f3d28e）。
+   */
+  const handleRetryWithModelFill = async () => {
+    const task = getCurrentTask()
+    const fd: any = task?.formData || {}
+    if (fd.model_name && fd.provider_id) {
+      retryTask(task!.id)
+      return
+    }
+    try {
+      const [models, autoCfg] = await Promise.all([
+        fetchEnableModels().catch(() => []),
+        get_automation_config().catch(() => null),
+      ])
+      const list = Array.isArray(models) ? models : []
+      // 优先用任务快照里的模型名（用户上次就是这么选的），否则用第一个可用模型，
+      // 再否则用当前自动化配置的模型。
+      const pick =
+        list.find((m: any) => m.model_name === fd.model_name) ||
+        list[0] ||
+        null
+      const gen = (autoCfg as any)?.gen
+      const model_name = pick?.model_name || gen?.model_name
+      const provider_id = pick?.provider_id || gen?.provider_id
+      if (!model_name || !provider_id) {
+        toast.error('没有可用模型可补，请先到「设置 → AI模型设置」添加并启用一个模型')
+        return
+      }
+      useTaskStore.getState().updateTaskContent(task!.id, {
+        formData: { ...fd, model_name, provider_id },
+      } as any)
+      retryTask(task!.id, { ...fd, model_name, provider_id, task_id: task!.id })
+    } catch (e) {
+      console.error('重试补模型失败：', e)
+      toast.error('重试前补模型失败，请到新建表单重选模型后再提交')
+    }
+  }
+
   if (status === 'loading') {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-muted-foreground">
@@ -1011,6 +1069,19 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               : currentTask?.message || '这可能需要几分钟时间，取决于视频长度'}
           </p>
         </div>
+        {/* 停止生成（2026-10-16 用户需求）：模型/参数设置错了时不必干等整条
+            流程（含转写重试、总结降级阶梯）跑完，停止后可直接改设置重来 */}
+        {currentTask && (
+          <Button
+            variant="outline"
+            className="border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
+            onClick={() => handleStop(currentTask.id)}
+            disabled={stopping}
+          >
+            <Square className="mr-2 h-4 w-4 fill-current" />
+            {stopping ? '正在停止…' : '停止生成'}
+          </Button>
+        )}
       </div>
     )
   }
@@ -1028,45 +1099,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   }
 
   if (status === 'failed' && !isMultiVersion) {
-    // 失败页"重试"：不要直接拿老任务 formData 去发——参数快照前的老任务
-    // 没有 model_name/provider_id，直接发只会复现"后台炸响应已发出、任务永远
-    // 排队中"（且新版 taskStore 会弹红 toast 拦截）。这里先自动补齐一次可用
-    // 模型，补不上才提示去选（摘自 mobile-split 4f3d28e）。
-    const handleRetryWithModelFill = async () => {
-      const task = getCurrentTask()
-      const fd: any = task?.formData || {}
-      if (fd.model_name && fd.provider_id) {
-        retryTask(task!.id)
-        return
-      }
-      try {
-        const [models, autoCfg] = await Promise.all([
-          fetchEnableModels().catch(() => []),
-          get_automation_config().catch(() => null),
-        ])
-        const list = Array.isArray(models) ? models : []
-        // 优先用任务快照里的模型名（用户上次就是这么选的），否则用第一个可用模型，
-        // 再否则用当前自动化配置的模型。
-        const pick =
-          list.find((m: any) => m.model_name === fd.model_name) ||
-          list[0] ||
-          null
-        const gen = (autoCfg as any)?.gen
-        const model_name = pick?.model_name || gen?.model_name
-        const provider_id = pick?.provider_id || gen?.provider_id
-        if (!model_name || !provider_id) {
-          toast.error('没有可用模型可补，请先到「设置 → AI模型设置」添加并启用一个模型')
-          return
-        }
-        useTaskStore.getState().updateTaskContent(task!.id, {
-          formData: { ...fd, model_name, provider_id },
-        } as any)
-        retryTask(task!.id, { ...fd, model_name, provider_id, task_id: task!.id })
-      } catch (e) {
-        console.error('重试补模型失败：', e)
-        toast.error('重试前补模型失败，请到新建表单重选模型后再提交')
-      }
-    }
     return (
       <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
         <Error />
@@ -1084,12 +1116,31 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     )
   }
 
+  // 已停止（用户点了「停止生成」）：中性色而非失败红——停止是主动操作，
+  // 不是错误。重试按钮沿用补模型逻辑，改完模型直接重跑。
+  if (status === 'stopped' && !isMultiVersion) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
+        <Square className="text-muted-foreground h-10 w-10" fill="currentColor" />
+        <div className="text-center">
+          <p className="text-lg font-bold">已停止生成</p>
+          <p className="mt-2 mb-2 max-w-xl text-center text-xs break-all text-muted-foreground">
+            {currentTask?.message || '任务已被手动停止，可修改模型/参数后重新生成'}
+          </p>
+
+          <Button onClick={handleRetryWithModelFill} size="lg">
+            重新生成
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   // 面板接管阅读区（窄屏工作台 / 全屏问答）时，容器去掉 py-2 上下留白并
   // 把背景拉平成 bg-background：面板与上方工具栏、下方底部 Tab 完全贴合，
   // 消除 2026-10-04 用户圈出的两条空隙。阅读/导图模式维持原样。
   const panelTakeover =
     showChat === 'full' || (isNarrow && (showChat === 'half' || showTranscribe))
-
   // 笔记里是否真的带原片截图：没有就不显示开关按钮（避免无用按钮）
   const hasScreenshots =
     typeof selectedContent === 'string' && selectedContent.includes('/static/screenshots/')

@@ -7,7 +7,7 @@ import { useTaskStore } from '@/store/taskStore'
 import { useIsMobile } from '@/hooks/useIsMobile.ts'
 import History from '@/pages/HomePage/components/History.tsx'
 import { get_task_status } from '@/services/note.ts'
-type ViewStatus = 'idle' | 'loading' | 'success' | 'failed'
+type ViewStatus = 'idle' | 'loading' | 'success' | 'failed' | 'stopped'
 export const HomePage: FC = () => {
   const tasks = useTaskStore(state => state.tasks)
   const currentTaskId = useTaskStore(state => state.currentTaskId)
@@ -26,8 +26,12 @@ export const HomePage: FC = () => {
       setStatus('idle')
     } else if (currentTask.status === 'SUCCESS') {
       setStatus('success')
-    } else if (currentTask.status === 'FAILED') {
+    } else if (currentTask.status === 'FAILED' || currentTask.status === 'FAILD') {
       setStatus('failed')
+    } else if (currentTask.status === 'CANCELLED') {
+      // 用户主动停止：终态但不是失败——独立视图（「已停止」+ 重试），
+      // 不能落 loading，否则停止后界面一直转圈
+      setStatus('stopped')
     } else {
       // PENDING、PARSING、DOWNLOADING、TRANSCRIBING、SUMMARIZING 等所有进行中状态
       setStatus('loading')

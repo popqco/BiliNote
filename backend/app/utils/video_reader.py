@@ -3,7 +3,9 @@ import hashlib
 import os
 import re
 import subprocess
+from typing import Callable, Optional
 
+from app.exceptions.task_cancel import TaskCancelled
 from app.utils.proc import no_window_kwargs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ffmpeg
@@ -38,7 +40,8 @@ class VideoReader:
                  font_path="fonts/arial.ttf",
                  frame_dir=None,
                  grid_dir=None,
-                 max_frames=1000):
+                 max_frames=1000,
+                 cancel_check: Optional[Callable[[], bool]] = None):
         self.video_path = video_path
         self.grid_size = grid_size
         self.frame_interval = frame_interval
@@ -51,6 +54,13 @@ class VideoReader:
         print(f"视频路径：{video_path}",self.frame_dir,self.grid_dir)
         self.font_path = font_path
         self.max_frames = max_frames
+        # 用户「停止生成」谓词：抽帧是逐帧 ffmpeg 子进程（长视频上千次），
+        # 每个 worker 取下一帧前检查一次，点停止后几十毫秒内整体退出
+        self.cancel_check = cancel_check
+
+    def _check_cancelled(self) -> None:
+        if self.cancel_check and self.cancel_check():
+            raise TaskCancelled()
 
     @staticmethod
     def _calculate_file_md5(file_path: str) -> str:
@@ -74,6 +84,7 @@ class VideoReader:
 
     def _extract_single_frame(self, ts: int) -> str | None:
         """提取单帧，返回输出路径或 None（失败时）。"""
+        self._check_cancelled()
         time_label = self.format_time(ts)
         output_path = os.path.join(self.frame_dir, f"frame_{time_label}.jpg")
         cmd = ["ffmpeg", "-ss", str(ts), "-i", self.video_path, "-frames:v", "1", "-q:v", "2", "-y", output_path,
@@ -99,12 +110,14 @@ class VideoReader:
                 futures = {pool.submit(self._extract_single_frame, ts): ts for ts in timestamps}
                 for future in as_completed(futures):
                     ts = futures[future]
+                    # 取消异常会让池内剩余任务快速失败退出，这里原样上抛
                     frame_results[ts] = future.result()
 
             # 按时间戳顺序整理结果，并进行去重
             image_paths = []
             last_hash = None
             for ts in timestamps:
+                self._check_cancelled()
                 output_path = frame_results.get(ts)
                 if not output_path or not os.path.exists(output_path):
                     continue
@@ -118,6 +131,8 @@ class VideoReader:
 
                 image_paths.append(output_path)
             return image_paths
+        except TaskCancelled:
+            raise
         except Exception as e:
             logger.error(f"分割帧发生错误：{str(e)}")
             raise ValueError("视频处理失败")
@@ -178,6 +193,7 @@ class VideoReader:
     def run(self, reuse_frames: bool = False) -> list[str]:
         logger.info("开始提取视频帧...")
         try:
+            self._check_cancelled()
             # 确保目录存在
             os.makedirs(self.frame_dir, exist_ok=True)
             os.makedirs(self.grid_dir, exist_ok=True)
@@ -213,6 +229,7 @@ class VideoReader:
             group_size = self.grid_size[0] * self.grid_size[1]
 
             def _concat_one(idx: int, group: list[str]) -> str:
+                self._check_cancelled()
                 if len(group) < group_size:
                     # 尾组不再整组丢弃（旧逻辑让视频结尾几分钟完全没有截图）：
                     # 保持列数不变、行数按剩余张数收窄，空位留白（无时间戳角标，
@@ -236,8 +253,11 @@ class VideoReader:
                 )
 
             logger.info("📤 开始编码图像...")
+            self._check_cancelled()
             urls = self.encode_images_to_base64(image_paths)
             return urls
+        except TaskCancelled:
+            raise
         except Exception as e:
             logger.error(f"发生错误：{str(e)}")
             raise ValueError("视频处理失败")

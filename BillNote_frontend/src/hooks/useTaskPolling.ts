@@ -3,7 +3,8 @@ import { useTaskStore } from '@/store/taskStore'
 import { get_task_status } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
-const TERMINAL = ['SUCCESS', 'FAILED', 'FAILD']
+// CANCELLED（用户主动停止）也是终态：不再继续轮询
+const TERMINAL = ['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED']
 
 /**
  * 任务状态轮询。

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { delete_task, generateNote } from '@/services/note.ts'
+import { cancel_task, delete_task, generateNote } from '@/services/note.ts'
 import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
@@ -17,6 +17,8 @@ export type TaskStatus =
   | 'SUCCESS'
   | 'FAILED'
   | 'FAILD'
+  /** 用户主动停止（后端 /cancel_task）：终态但不是失败——界面显示「已停止」 */
+  | 'CANCELLED'
 
 export interface AudioMeta {
   cover_url: string
@@ -100,6 +102,9 @@ interface TaskStore {
   setCurrentTask: (taskId: string | null) => void
   getCurrentTask: () => Task | null
   retryTask: (id: string) => void
+  /** 停止正在生成/排队中的任务（后端 /cancel_task）：状态落 CANCELLED，
+   *  改完模型/参数可直接重新生成，不必干等整条流程跑完 */
+  cancelTask: (id: string) => Promise<boolean>
 }
 
 /** markdown 字段（string | Markdown[]）是否已有可展示正文 */
@@ -363,6 +368,10 @@ export const useTaskStore = create<TaskStore>()(
                     ...t,
                     formData: newFormData, // ✅ 显式更新 formData
                     status: 'PENDING',
+                    // 清掉上一轮的终态文案（失败原因/「已停止生成」）：不清的话
+                    // 重试后的加载面板会先显示旧消息，等下一次轮询才刷新
+                    message: undefined,
+                    queuePosition: undefined,
                   }
                   : t
           ),
@@ -407,6 +416,41 @@ export const useTaskStore = create<TaskStore>()(
       },
 
       clearTasks: () => set({ tasks: [], currentTaskId: null }),
+
+      /**
+       * 停止正在生成/排队中的任务。
+       *
+       * 后端立即把状态落 CANCELLED 并中止当前步骤（下载进度回调、转写重试
+       * 间隙、总结流式增量处都会命中检查点）；本地同步成「已停止」，
+       * 失败卡上的「重试」按钮即可用来换模型重跑。
+       */
+      cancelTask: async (id: string) => {
+        const task = get().tasks.find(t => t.id === id)
+        if (!task) {
+          toast.error('任务不存在')
+          return false
+        }
+        try {
+          const res: any = await cancel_task(id)
+          if (res && res.cancelled === false) {
+            // 已经结束的任务：如实告知，状态以轮询到的终态为准
+            toast(res.message || '任务已结束，无需停止')
+            return false
+          }
+          set(state => ({
+            tasks: state.tasks.map(t =>
+              t.id === id ? { ...t, status: 'CANCELLED', message: '已停止生成', queuePosition: undefined } : t,
+            ),
+          }))
+          toast.success('已停止生成')
+          return true
+        } catch (e: any) {
+          const msg = e?.msg || e?.detail || '停止失败'
+          toast.error(typeof msg === 'string' ? msg : '停止失败')
+          console.error('❌ 停止任务失败:', e)
+          return false
+        }
+      },
 
       dropLocalTasks: ids => {
         const drop = new Set(ids)

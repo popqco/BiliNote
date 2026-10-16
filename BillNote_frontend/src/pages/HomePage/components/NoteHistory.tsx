@@ -1,7 +1,7 @@
 import { useTaskStore } from '@/store/taskStore'
 import { Badge } from '@/components/ui/badge.tsx'
 import { cn } from '@/lib/utils.ts'
-import { Trash } from 'lucide-react'
+import { Square, Trash } from 'lucide-react'
 import { Button } from '@/components/ui/button.tsx'
 import PinyinMatch from 'pinyin-match'
 import Fuse from 'fuse.js'
@@ -31,6 +31,8 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   SUCCESS: { label: '已完成', cls: 'bg-primary text-white dark:bg-primary/20 dark:text-primary-soft' },
   FAILED: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200' },
   FAILD: { label: '失败', cls: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-200' },
+  // 用户主动停止（/cancel_task）：中性灰——不是失败，是可随时重来的终态
+  CANCELLED: { label: '已停止', cls: 'bg-neutral-200 text-neutral-700 dark:bg-neutral-500/20 dark:text-neutral-200' },
   PENDING: { label: '排队中', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200' },
   PARSING: { label: '解析中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
   DOWNLOADING: { label: '下载中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
@@ -39,6 +41,9 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   SAVING: { label: '保存中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
   RUNNING: { label: '生成中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
 }
+
+/** 进行中的状态（卡片上给「停止生成」小按钮）：不是这些就没有可停的 */
+const ACTIVE_STATUSES = ['PENDING', 'PARSING', 'DOWNLOADING', 'TRANSCRIBING', 'SUMMARIZING', 'SAVING', 'RUNNING']
 
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const tasks = useTaskStore(state => state.tasks)
@@ -166,7 +171,33 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
                 )}
               </div>
 
-              <div>
+              <div className="flex items-center gap-1">
+                {ACTIVE_STATUSES.includes(task.status) && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          size="small"
+                          variant="ghost"
+                          aria-label="停止生成"
+                          onClick={e => {
+                            e.stopPropagation()
+                            // 生成中/排队中的卡片可直接停止（不必先选中它）：
+                            // 设置错了模型时第一时间止损（2026-10-16 用户需求）
+                            useTaskStore.getState().cancelTask(task.id)
+                          }}
+                          className="shrink-0"
+                        >
+                          <Square className="text-muted-foreground h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>停止生成</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>

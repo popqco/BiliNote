@@ -524,6 +524,26 @@ def create_note(
 
 
 @mcp.tool()
+def cancel_task(task_id: str) -> str:
+    """停止正在生成（或排队中）的笔记任务。
+
+    用户改主意/参数设置错了时用：立即中止下载、转写重试、总结降级阶梯等
+    一切进行中的步骤，状态落「已停止」（CANCELLED，不是失败），随后可用
+    retry_task 换模型重新生成。
+
+    Args:
+        task_id: 要停止的任务 ID（list_notes 返回的 task_id）。
+
+    Returns:
+        停止受理确认；任务状态可用 get_note(task_id) 确认。
+    """
+    data = _data("POST", "/api/cancel_task", {"task_id": task_id})
+    if not data.get("cancelled"):
+        return f"任务 {task_id} 当前未在生成（{data.get('message') or data.get('status') or '已结束'}），无需停止。"
+    return f"已停止任务 {task_id}。如需换模型重跑，用 retry_task 或重新 create_note。"
+
+
+@mcp.tool()
 def retry_task(task_id: str) -> str:
     """重试一个失败的笔记生成任务（沿用原视频与原模型配置）。
 

@@ -12,7 +12,7 @@ import { useForm, useWatch, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
-import { Info, Loader2, Plus, BookmarkPlus, ChevronDown, Trash2 } from 'lucide-react'
+import { Info, Loader2, Plus, BookmarkPlus, ChevronDown, Trash2, Square } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
 import {
   Dialog,
@@ -448,8 +448,23 @@ const NoteForm = () => {
   }, [])
 
   /* ---- 帮助函数 ---- */
-  const isGenerating = () => !['SUCCESS', 'FAILED', undefined].includes(getCurrentTask()?.status)
+  // 终态（含 CANCELLED 已停止与历史遗留的 FAILD）：不算「生成中」，
+  // 否则停止后按钮会一直停在「停止生成」而不给重试的机会
+  const isGenerating = () =>
+    !['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED', undefined].includes(getCurrentTask()?.status)
   const generating = isGenerating()
+  // 「停止生成」请求进行中：按钮转「正在停止…」并防连点
+  const [stopping, setStopping] = useState(false)
+  const handleStop = async () => {
+    const task = getCurrentTask()
+    if (!task || stopping) return
+    setStopping(true)
+    try {
+      await useTaskStore.getState().cancelTask(task.id)
+    } finally {
+      setStopping(false)
+    }
+  }
   const handleFileUpload = async (file: File, cb: (url: string) => void) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -508,7 +523,7 @@ const NoteForm = () => {
           t => extractVideoKey((t.formData as any)?.video_url) === key,
         )
       if (dup) {
-        if (!['SUCCESS', 'FAILED', 'FAILD'].includes(dup.status)) {
+        if (!['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED'].includes(dup.status)) {
           toast.error('该视频已在队列/生成中，已为你选中对应任务')
         } else {
           toast.success('该视频已有笔记，将在原卡片上重新生成（新版本）')
@@ -587,21 +602,35 @@ const NoteForm = () => {
     setCurrentTask(null)
   }
   const FormButton = () => {
-    const label = generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'
+    const label = generating ? '停止生成' : editing ? '重新生成' : '生成笔记'
 
     return (
       <div className="flex gap-2">
+        {/* 生成中：同一个按钮位变成「停止生成」（2026-10-16 用户需求）——
+            之前是禁用的「正在生成…」，设置错了只能干等整条流程（含转写重试、
+            总结降级阶梯）跑完才能重选模型。现在点停止即刻中止，随后即可重新生成。 */}
         <Button
-          type="submit"
-          className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
-          disabled={generating}
+          type={generating ? 'button' : 'submit'}
+          variant={generating ? 'outline' : 'default'}
+          className={
+            (!editing ? 'w-full' : 'flex-1') +
+            (generating
+              ? ' border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10'
+              : ' bg-primary')
+          }
+          onClick={generating ? () => handleStop() : undefined}
+          disabled={generating && stopping}
         >
-          {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          {label}
+          {generating ? (
+            <Square className="mr-2 h-4 w-4 fill-current" />
+          ) : (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          )}
+          {generating && stopping ? '正在停止…' : label}
         </Button>
 
         {editing && (
-          <Button type="button" variant="outline" className="w-1/3" onClick={handleCreateNew}>
+          <Button type="button" variant="outline" className="flex-1" onClick={handleCreateNew}>
             <Plus className="mr-2 h-4 w-4" />
             新建笔记
           </Button>

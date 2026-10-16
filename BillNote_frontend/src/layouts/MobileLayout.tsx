@@ -41,7 +41,8 @@ const MobileLayout: FC<IProps> = ({ NewForm, HistoryList, NoteView, defaultTab =
   // 配对状态要响应变化（配对页保存后回首页横幅应消失）：用 state 存，
   // 配对/断开事件里刷新，而非每次渲染重读 localStorage。
   const [hasUnpaired, setHasUnpaired] = useState(() => !loadWorkerConnection())
-  const pendingCount = useTaskStore(s => s.tasks.filter(t => !['SUCCESS', 'FAILED', 'FAILD'].includes(t.status)).length)
+  // 「进行中」徽标计数：CANCELLED（已停止）是终态，不能算进去
+  const pendingCount = useTaskStore(s => s.tasks.filter(t => !['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED'].includes(t.status)).length)
 
   const switchTab = useCallback((t: MobileTab) => {
     setActive(t)

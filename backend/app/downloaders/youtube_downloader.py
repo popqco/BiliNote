@@ -172,6 +172,8 @@ class YoutubeDownloader(Downloader, ABC):
         _apply_proxy(ydl_opts)
         apply_youtube_extras(ydl_opts)
         cookiefile = apply_youtube_cookie(ydl_opts)
+        # 用户点停止后，正在跑的下载在下一个进度回调处中断（见 Downloader._ydl_opts_with_cancel）
+        ydl_opts = self._ydl_opts_with_cancel(ydl_opts)
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=not skip_download)
@@ -226,6 +228,8 @@ class YoutubeDownloader(Downloader, ABC):
         _apply_proxy(ydl_opts)
         apply_youtube_extras(ydl_opts)
         cookiefile = apply_youtube_cookie(ydl_opts)
+        # 用户点停止后，正在跑的下载在下一个进度回调处中断（见 Downloader._ydl_opts_with_cancel）
+        ydl_opts = self._ydl_opts_with_cancel(ydl_opts)
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)

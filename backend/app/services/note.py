@@ -25,6 +25,7 @@ from app.enmus.task_status_enums import TaskStatus
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.exceptions.provider import ProviderError
+from app.exceptions.task_cancel import TaskCancelled
 from app.gpt.base import GPT
 from app.gpt.gpt_factory import GPTFactory
 from app.models.audio_model import AudioDownloadResult
@@ -39,6 +40,12 @@ from app.services.task_serial_executor import (
     LOCAL_TRANSCRIBER_TYPES,
     local_transcribe_semaphore,
     online_transcribe_semaphore,
+)
+from app.services.task_runs import (
+    TaskRun,
+    finish_run,
+    is_run_cancelled,
+    register_run,
 )
 from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
@@ -89,8 +96,9 @@ def _frame_budget() -> int:
 def _image_budget() -> int:
     return TaskConfigManager().get("image_budget")
 
-# 非终态判定用（提交去重 / 任务列表）
-TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
+# 非终态判定用（提交去重 / 任务列表）。CANCELLED 也是终态：用户停掉的任务
+# 不该再拦住同视频的重新提交，也不该被 reap 当成「执行中」。
+TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}
 
 
 def _should_segment(audio_file: str, max_bytes: int) -> bool:
@@ -118,6 +126,11 @@ class NoteGenerator:
     以及将任务信息写入状态文件与数据库等功能。
     """
 
+    # 本次执行的 run（取消信号 + 状态写入归属）：generate() 里绑定。
+    # 类级默认值：绕过 __init__ 构造的实例（测试替身/直接方法调用）也能
+    # 安全地走 _cancel_requested()，不需要每个调用方都先赋值。
+    _run: Optional[TaskRun] = None
+
     def __init__(self):
         from app.services.transcriber_config_manager import TranscriberConfigManager
         config_manager = TranscriberConfigManager()
@@ -129,7 +142,32 @@ class NoteGenerator:
         self.video_img_urls = []
         self._last_frame_interval: Optional[int] = None
         self._last_grid_size: Optional[List[int]] = None
+        # 取消语义：绑定前的写状态调用（如路由提交时的 PENDING）不受抑制影响
+        self._run: Optional[TaskRun] = None
         logger.info("NoteGenerator 初始化完成")
+
+
+    # ---------------- 取消检查（用户点「停止生成」） ----------------
+
+    def _cancel_requested(self) -> bool:
+        """是否已请求停止本次执行（供下游组件当谓词用）。"""
+        return is_run_cancelled(self._run)
+
+    def _check_cancelled(self) -> None:
+        """阶段边界/重试间隙的取消检查点：命中即抛 TaskCancelled。"""
+        if self._cancel_requested():
+            raise TaskCancelled()
+
+    def _acquire_cancellable(self, sem, timeout: float = 1.0) -> None:
+        """带取消检查的信号量获取。
+
+        排队等 GPU 转写信号量时也要能停：直接 `with sem:` 会在前一个任务
+        跑完前一直阻塞，用户点了停止也只能干等（2026-10-16 需求场景）。
+        """
+        while True:
+            self._check_cancelled()
+            if sem.acquire(timeout=timeout):
+                return
 
 
     # ---------------- 公有方法 ----------------
@@ -151,10 +189,13 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        run: Optional[TaskRun] = None,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
 
+        :param run: 本次执行的取消登记（run_note_task 在进线程池前创建）；
+                    直接调用（测试/脚本）时缺省自建。
         :param video_url: 视频或音频链接
         :param platform: 平台名称，对应 SUPPORT_PLATFORM_MAP 中的键
         :param quality: 下载音频的质量枚举
@@ -175,14 +216,34 @@ class NoteGenerator:
         if grid_size is None:
             grid_size = []
 
+        # 绑定本次执行的 run：register_run 会作废同 task_id 的旧 run（重试场景），
+        # 并把「提交后立刻点了停止」的墓碑转成本 run 的取消信号
+        if run is None and task_id:
+            run = register_run(task_id)
+        self._run = run
+
         try:
+            self._check_cancelled()
             logger.info(f"开始生成笔记 (task_id={task_id})")
             self._update_status(task_id, TaskStatus.PARSING)
 
             # 获取下载器与 GPT 实例
 
             downloader = self._get_downloader(platform)
+            # 下载阶段（长视频音轨/视频体量不小）把取消检查挂进 yt-dlp 进度回调，
+            # 点停止后正在跑的下载立即中断，不必等整条下完
+            try:
+                downloader.cancel_check = self._cancel_requested
+            except Exception:
+                pass
             gpt = self._get_gpt(model_name, provider_id)
+            # 总结阶段（含分批喂图 + 降级阶梯 + 阶梯内网络重试）的取消检查：
+            # UniversalGPT 在流式增量与重试间隙调用谓词
+            try:
+                gpt.cancel_check = self._cancel_requested
+            except Exception:
+                pass
+            self._check_cancelled()
 
             # 缓存文件路径
             audio_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_audio.json"
@@ -208,6 +269,7 @@ class NoteGenerator:
 
             # 缓存没有，尝试获取平台字幕
             if transcript is None:
+                self._check_cancelled()
                 logger.info("尝试获取平台字幕（优先于音频下载）...")
                 try:
                     transcript = downloader.download_subtitles(video_url)
@@ -220,6 +282,8 @@ class NoteGenerator:
                     else:
                         transcript = None
                         logger.info("平台无可用字幕，将下载音频后转写")
+                except TaskCancelled:
+                    raise
                 except Exception as e:
                     logger.warning(f"获取平台字幕失败: {e}，将下载音频后转写")
                     transcript = None
@@ -270,6 +334,7 @@ class NoteGenerator:
                 )
 
             # 3. GPT 总结（失败自动进入降级阶梯：原样 → 减帧 → 纯文本）
+            self._check_cancelled()
             markdown = self._summarize_text(
                 audio_meta=audio_meta,
                 transcript=transcript,
@@ -288,6 +353,7 @@ class NoteGenerator:
 
             # 4. 后处理：公式定界符归一化（无条件执行，不受格式开关影响）+
             # 截图 & 链接替换（按格式开关执行）
+            self._check_cancelled()
             try:
                 markdown = normalize_math_delimiters(markdown)
             except Exception as e:
@@ -319,13 +385,25 @@ class NoteGenerator:
                 style=style,
             )
 
+        except TaskCancelled:
+            logger.info(f"任务已被用户停止 (task_id={task_id})")
+            self._update_status(task_id, TaskStatus.CANCELLED, message="已停止生成（用户手动停止）")
+            return None
         except Exception as exc:
+            # 用户已点停止时按「已停止」收尾：下游（yt-dlp / 转写 / 上游 SDK）
+            # 可能把取消异常包成自己的错误类型抛出来，不能因此落成红字 FAILED
+            if self._cancel_requested():
+                logger.info(f"任务在停止处理中退出，按已停止收尾 (task_id={task_id})：{exc}")
+                self._update_status(task_id, TaskStatus.CANCELLED, message="已停止生成（用户手动停止）")
+                return None
             logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
             self._update_status(task_id, TaskStatus.FAILED, message=self._format_error(exc))
             return None
         finally:
             # 清理任务专属的帧/拼图临时目录（并发隔离方案的配套清理）
             self._cleanup_task_scratch(task_id)
+            # 摘除本次 run 登记：仅当自己仍是当前 run 时才摘
+            finish_run(self._run)
 
     @staticmethod
     def delete_note(video_id: str, platform: str) -> int:
@@ -395,6 +473,11 @@ class NoteGenerator:
         合并式写入：保留文件中已有的附加字段（video_id/origin/video_url/audio_meta），
         只覆盖 status/message/extra——阶段推进不会丢掉提交时写入的元数据。
 
+        取消语义（2026-10-16）：本 Generator 绑定的 run 若已被作废（同 task_id
+        被重新提交）则整体禁写；若只是收到停止请求，则只允许写 CANCELLED——
+        /cancel_task 已把「正在停止」落盘，迟到的阶段推进不许把它覆盖回
+        「总结中」之类。
+
         :param task_id: 任务唯一 ID
         :param status: TaskStatus 枚举或自定义状态字符串
         :param message: 可选消息；为空时清除上一阶段的 message
@@ -402,6 +485,14 @@ class NoteGenerator:
         """
         if not task_id:
             return
+        run = self._run
+        if run is not None and run.task_id == task_id:
+            if run.superseded:
+                logger.debug(f"陈旧 run 的状态写入已抑制 (task_id={task_id}, status={status})")
+                return
+            if run.cancelled and status != TaskStatus.CANCELLED:
+                logger.debug(f"任务已请求停止，抑制状态推进 (task_id={task_id}, status={status})")
+                return
         status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
         data: dict = {}
         try:
@@ -637,6 +728,7 @@ class NoteGenerator:
                             frame_dir=frame_dir,
                             grid_dir=grid_dir,
                             max_frames=_frame_budget(),
+                            cancel_check=self._cancel_requested,
                         ).run()
                         return cached_audio
                     logger.info(
@@ -651,6 +743,7 @@ class NoteGenerator:
         # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
         if skip_audio and not need_video:
             logger.info("已有字幕，仅提取视频元信息（不下载音视频）")
+            self._check_cancelled()
             return self._fetch_meta_only(downloader, video_url, quality, output_path,
                                          platform, audio_cache_file)
 
@@ -659,10 +752,12 @@ class NoteGenerator:
             grid_size = [2, 2]
         if need_video:
             try:
+                self._check_cancelled()
                 logger.info("开始下载视频")
                 video_path_str = downloader.download_video(video_url)
                 self.video_path = Path(video_path_str)
                 logger.info(f"视频下载完成：{self.video_path}")
+                self._check_cancelled()
 
                 if grid_size:
                     frame_interval, grid_size = self._adapt_frame_budget(
@@ -684,6 +779,7 @@ class NoteGenerator:
                         frame_dir=frame_dir,
                         grid_dir=grid_dir,
                         max_frames=_frame_budget(),
+                        cancel_check=self._cancel_requested,
                     ).run()
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
@@ -708,6 +804,7 @@ class NoteGenerator:
 
         # 下载音频
         try:
+            self._check_cancelled()
             # 视频帧补取走后落到这里（缓存命中但缺视频的重试）：音频文件还在
             # 就直接复用，不必把整条音轨再下一遍
             if (
@@ -814,6 +911,8 @@ class NoteGenerator:
         """
         self._update_status(task_id, status_phase)
 
+        self._check_cancelled()
+
         # 已有缓存，直接返回
         if transcript_cache_file.exists():
             logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
@@ -838,6 +937,8 @@ class NoteGenerator:
                 return transcript
             else:
                 logger.info("平台无可用字幕，将使用音频转写")
+        except TaskCancelled:
+            raise
         except Exception as e:
             logger.warning(f"获取平台字幕失败: {e}，将使用音频转写")
 
@@ -903,14 +1004,18 @@ class NoteGenerator:
             and _should_segment(audio_file, _max_audio_bytes)
         )
         try:
+            self._check_cancelled()
             logger.info("开始转写音频（等待转写信号量）")
-            # 本地 whisper 独占 GPU 只跑一个；在线引擎（Groq 等）放开并发（2026-10-11）
+            # 本地 whisper 独占 GPU 只跑一个；在线引擎（Groq 等）放开并发（2026-10-11）。
+            # 等信号量期间保持可取消（_acquire_cancellable），否则「排队等 GPU」
+            # 阶段点停止只能干等前一个任务跑完。
             _sem = (
                 local_transcribe_semaphore
                 if getattr(self, "transcriber_type", "") in LOCAL_TRANSCRIBER_TYPES
                 else online_transcribe_semaphore
             )
-            with _sem:
+            self._acquire_cancellable(_sem)
+            try:
                 transcript: TranscriptResult | None = None
                 if use_segmented:
 
@@ -926,26 +1031,41 @@ class NoteGenerator:
                         on_progress=_on_segment_progress,
                         part_cache_dir=NOTE_OUTPUT_DIR,
                         task_id=task_id,
+                        should_cancel=self._cancel_requested,
                     )
                 else:
                     for attempt in range(1, _TRANSCRIBE_RETRIES + 1):
                         try:
+                            self._check_cancelled()
                             logger.info("获得转写信号量，开始转写（第 %d/%d 次尝试）",
                                         attempt, _TRANSCRIBE_RETRIES)
                             transcript = self.transcriber.transcript(file_path=audio_file)
                             break
+                        except TaskCancelled:
+                            raise
                         except Exception as exc:
                             if attempt >= _TRANSCRIBE_RETRIES:
                                 raise
                             delay = _TRANSCRIBE_RETRY_DELAYS[attempt - 1]
                             logger.warning("转写失败（第 %d/%d 次），%.0fs 后重试：%s",
                                            attempt, _TRANSCRIBE_RETRIES, delay, exc)
-                            time.sleep(delay)
+                            # 退避期间分段睡 + 每段检查：用户对着「一直重试」
+                            # 点停止时要立刻生效，不能等退避睡满
+                            slept = 0.0
+                            while slept < delay:
+                                self._check_cancelled()
+                                step = min(0.5, delay - slept)
+                                time.sleep(step)
+                                slept += step
+            finally:
+                _sem.release()
             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
             if use_segmented:
                 cleanup_part_caches(NOTE_OUTPUT_DIR, task_id)
             logger.info(f"转写并缓存成功 ({transcript_cache_file})")
             return transcript
+        except TaskCancelled:
+            raise
         except Exception as exc:
             logger.error(f"音频转写失败：{exc}")
             self._handle_exception(task_id, exc)
@@ -1022,6 +1142,9 @@ class NoteGenerator:
             "text_only": "纯文本",
         }
         for idx, (strategy, imgs, shot) in enumerate(attempts):
+            # 降级阶梯的每一级之间检查取消：用户在「上游不稳定、正在用 X 策略
+            # 重试」时点停止，不该再陪跑剩下的层级
+            self._check_cancelled()
             if strategy in ("grid2", "grid3", "thinned"):
                 imgs = self._rebuild_video_grids(task_id, mode=strategy)
                 if not imgs:
@@ -1052,6 +1175,9 @@ class NoteGenerator:
                 markdown_cache_file.write_text(markdown, encoding="utf-8")
                 logger.info(f"GPT 总结并缓存成功 ({markdown_cache_file}, 策略={strategy})")
                 return markdown
+            except TaskCancelled:
+                # 用户停止：不许被当成「这一级失败」卷进下一级降级
+                raise
             except Exception as exc:
                 last_exc = exc
                 logger.error(f"GPT 总结失败（策略={strategy}）：{type(exc).__name__}: {exc}")
@@ -1093,7 +1219,10 @@ class NoteGenerator:
                 frame_dir=frame_dir,
                 grid_dir=grid_dir,
                 max_frames=_frame_budget(),
+                cancel_check=self._cancel_requested,
             ).run(reuse_frames=reuse)
+        except TaskCancelled:
+            raise
         except Exception as e:
             logger.warning(f"拼图重建失败: {e}")
             return []
@@ -1433,22 +1562,30 @@ def list_recent_tasks(limit: int = 80) -> List[dict]:
 #   2) 删除任务时判断是否正在生成，正在跑的不允许删（否则状态文件会被下一次
 #      _update_status 重新写回来）。
 # 只对本进程可见：进程重启后的残留任务由 reap_interrupted_tasks() 收敛。
+# token（2026-10-16 加）：登记归属到具体 run——「停止后立刻重试」时旧 run 的
+# 收尾摘除不能把新 run 的登记一起摘掉（否则去重门禁失效，可重复提交）。
 
-_active_tasks: dict[str, str] = {}          # task_id -> video_id
+_active_tasks: dict[str, dict] = {}          # task_id -> {"video_id": str, "token": object}
 _active_tasks_lock = threading.Lock()
 
 
-def mark_task_active(task_id: str, video_id: Optional[str] = None) -> None:
+def mark_task_active(task_id: str, video_id: Optional[str] = None, token: object = None) -> None:
     if not task_id:
         return
     with _active_tasks_lock:
-        _active_tasks[task_id] = video_id or ""
+        _active_tasks[task_id] = {"video_id": video_id or "", "token": token}
 
 
-def mark_task_done(task_id: str) -> None:
+def mark_task_done(task_id: str, token: object = None) -> None:
     if not task_id:
         return
     with _active_tasks_lock:
+        info = _active_tasks.get(task_id)
+        if info is None:
+            return
+        if token is not None and info.get("token") is not None and info["token"] is not token:
+            logger.info(f"任务登记已被新的执行接管，跳过本次摘除 (task_id={task_id})")
+            return
         _active_tasks.pop(task_id, None)
 
 
@@ -1462,8 +1599,8 @@ def active_task_for_video(video_id: str) -> Optional[str]:
     if not video_id:
         return None
     with _active_tasks_lock:
-        for tid, vid in _active_tasks.items():
-            if vid and vid == video_id:
+        for tid, info in _active_tasks.items():
+            if info.get("video_id") and info["video_id"] == video_id:
                 return tid
     return None
 

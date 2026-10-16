@@ -14,9 +14,10 @@ from pathlib import Path
 from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK, MERGE_PROMPT
 from app.gpt.utils import fix_markdown
 from app.gpt.request_chunker import RequestChunker
+from app.exceptions.task_cancel import TaskCancelled
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from app.utils.logger import get_logger
 
@@ -52,6 +53,13 @@ class CompletionStalled(RuntimeError):
 
 
 class UniversalGPT(GPT):
+    # 用户「停止生成」谓词（NoteGenerator 注入）：流式增量、重试间隙、
+    # 分批/合并循环的检查点都调它，命中即抛 TaskCancelled。
+    # 类级默认 None：绕过 __init__ 构造的实例（测试替身）也能安全调用。
+    # 放在这里而不是构造参数：GPT 实例由 build_gpt 统一构建，调用方
+    # （note._summarize_text）拿到实例后再注入，改动面最小。
+    cancel_check: Optional[Callable[[], bool]] = None
+
     def __init__(self, client, model: str, temperature: float = 0.7, thinking_effort: Optional[str] = None):
         self.client = client
         self.model = model
@@ -72,6 +80,11 @@ class UniversalGPT(GPT):
         # 初始化时缓存重试配置，避免每次请求重复读取环境变量
         self._max_retry_attempts = max(1, int(os.getenv("OPENAI_RETRY_ATTEMPTS", "3")))
         self._retry_base_backoff = float(os.getenv("OPENAI_RETRY_BACKOFF_SECONDS", "1.5"))
+
+    def _raise_if_cancelled(self) -> None:
+        check = getattr(self, "cancel_check", None)
+        if check and check():
+            raise TaskCancelled()
 
     def _format_time(self, seconds: float) -> str:
         return str(timedelta(seconds=int(seconds)))[2:]
@@ -327,6 +340,8 @@ class UniversalGPT(GPT):
         started_at = time.monotonic()
         last_activity_at = started_at
         for chunk in stream:
+            # 流式期间逐增量检查取消：长思考/长输出期间点「停止生成」也近乎即时生效
+            self._raise_if_cancelled()
             now = time.monotonic()
             if now - last_activity_at > stall_limit:
                 raise CompletionStalled(
@@ -364,8 +379,12 @@ class UniversalGPT(GPT):
     def _chat_completion_create(self, messages: list):
         last_exc = None
         for attempt in range(self._max_retry_attempts):
+            self._raise_if_cancelled()
             try:
                 return self._do_create(messages)
+            except TaskCancelled:
+                # 用户停止：不许被卷进「可重试错误」的退避重试
+                raise
             except EmptyCompletionError as exc:
                 # 空响应只小额度重试（最多 2 次）：偶发抖动值得再试一次，
                 # 但更可能是请求太大把上游打崩——快速失败让降级阶梯换更小的请求
@@ -406,12 +425,19 @@ class UniversalGPT(GPT):
 
         current_partials = list(partials)
         while len(current_partials) > 1:
+            self._raise_if_cancelled()
             groups = merge_chunker.group_texts_by_budget(current_partials, build_messages)
             new_partials = []
             for group_idx, group in enumerate(groups):
+                self._raise_if_cancelled()
                 messages = build_messages(group)
                 try:
                     response = self._chat_completion_create(messages)
+                except TaskCancelled:
+                    # 用户停止：断点照常落盘（已完成的合并成果保留），异常上抛
+                    if checkpoint_key and source_signature:
+                        self._save_checkpoint(checkpoint_key, source_signature, current_partials, "merge")
+                    raise
                 except Exception as exc:
                     if checkpoint_key and source_signature:
                         self._save_checkpoint(checkpoint_key, source_signature, current_partials, "merge")
@@ -628,6 +654,7 @@ class UniversalGPT(GPT):
             # 分批阶段不产出「目录」「AI 总结」：这两个是整篇级段落，每批各写
             # 一份会在合并后堆成拼贴（2026-10-14 实拍：55 批「本段指出…」
             # 叠在最终笔记的 AI 总结里）。合并完成后由 finalize_note 统一重建。
+            self._raise_if_cancelled()
             batch_format = [f for f in (source._format or []) if f not in ("toc", "summary")]
             messages = self.create_messages(
                 chunk.segments,
@@ -653,8 +680,15 @@ class UniversalGPT(GPT):
                 futures = {pool.submit(_run_chunk, c): base + i for i, c in enumerate(remaining)}
                 try:
                     for fut in as_completed(futures):
+                        self._raise_if_cancelled()
                         results[futures[fut]] = fut.result()
                         _save_progress()
+                except TaskCancelled:
+                    # 用户停止：未开跑的余批取消，已完成进度落 checkpoint，异常上抛
+                    for f in futures:
+                        f.cancel()
+                    _save_progress()
+                    raise
                 except Exception:
                     # 任一批失败：取消未开跑的余批，已完成进度落 checkpoint，
                     # 抛错交给上层降级阶梯（full→grid2→grid3→thinned→text_only）
@@ -666,6 +700,9 @@ class UniversalGPT(GPT):
             for i, chunk in enumerate(remaining):
                 try:
                     results[base + i] = _run_chunk(chunk)
+                except TaskCancelled:
+                    _save_progress()
+                    raise
                 except Exception:
                     _save_progress()
                     raise

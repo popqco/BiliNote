@@ -28,6 +28,13 @@ from app.services.note import (
     purge_task,
     release_stale_active_task,
 )
+from app.services.task_runs import (
+    clear_cancel_request,
+    finish_run,
+    is_task_cancel_requested,
+    register_run,
+    request_cancel_task,
+)
 from app.services.task_serial_executor import task_serial_executor, video_task_locks
 from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
@@ -231,19 +238,25 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
             video_understanding=video_understanding,
             video_interval=video_interval,
             grid_size=grid_size,
+            run=run,
         )
 
     logger.info(f"任务进入执行队列 (task_id={task_id})")
+    # 取消登记先于入池：排队中的任务也要能停——run 在进线程池之前就登记，
+    # 等 worker 取到它时第一件事就是检查取消（见 services/task_runs.py）
+    run = register_run(task_id)
     # 登记「本进程正在跑」：删除接口靠它拒绝删正在生成的任务，重复提交靠它
-    # 拦住「同一个 task 被点两次重新生成」导致的状态回退。
-    mark_task_active(task_id, video_id)
+    # 拦住「同一个 task 被点两次重新生成」导致的状态回退。token=run：
+    # 「停止后立刻重试」时旧 run 的收尾摘除不会误摘新 run 的登记。
+    mark_task_active(task_id, video_id, token=run)
     try:
         # 同一视频互斥：防止同视频双任务并发下载/生成触发文件锁冲突（WinError 32）。
         # 不同视频互不阻塞，两个 worker 可让「转写（GPU）」与「总结（网络）」阶段重叠（ADR-0001）。
         with video_task_locks.get(video_id or task_id):
             note = task_serial_executor.run(_execute_note_task, task_id=task_id)
     finally:
-        mark_task_done(task_id)
+        mark_task_done(task_id, token=run)
+        finish_run(run)
     logger.info(f"Note generated: {task_id}")
     if not note or not note.markdown:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
@@ -256,6 +269,62 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         VectorStoreManager().index_task(task_id)
     except Exception as e:
         logger.warning(f"向量索引失败（不影响笔记）: {e}")
+
+
+@router.post("/cancel_task")
+def cancel_task(data: RecordRequest):
+    """停止正在生成（或排队中）的任务。
+
+    用途（2026-10-16 用户需求）：模型/参数设置错了时不必干等整条流程跑完
+    （含转写重试、总结降级阶梯这类「一直不停地尝试」）——点停止即刻中止，
+    改完设置可以直接重新生成。
+
+    行为：给当前执行打取消标记（阶段边界/重试间隙/流式增量处立刻生效），
+    状态立即落 CANCELLED，前端与自动化都把「已停止」当终态（不是失败）。
+    """
+    task_id = (data.task_id or "").strip()
+    if not task_id:
+        return R.error(msg="缺少 task_id，无法停止任务", code=400)
+
+    # 磁盘状态：判断「没有 live run」时是已结束还是残留
+    disk_status = None
+    try:
+        status_file = Path(NOTE_OUTPUT_DIR) / f"{task_id}.status.json"
+        if status_file.exists():
+            disk_status = json.loads(status_file.read_text(encoding="utf-8")).get("status")
+    except Exception:
+        disk_status = None
+
+    live = request_cancel_task(task_id)
+    if live:
+        # 立即落盘，前端不用等当前步骤退出就能看到「已停止」；
+        # 正在跑的 run 收尾时会再写一次终态文案（其状态写入已被抑制，只允许 CANCELLED）
+        NoteGenerator()._update_status(
+            task_id, TaskStatus.CANCELLED, message="已停止生成（正在中止当前步骤…）"
+        )
+        logger.info(f"停止任务已受理：task_id={task_id}（live run）")
+        return R.success({"cancelled": True, "task_id": task_id, "live": True})
+
+    from app.services.note import TERMINAL_STATUSES
+
+    if disk_status in TERMINAL_STATUSES:
+        # 已经结束的任务：清掉刚落的预取消墓碑，不误伤将来的重试
+        clear_cancel_request(task_id)
+        return R.success({
+            "cancelled": False,
+            "task_id": task_id,
+            "message": "任务已结束，无需停止",
+            "status": disk_status,
+        })
+
+    # 磁盘非终态但没有 live run：本进程没在跑它（进程重启残留 / 提交后线程还没起）。
+    # request_cancel_task 已落墓碑，迟到的 run 会立即取消；这里顺手把状态收敛为
+    # CANCELLED，前端不必等下一个轮询周期。
+    NoteGenerator()._update_status(
+        task_id, TaskStatus.CANCELLED, message="已停止生成（用户手动停止）"
+    )
+    logger.info(f"停止任务：无 live run，已按终态收敛 task_id={task_id}（原状态 {disk_status}）")
+    return R.success({"cancelled": True, "task_id": task_id, "live": False})
 
 
 @router.post('/delete_task')
@@ -456,6 +525,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         # 统一先写入 PENDING（含 video_id/origin，供排队展示、去重与自动化任务同步；
         # 含 model_name/provider_id/style，供徽标与 Viewer 回填——此前没写，
         # 手动提交的笔记一旦走 /tasks/recent 回填，模型/风格徽标即空白）
+        # 新提交（含重试/复用）视为对旧停止请求的作废：清掉预取消墓碑，
+        # 否则「点停止后马上重试」会被上一次的停止误伤（见 services/task_runs.py）
+        clear_cancel_request(task_id)
         NoteGenerator()._update_status(
             task_id,
             TaskStatus.PENDING,
@@ -572,8 +644,7 @@ def get_task_status(task_id: str):
                     "task_id": task_id
                 })
 
-        if status == TaskStatus.FAILED.value:
-            # P1-③：FAILED-but-has-result 允许查看。重试/同视频复用 task_id 时，
+        if status == TaskStatus.FAILED.value:            # P1-③：FAILED-but-has-result 允许查看。重试/同视频复用 task_id 时，
             # 老结果文件（{task_id}.json）还在——直接 500 会让之前成功的内容也
             # 看不了。信封仍走 R.error（code=500，调用方按失败处理），只是把
             # 结果附在 data.result 里，前端失败卡片可展示。
@@ -590,6 +661,18 @@ def get_task_status(task_id: str):
                 except Exception as e:
                     logger.warning(f"读取失败任务的结果文件失败 (task_id={task_id}): {e}")
             return R.error(message or "任务失败", code=500)
+
+        if status == TaskStatus.CANCELLED.value:
+            # 已停止（用户主动）：成功信封 + 终态状态。前端按「已停止」展示
+            # 并可一键重试；自动化不计失败（不算冷却、不发失败告警）。
+            resp = {
+                "status": status,
+                "message": message or "已停止生成",
+                "task_id": task_id,
+            }
+            if audio_meta:
+                resp["audio_meta"] = audio_meta
+            return R.success(resp)
 
         # 处理中状态：附带早期元信息（标题/封面）与排队位次
         resp = {
