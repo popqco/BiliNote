@@ -3,6 +3,8 @@ import hashlib
 import os
 import re
 import subprocess
+
+from app.utils.proc import no_window_kwargs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ffmpeg
 from PIL import Image, ImageDraw, ImageFont
@@ -77,7 +79,7 @@ class VideoReader:
         cmd = ["ffmpeg", "-ss", str(ts), "-i", self.video_path, "-frames:v", "1", "-q:v", "2", "-y", output_path,
                "-hide_banner", "-loglevel", "error"]
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, **no_window_kwargs())
             return output_path
         except subprocess.CalledProcessError:
             return None

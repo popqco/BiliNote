@@ -3,6 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 import subprocess
+
+from app.utils.proc import no_window_kwargs
 import os
 import uuid
 load_dotenv()
@@ -33,7 +35,7 @@ def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index:
     ]
 
     print("Running command:", command)
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, capture_output=True, text=True, **no_window_kwargs())
 
     # 失败必须抛错而不是静默返回路径：调用方按「单张失败」降级处理，
     # 若仍返回路径，markdown 会写入指向不存在文件的 URL → 前端破图

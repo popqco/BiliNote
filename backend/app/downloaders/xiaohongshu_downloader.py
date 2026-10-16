@@ -12,6 +12,8 @@
 """
 import os
 import subprocess
+
+from app.utils.proc import no_window_kwargs
 from abc import ABC
 from typing import Optional, Union
 
@@ -55,6 +57,7 @@ class XiaohongshuDownloader(Downloader, ABC):
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **no_window_kwargs(),
             )
         except subprocess.CalledProcessError:
             raise Exception("ffmpeg 转换 MP3 失败")

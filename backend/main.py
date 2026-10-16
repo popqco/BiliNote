@@ -24,6 +24,7 @@ from app.exceptions.exception_handlers import register_exception_handlers
 # from app.db.model_dao import init_model_table
 # from app.db.provider_dao import init_provider_table
 from app.utils.logger import get_logger
+from app.utils.proc import no_window_kwargs
 from app import create_app
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from events import register_handler
@@ -240,6 +241,7 @@ def _describe_port_holder(port: int) -> str:
             out = subprocess.run(
                 ["netstat", "-ano"],
                 capture_output=True, text=True, timeout=5,
+                **no_window_kwargs(),
             ).stdout
             pids = {
                 m.group(1)
@@ -254,6 +256,7 @@ def _describe_port_holder(port: int) -> str:
                     t = subprocess.run(
                         ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                         capture_output=True, text=True, timeout=5,
+                        **no_window_kwargs(),
                     ).stdout
                     first = t.strip().splitlines()[0] if t.strip() else ""
                     name = first.strip('"').split('","')[0] if first else ""

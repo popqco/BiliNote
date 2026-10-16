@@ -5,6 +5,7 @@ import time
 from dotenv import load_dotenv
 
 from app.utils.logger import get_logger
+from app.utils.proc import no_window_kwargs
 logger = get_logger(__name__)
 
 
@@ -75,11 +76,14 @@ def _probe_ffmpeg() -> tuple:
                 msgs.append(f"在系统PATH中找到ffmpeg: {path_dir}")
                 break
     try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=True, **no_window_kwargs())
         msgs.append("ffmpeg 已安装")
         return True, msgs
-    except (FileNotFoundError, OSError, subprocess.CalledProcessError):
-        msgs.append("ffmpeg 未安装")
+    except (FileNotFoundError, OSError, subprocess.CalledProcessError) as e:
+        # 带出真实异常：2026-10-16 窗口风暴期进程创建瞬时失败被算成「未安装」，
+        # 只写「ffmpeg 未安装」完全无从定位——OSError 细节必须落进诊断日志
+        msgs.append(f"ffmpeg 不可用（{type(e).__name__}: {e}）")
         return False, msgs
 
 

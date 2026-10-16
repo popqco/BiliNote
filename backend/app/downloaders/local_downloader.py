@@ -1,5 +1,7 @@
 import os
 import subprocess
+
+from app.utils.proc import no_window_kwargs
 from abc import ABC
 from typing import Optional
 
@@ -44,7 +46,8 @@ class LocalDownloader(Downloader, ABC):
                 '-y',  # 覆盖
                 output_path
             ]
-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           check=True, **no_window_kwargs())
 
             if not os.path.exists(output_path):
                 raise RuntimeError(f"封面图片生成失败: {output_path}")
@@ -77,7 +80,8 @@ class LocalDownloader(Downloader, ABC):
                 output_path
             ]
 
-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           check=True, **no_window_kwargs())
 
             if not os.path.exists(output_path):
                 raise RuntimeError(f"mp3 文件生成失败: {output_path}")
