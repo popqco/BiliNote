@@ -63,6 +63,17 @@ export const get_task_status = async (task_id: string) => {
   return await request.get('/task_status/' + task_id, { suppressToast: true })
 }
 
+/**
+ * 停止正在生成（或排队中）的任务。
+ *
+ * 模型/参数设置错了时不必干等整条流程跑完（含转写重试、总结降级阶梯这类
+ * 「一直不停地尝试」）：停止后状态落 CANCELLED（已停止），改完设置可直接
+ * 重新生成。suppressToast：提示文案由调用方（store.cancelTask）决定。
+ */
+export const cancel_task = async (task_id: string) => {
+  return await request.post('/cancel_task', { task_id }, { suppressToast: true })
+}
+
 // 快速取视频标题/封面（不下载）：提交后立刻调用，让任务卡片第一时间可辨识，
 // 不必等任务成功/失败。失败静默返回 null（不影响主流程）。
 export const get_video_meta = async (url: string, platform = 'bilibili') => {

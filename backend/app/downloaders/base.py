@@ -1,9 +1,10 @@
 import enum
 
 from abc import ABC, abstractmethod
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from app.enmus.note_enums import DownloadQuality
+from app.exceptions.task_cancel import TaskCancelled
 from app.models.notes_model import AudioDownloadResult
 from app.models.transcriber_model import TranscriptResult
 from app.utils.ydl_log import ydl_logger
@@ -36,10 +37,38 @@ YDL_RETRY_OPTS = {
 
 
 class Downloader(ABC):
+    # 取消谓词（由 NoteGenerator 注入）：返回 True 表示用户已请求停止。
+    # yt-dlp 系下载器把它挂进进度回调，正在跑的下载立即中断；
+    # 不支持中断的平台（直连 HTTP）至少在下载前后被 note.py 的检查点覆盖。
+    cancel_check: Optional[Callable[[], bool]] = None
+
     def __init__(self):
         #TODO 需要修改为可配置
         self.quality = QUALITY_MAP.get('fast')
         self.cache_data=getenv('DATA_DIR')
+
+    def _progress_hook_with_cancel(self):
+        """yt-dlp 进度回调：命中取消即抛 TaskCancelled 中断下载。
+
+        从 progress hook 抛出的异常会原样穿出 yt-dlp 的 download/extract_info
+        （不落进它的 DownloadError 重试分类，见 _ydl_extract_download 只捕
+        DownloadError），所以取消不会被当成「瞬态网络错误」反复重试。
+        """
+        cancel_check = self.cancel_check
+
+        def _hook(_status: dict) -> None:
+            if cancel_check and cancel_check():
+                raise TaskCancelled()
+
+        return _hook
+
+    def _ydl_opts_with_cancel(self, ydl_opts: dict) -> dict:
+        """给 yt-dlp 选项挂上取消回调（未注入 cancel_check 时原样返回）。"""
+        if not self.cancel_check:
+            return ydl_opts
+        hooks = list(ydl_opts.get("progress_hooks") or [])
+        hooks.append(self._progress_hook_with_cancel())
+        return {**ydl_opts, "progress_hooks": hooks}
 
     @abstractmethod
     def download(self, video_url: str, output_dir: str = None,

@@ -170,6 +170,8 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
+        # 用户点停止后，正在跑的下载在下一个进度回调处中断（见 Downloader._ydl_opts_with_cancel）
+        ydl_opts = self._ydl_opts_with_cancel(ydl_opts)
         video_id_hint = extract_video_id(video_url, "bilibili")
         info = _ydl_extract_download(ydl_opts, video_url, output_dir, video_id_hint)
         video_id = info.get("id")
@@ -225,6 +227,8 @@ class BilibiliDownloader(Downloader, ABC):
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
 
+        # 用户点停止后，正在跑的下载在下一个进度回调处中断（见 Downloader._ydl_opts_with_cancel）
+        ydl_opts = self._ydl_opts_with_cancel(ydl_opts)
         info = _ydl_extract_download(ydl_opts, video_url, output_dir, video_id)
         video_id = info.get("id")
         video_path = os.path.join(output_dir, f"{video_id}.mp4")

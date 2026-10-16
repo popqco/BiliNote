@@ -123,11 +123,16 @@ def send_summary(result: dict) -> List[dict]:
         return [{"channel": "（空轮静默）", "ok": True, "detail": f"本轮无新任务，跳过 {len(skipped)}，未打扰用户"}]
     ok = [s for s in submitted if s.get("status") == "SUCCESS"]
     failed = [s for s in submitted if s.get("status") == "FAILED"]
-    pending = [s for s in submitted if s.get("status") not in ("SUCCESS", "FAILED")]
+    # CANCELLED（用户主动停止）是终态：不算失败、也不算「仍在处理」——
+    # 否则用户停掉的任务会在轮次汇总里被当成还在跑而误报
+    cancelled = [s for s in submitted if s.get("status") == "CANCELLED"]
+    pending = [s for s in submitted if s.get("status") not in ("SUCCESS", "FAILED", "CANCELLED")]
     skipped = result.get("skipped") or []
 
     lines = [f"【BiliNote 检查轮】{result.get('started_at', '')}"]
     line2 = f"新增 {len(submitted)}：成功 {len(ok)}，失败 {len(failed)}"
+    if cancelled:
+        line2 += f"，已停止 {len(cancelled)}"
     if pending:
         line2 += f"，仍在处理 {len(pending)}"
     line2 += f"；跳过 {len(skipped)}"

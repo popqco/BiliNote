@@ -158,6 +158,17 @@ export const useTasksSync = (interval = 30000) => {
           })
           continue
         }
+        // ②' 外部（手机 Viewer / MCP / 另一个窗口）把正在跑的任务停了：
+        //     本地还在「生成中」时要跟着落「已停止」，否则界面一直转圈。
+        //     只改进行中的本地状态：SUCCESS 等终态不因一次停止被翻掉。
+        if (bt.status === 'CANCELLED' && ACTIVE.includes(local.status)) {
+          useTaskStore.getState().updateTaskContent(bt.task_id, {
+            status: 'CANCELLED',
+            message: bt.message || '已停止生成',
+            queuePosition: undefined,
+          })
+          continue
+        }
 
         // ③ 有结果的任务内容被外部重写（updated_at 变化）：
         //    本地已是 SUCCESS 时旧逻辑不会刷新正文，必须靠水位线补拉。

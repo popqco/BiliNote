@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import ffmpeg
 
+from app.exceptions.task_cancel import TaskCancelled
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
 from app.utils.logger import get_logger
 
@@ -161,18 +162,33 @@ def _write_part_cache(cache_file: Optional[Path], result: TranscriptResult) -> N
 
 
 def _transcribe_part_with_retry(
-    transcriber, part_path: str, index: int, n: int
+    transcriber, part_path: str, index: int, n: int,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> TranscriptResult:
-    """与 note.py 单文件路径同款退避节奏（3 次尝试，3s/6s）。"""
+    """与 note.py 单文件路径同款退避节奏（3 次尝试，3s/6s）。
+
+    should_cancel：用户「停止生成」谓词——每段尝试前与退避期间都检查，
+    命中即抛 TaskCancelled（不算段失败，不消耗重试预算）。
+    """
     for attempt in range(1, _PART_RETRIES + 1):
+        if should_cancel and should_cancel():
+            raise TaskCancelled()
         try:
             return transcriber.transcript(file_path=part_path)
+        except TaskCancelled:
+            raise
         except Exception as exc:
             if attempt >= _PART_RETRIES:
                 raise RuntimeError(f"第 {index + 1}/{n} 段转写失败（已重试 {_PART_RETRIES} 次）：{exc}") from exc
             delay = _PART_RETRY_DELAYS[attempt - 1]
             logger.warning(f"第 {index + 1}/{n} 段转写失败（第 {attempt} 次），{delay:.0f}s 后重试：{exc}")
-            time.sleep(delay)
+            slept = 0.0
+            while slept < delay:
+                if should_cancel and should_cancel():
+                    raise TaskCancelled()
+                step = min(0.5, delay - slept)
+                time.sleep(step)
+                slept += step
 
 
 def transcribe_segmented(
@@ -183,11 +199,15 @@ def transcribe_segmented(
     on_progress: Optional[Callable[[int, int], None]] = None,
     part_cache_dir=None,
     task_id: Optional[str] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> TranscriptResult:
     """把超限音频切 n 段逐段转写后合并；异常上抛，已成功段的缓存留给断点续跑。
 
     :param on_progress: 每段开始真实转写（缓存命中跳过段不计）前回调 (第几段, 总段数)
+    :param should_cancel: 用户停止谓词；段间/重试间命中即抛 TaskCancelled
     """
+    if should_cancel and should_cancel():
+        raise TaskCancelled()
     duration = probe_duration(audio_path)
     n = plan_segment_count(duration, max_bytes)
     part_starts = [i * (duration / n) for i in range(n)]
@@ -202,6 +222,8 @@ def transcribe_segmented(
         parts = segment_audio(audio_path, n, work_dir)
         results: Dict[int, TranscriptResult] = {}
         for i, (part_path, part_start) in enumerate(parts):
+            if should_cancel and should_cancel():
+                raise TaskCancelled()
             cache_file = _part_cache_file(part_cache_dir, task_id, i)
             cached = _load_part_cache(cache_file)
             if cached is not None:
@@ -214,7 +236,9 @@ def transcribe_segmented(
                 except Exception:
                     pass
             logger.info(f"开始转写第 {i + 1}/{n} 段（自 {part_start:.0f}s 起）")
-            results[i] = _transcribe_part_with_retry(transcriber, part_path, i, n)
+            results[i] = _transcribe_part_with_retry(
+                transcriber, part_path, i, n, should_cancel=should_cancel
+            )
             _write_part_cache(cache_file, results[i])
         merged = merge_results(part_starts, results)
         logger.info(f"分段转写合并完成：{len(parts)} 段 → {len(merged.segments)} 个片段")

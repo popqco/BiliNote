@@ -11,6 +11,9 @@ class TaskStatus(str, enum.Enum):
     SAVING = "SAVING"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
+    # 用户主动停止（/cancel_task）：终态，但不是错误——前端展示「已停止」，
+    # 自动化不计入失败冷却与告警（见 services/task_runs.py 模块文档）
+    CANCELLED = "CANCELLED"
 
     @classmethod
     def description(cls, status):
@@ -24,5 +27,6 @@ class TaskStatus(str, enum.Enum):
             cls.SAVING: "保存中",
             cls.SUCCESS: "完成",
             cls.FAILED: "失败",
+            cls.CANCELLED: "已停止",
         }
         return desc_map.get(status, "未知状态")
