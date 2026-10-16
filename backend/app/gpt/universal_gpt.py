@@ -306,6 +306,29 @@ class UniversalGPT(GPT):
                 return self._stream_create(messages, temperature=self.temperature, reasoning_effort=None)
             raise
 
+    def _resolve_stall_limit(self) -> float:
+        """流式内容静默阈值（秒）：环境变量 > 客户端按链路的建议值 > 120。
+
+        Responses 链路要宽得多：网关（cmdc-pak / OpenCode Free 实测）把推理内容
+        藏起来，模型思考期只在线上发 `: ping` 保活注释（SDK 会丢弃注释），
+        正文 delta 之前内容层可以静默几分钟——用 120s 判定「上游挂死」纯属误杀，
+        会白白触发减帧降级、牺牲笔记质量（2026-10-17：19/20 次假死是 muse-spark，
+        全部发生在 Responses 链路）。chat 链路推理是流式可见的，静默即异常，
+        保持 120s 快速失败。
+        """
+        env = os.getenv("OPENAI_STREAM_STALL_SECONDS")
+        if env:
+            try:
+                value = float(env)
+                if value > 0:
+                    return value
+            except ValueError:
+                pass
+        hinted = getattr(getattr(self, "client", None), "stream_stall_seconds", None)
+        if isinstance(hinted, (int, float)) and hinted > 0:
+            return float(hinted)
+        return 120.0
+
     def _stream_create(self, messages: list, temperature, reasoning_effort: Optional[str] = None):
         from types import SimpleNamespace
         kwargs = dict(
@@ -320,9 +343,10 @@ class UniversalGPT(GPT):
         parts: list[str] = []
         finish_reason = None
         # 两道闸，单位秒，可用环境变量覆盖：
-        #   OPENAI_STREAM_STALL_SECONDS    多久没收到任何增量就判定上游假死（默认 120）
+        #   OPENAI_STREAM_STALL_SECONDS    多久没收到任何增量就判定上游假死
+        #                                  （默认 120；Responses 链路按 600，见 _resolve_stall_limit）
         #   OPENAI_STREAM_DEADLINE_SECONDS 单次调用总时长上限（默认 900）
-        stall_limit = float(os.getenv("OPENAI_STREAM_STALL_SECONDS", "120") or 120)
+        stall_limit = self._resolve_stall_limit()
         total_limit = float(os.getenv("OPENAI_STREAM_DEADLINE_SECONDS", "900") or 900)
         started_at = time.monotonic()
         last_activity_at = started_at
@@ -349,7 +373,13 @@ class UniversalGPT(GPT):
             # 只认 content 会把「正在思考」误判成假死：space-bunny-free 这类模型在长
             # 提示上先流几分钟推理才给正文，2h53m 视频的 full 策略就是这样被 120s
             # 闸门掐掉的（2026-10-01 实测，日志里只留下一句 CompletionStalled）。
-            if text or getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None):
+            # keepalive（协议适配层透传的结构性事件，2026-10-17）同理算活跃。
+            if (
+                text
+                or getattr(delta, "reasoning_content", None)
+                or getattr(delta, "reasoning", None)
+                or getattr(delta, "keepalive", False)
+            ):
                 last_activity_at = now
         content = "".join(parts)
         if not content.strip():
