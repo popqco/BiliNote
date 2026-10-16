@@ -493,6 +493,20 @@ class NoteGenerator:
             if run.cancelled and status != TaskStatus.CANCELLED:
                 logger.debug(f"任务已请求停止，抑制状态推进 (task_id={task_id}, status={status})")
                 return
+        self.write_task_status(task_id, status, message=message, extra=extra)
+
+    @staticmethod
+    def write_task_status(task_id: Optional[str], status: Union[str, TaskStatus],
+                          message: Optional[str] = None, extra: Optional[dict] = None) -> None:
+        """合并式写 {task_id}.status.json（不构造 NoteGenerator）。
+
+        与实例方法 _update_status 的唯一区别：不查 run 抑制表（调用方负责）。
+        `/cancel_task` 走这条轻量路径——构造 NoteGenerator 会初始化转写器
+        （首次构建实测 >10s，要在 HF 缓存/模型上做一轮检查），而用户点「停止」
+        要的是即时反馈；这里只碰一个 JSON 文件，毫秒级返回。
+        """
+        if not task_id:
+            return
         status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
         data: dict = {}
         try:
@@ -507,24 +521,11 @@ class NoteGenerator:
             data.pop("message", None)
         if extra:
             data.update(extra)
-        self._write_status_file(task_id, data)
+        _write_status_file_atomic(status_file, data)
 
     def _write_status_file(self, task_id: str, data: dict) -> None:
         """原子写 {task_id}.status.json（tmp + rename）。"""
-        NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-        try:
-            temp_file = status_file.with_suffix(".tmp")
-            with temp_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            temp_file.replace(status_file)
-        except Exception as e:
-            logger.error(f"写入状态文件失败 (task_id={task_id})：{e}")
-            try:
-                with status_file.open("w", encoding="utf-8") as f:
-                    f.write(f"Error writing status: {str(e)}")
-            except Exception:
-                logger.error(f"写入错误 {e}")
+        _write_status_file_atomic(NOTE_OUTPUT_DIR / f"{task_id}.status.json", data)
 
     def _merge_status_meta(self, task_id: Optional[str], extra: dict) -> None:
         """在不改变当前 status 的前提下，把附加字段并入 {task_id}.status.json。"""
@@ -1322,6 +1323,34 @@ class NoteGenerator:
 
 
 # ---------------- 模块级辅助（供路由 / 自动化复用） ----------------
+
+def _write_status_file_atomic(status_file: Path, data: dict) -> None:
+    """原子写状态文件（tmp + rename），失败降级直写。"""
+    NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        temp_file = status_file.with_suffix(".tmp")
+        with temp_file.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        temp_file.replace(status_file)
+    except Exception as e:
+        logger.error(f"写入状态文件失败 ({status_file.name})：{e}")
+        try:
+            with status_file.open("w", encoding="utf-8") as f:
+                f.write(f"Error writing status: {str(e)}")
+        except Exception:
+            logger.error(f"写入错误 {e}")
+
+
+def write_task_status(task_id: str, status: Union[str, TaskStatus],
+                     message: Optional[str] = None, extra: Optional[dict] = None) -> None:
+    """供路由/脚本用的轻量状态写入（不构造 NoteGenerator）。
+
+    `/cancel_task` 专用路径：构造 NoteGenerator 会初始化转写器（首次实测
+    >10s，要做一轮模型/缓存检查），而用户点「停止」要即时反馈；这里只碰
+    一个 JSON 文件。合并语义与 NoteGenerator._update_status 一致。
+    """
+    NoteGenerator.write_task_status(task_id, status, message=message, extra=extra)
+
 
 def build_gpt(model_name: Optional[str], provider_id: Optional[str]) -> GPT:
     """按供应商 + 模型名构建 GPT 实例（NoteGenerator 与存量笔记重整理共用）。"""

@@ -27,11 +27,11 @@ from app.services.note import (
     mark_task_done,
     purge_task,
     release_stale_active_task,
+    write_task_status,
 )
 from app.services.task_runs import (
     clear_cancel_request,
     finish_run,
-    is_task_cancel_requested,
     register_run,
     request_cancel_task,
 )
@@ -298,8 +298,10 @@ def cancel_task(data: RecordRequest):
     live = request_cancel_task(task_id)
     if live:
         # 立即落盘，前端不用等当前步骤退出就能看到「已停止」；
-        # 正在跑的 run 收尾时会再写一次终态文案（其状态写入已被抑制，只允许 CANCELLED）
-        NoteGenerator()._update_status(
+        # 正在跑的 run 收尾时会再写一次终态文案（其状态写入已被抑制，只允许 CANCELLED）。
+        # 走模块级轻量写入而不是 NoteGenerator()._update_status：构造 NoteGenerator
+        # 会初始化转写器（首次实测 10s+），停止按钮要的是即时反馈（2026-10-17 冒烟实测）
+        write_task_status(
             task_id, TaskStatus.CANCELLED, message="已停止生成（正在中止当前步骤…）"
         )
         logger.info(f"停止任务已受理：task_id={task_id}（live run）")
@@ -320,9 +322,7 @@ def cancel_task(data: RecordRequest):
     # 磁盘非终态但没有 live run：本进程没在跑它（进程重启残留 / 提交后线程还没起）。
     # request_cancel_task 已落墓碑，迟到的 run 会立即取消；这里顺手把状态收敛为
     # CANCELLED，前端不必等下一个轮询周期。
-    NoteGenerator()._update_status(
-        task_id, TaskStatus.CANCELLED, message="已停止生成（用户手动停止）"
-    )
+    write_task_status(task_id, TaskStatus.CANCELLED, message="已停止生成（用户手动停止）")
     logger.info(f"停止任务：无 live run，已按终态收敛 task_id={task_id}（原状态 {disk_status}）")
     return R.success({"cancelled": True, "task_id": task_id, "live": False})
 
