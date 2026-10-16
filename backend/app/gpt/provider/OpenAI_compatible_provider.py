@@ -51,30 +51,27 @@ class OpenAICompatibleProvider:
         chat → chat.completions.create；responses → responses.create
         （Responses-only 网关如 OpenCode Free 上 chat/completions 会 502，
         用 chat 测会把好端端的供应商报成连不通）。
-        开销压到最小：chat max_tokens=1；responses 用 max_output_tokens=16
-        （推理模型预算里 reasoning 先扣，给太小程序可能直接空回但不报错）。
+
+        2026-10-17 起经 AutoProtocolClient 路由：聚合网关同一 base_url 下
+        chat / responses 模型混装，「添加模型」下拉又是全量清单，模型挂错
+        供应商很常见。连通性测试的语义是「这个模型现在能不能用」，协议配错
+        应当自愈（换协议重发并记住），而不是把可用的模型报成连不通。
+        开销压到最小：max_tokens=16（推理模型的 reasoning 预算先扣，
+        给太小程序可能直接空回但不报错）。
         """
         try:
             client = build_openai_client(
                 api_key, base_url, key_label="模型供应商的 API Key", timeout=15.0,
                 default_headers=parse_extra_headers(extra_headers),
             )
-            if (api_format or "chat") == "responses":
-                from app.gpt.provider.responses_compat import ResponsesCompatClient
+            from app.gpt.provider.protocol_router import AutoProtocolClient
 
-                ResponsesCompatClient(client).chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=16,
-                )
-            else:
-                client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=1,
-                    temperature=0,
-                )
-            logging.info(f"连通性测试成功（model={model}, api_format={api_format}）")
+            AutoProtocolClient(client, preferred=api_format or "chat").chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=16,
+            )
+            logging.info(f"连通性测试成功（model={model}, 首选 api_format={api_format}）")
             return True
         except Exception as e:
             logging.warning(f"连通性测试失败（model={model}）：{e}")

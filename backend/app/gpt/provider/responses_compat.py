@@ -224,8 +224,10 @@ def _wrap_response(resp) -> SimpleNamespace:
     )
 
 
-def _chunk(delta_content=None, reasoning=None, finish_reason=None) -> SimpleNamespace:
-    delta = SimpleNamespace(content=delta_content, reasoning_content=reasoning)
+def _chunk(delta_content=None, reasoning=None, finish_reason=None, keepalive=False) -> SimpleNamespace:
+    delta = SimpleNamespace(
+        content=delta_content, reasoning_content=reasoning, keepalive=keepalive
+    )
     return SimpleNamespace(
         choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)],
     )
@@ -296,6 +298,14 @@ class _Completions:
                     or etype
                 )
                 raise RuntimeError(f"Responses 上游未完成: {reason}")
+            else:
+                # 其余结构性事件（created / in_progress / output_item.* /
+                # content_part.* …）也透传成「保活」增量：cmdc-pak 这类网关在
+                # 模型思考期只发这些事件和 : ping 注释（注释会被 SDK 吞掉），
+                # 正文 delta 前可能静默几分钟；不把结构事件算作活跃，流式假死
+                # 闸会把"正在思考"误判成"上游挂死"，白白触发减帧降级
+                # （2026-10-17 实测 muse-spark：6k 字提示思考 25s 期间零内容事件）。
+                yield _chunk(keepalive=True)
 
 
 class ResponsesCompatClient:
