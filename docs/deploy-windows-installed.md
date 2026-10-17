@@ -52,16 +52,27 @@ MSYS_NO_PATHCONV=1 VITE_API_BASE_URL=/api pnpm build
 ### 2.3 后端（后端改动时，通常可跳过）
 
 ```bash
-cd backend
-# venv 激活后：
-pyinstaller BiliNoteBackend.spec --noconfirm
-# 产物：dist/BiliNoteBackend/（BiliNoteBackend.exe + _internal/）
+# ⚠️ 必须从仓库根目录调用（不是 backend/）：spec 里 pathex=['backend'] 是相对 CWD
+# 解析的，pyinstaller 也经它解析入口 main.py。从 backend/ 目录调用会把 pathex 解析成
+# backend/backend（不存在）→ 分析器找不到 safe_stdio/ffmpeg_helper 等本地顶层模块，
+# 打出一个「构建成功但一启动就 ModuleNotFoundError」的坏 exe（2026-10-17 实测）。
+# venv 激活后（任选其一，都在仓库根执行）：
+pyinstaller backend/BiliNoteBackend.spec --noconfirm
+# 产物：dist/BiliNoteBackend/（exe 约 60MB + _internal/ 约 4GB）
 ```
 
-⚠️ `BiliNoteBackend.spec` 有过静默回退的教训：`pathex` 必须是 `'.'`，
-`collect_all` 循环必须覆盖 chromadb / chromadb.rust_bindings / bcrypt / matplotlib /
-docx / pymupdf / fitz / faster_whisper 这 8 个包。spec 回退会打出「能启动但功能全灭」的
-白壳 exe（AI 问答全灭、包缺失等怪病都源于此）。改 spec 前先 diff 确认。
+**校验一次构建是否健康**（30 秒，别省）：
+1. `ls dist/BiliNoteBackend/_internal | wc -l` 应为 **149**、`du -sh` 约 4.0G；出现
+   torch / chromadb_rust_bindings / onnxruntime / ctranslate2 / docx / pymupdf / matplotlib
+   等一级目录；
+2. `build/BiliNoteBackend/warn-BiliNoteBackend.txt` 里不能出现 `safe_stdio` / `ffmpeg_helper`
+   一类本地模块的 `missing module named ...`；
+3. 新 exe 起一次空跑（临时 cwd + `BACKEND_PORT` 换端口）确认 `/api/sys_check` 200。
+
+⚠️ 历史教训：这个 spec 曾被误改成 pathex='.'/八个 collect_all 名单而「静默回退」打出
+白壳 exe（AI 问答全灭、包缺失等怪病）。**当前 spec（2026-10-14 版）内容已足够**——
+依赖靠入口 import 图 + hooks 收集，不需要手写 collect_all 名单；改 spec 前先跑上面的
+三段校验，比对 `_internal` 顶层清单是否仍是 149 项。
 
 ## 3. 部署（标准顺序）
 
@@ -105,11 +116,13 @@ tail logs/app.log        # 确认 [startup 5/5] 启动完成、无 ERROR
 | 手机端白屏、配对转圈 | Git Bash 把 `/api` 转成磁盘路径 | viewer 构建必带 `MSYS_NO_PATHCONV=1` |
 | 启动报「后端端口被占用」/ 405 误导 | 8483 被孤儿后端进程占着 | `Get-CimInstance Win32_Process` 找占用者点名（wmic 在本机返回空） |
 | 假「后端已退出」红横幅 | 孤儿后端 vs 应用新拉的 sidecar 分裂 | 已修（启动探测收编健康后端）；若复发先查孤儿进程 |
-| AI 问答全灭 / 某功能包缺失 | spec 回退（pathex / collect_all 丢失），白壳 exe | 按第 2.3 节核对 spec |
+| AI 问答全灭 / 某功能包缺失 | spec 回退（pathex / collect_all 丢失），白壳 exe | 按第 2.3 节核对 spec（149 项 / 4GB / warn 文件不含本地模块） |
+| 新打的 exe 一启动就 `ModuleNotFoundError: No module named 'safe_stdio'` | pyinstaller 从 `backend/` 目录调用，pathex='backend' 解析成了 backend/backend | 从仓库根调用：`pyinstaller backend/BiliNoteBackend.spec` |
 | 后端 exe 拉不起来（sidecar 报错） | sidecar 要求文件名三元组 | 后端 exe 必须同时有主名和 `-x86_64-pc-windows-msvc.exe` 副本 |
 | `_internal` 替换失败 | 后端进程还在运行，目录被锁 | 先杀后端再 robocopy |
 | 自动化轮全失败 | ffmpeg 未探测（`FFMPEG_BIN_PATH` 靠健康轮询前置 PATH） | 已修（轮前预检）；日志里 grep ffmpeg 确认 |
 | `curl` exit 7 / sys_check=000 | 刚重启，后端首启慢 | 再等 25–40 秒重试 |
+| 桌面端页面时不时「全白」卡死（只能重启） | WebView2 渲染进程 OOM 被杀（笔记里数百张 4K 截图整篇解码）；渲染进程死后 WebView2 不自动恢复 | 已修（截图懒加载 + 缩略端点 + ProcessFailed 自动重载）。复发时看 `logs/frontend_crash.log` 确认 kind/reason（`OUT_OF_MEMORY` 即仍被内存打爆）与 `%LOCALAPPDATA%\com.jefferyhuang.bilinote\EBWebView\Crashpad\reports\*.dmp` |
 
 ## 5. 手机端（Viewer）快速通道
 
