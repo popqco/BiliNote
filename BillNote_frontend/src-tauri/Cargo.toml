@@ -34,14 +34,18 @@ tauri-plugin-fs = "2"
 # 仅 Windows：Start Menu 快捷方式写入 AUMID 属性（IShellLinkW + IPropertyStore
 # + IPersistFile），让系统通知中心认得免安装 exe 的 Toast 署名。
 # 版本对齐 Cargo.lock 已有的 windows 0.62.x，只加 feature 不引入新版本。
+# webview2-com：挂 WebView2 ProcessFailed 事件做渲染进程崩溃自愈（OOM 白屏），
+# 版本必须与依赖树里的 webview2-com 完全一致（0.39.x，COM 类型才互通）。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
+  "Win32_System_SystemInformation",
   "Win32_System_Variant",
   "Win32_UI_Shell",
   "Win32_UI_Shell_PropertiesSystem",
 ] }
+webview2-com = "0.39"
 
 [package.metadata.tauri.bundle.macOS]
 frameworks = ["bin/BiliNoteBackend/_internal/"]

@@ -214,16 +214,37 @@ function createMarkdownComponents(baseURL: string) {
     },
     img: ({ node, ...props }: any) => {
       let src = props.src
-      if (src.startsWith('/')) {
+      if (typeof src === 'string' && src.startsWith('/')) {
         src = baseURL + src
       }
-      props.src = src
+      // 原片截图是 4K JPEG（3840×2160，解码后单张约 31MB），重度笔记一篇
+      // 引用可达数百张（实测最多 790 张）：必须懒加载 + 走 1600px 缩略，
+      // 否则 WebView2 渲染进程整篇解码内存吃到 GB 级被 OOM 杀掉、页面永久
+      // 白屏（2026-10-17 实拍，crashpad 转储 ProcessType=renderer
+      // SubCode=0xe0000008 连崩四次）。显示用缩略（后端磁盘缓存），点击
+      // 放大仍取原图（zoomImg）——缩放查看细节不受影响。
+      const isScreenshot =
+        typeof src === 'string' && src.includes('/static/screenshots/')
+      const displaySrc = isScreenshot
+        ? `${baseURL}/api/img_thumb?url=${encodeURIComponent(src)}&w=1600`
+        : src
 
       return (
         <div className="my-8 flex w-full justify-center">
-          <Zoom>
+          <Zoom {...(isScreenshot ? { zoomImg: { src, alt: props.alt } } : {})}>
             <img
               {...props}
+              src={displaySrc}
+              loading="lazy"
+              decoding="async"
+              // 缩略端点不可用（旧后端/缓存损坏）时回退原图：宁慢勿裂。
+              // 判据用 getAttribute 防死循环——回退后 src 已是原图，不再重试。
+              onError={(e: any) => {
+                const el = e.currentTarget as HTMLImageElement
+                if (isScreenshot && el.getAttribute('src') !== src) {
+                  el.setAttribute('src', src)
+                }
+              }}
               // w-full + max-w-full：图片永远不超过正文列宽（笔记里嵌 1920×1080
               // 原片截图，缺任一个都会把整篇内容撑宽、右侧被裁）
               className="h-auto w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-md transition-all hover:shadow-lg"
@@ -880,7 +901,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     }
     const rect = node.getBoundingClientRect()
     const maxSide = 32767
-    const maxArea = 268000000
+    // 面积上限从 2.68 亿降到 1.34 亿像素：2.68 亿 × 4B 的 ARGB 画布 = 1GB
+    // 单次分配，叠加被内联的数百张截图很容易把渲染进程推到 OOM 边缘
+    // （2026-10-17 白屏）。1.34 亿（约 512MB）对常规笔记仍取到 pixelRatio=2，
+    // 只有两万 CSS 像素以上的超长笔记才会略微降倍率。
+    const maxArea = 134000000
     const pixelRatio = Math.max(
       0.5,
       Math.min(

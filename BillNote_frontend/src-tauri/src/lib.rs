@@ -66,6 +66,10 @@ pub fn run() {
             // 检查 ffmpeg 是否在 PATH 中可用
             check_ffmpeg_availability();
 
+            // WebView2 渲染进程崩溃自愈（2026-10-17 白屏修复兜底层，见函数文档）
+            #[cfg(windows)]
+            setup_webview_crash_recovery(app.handle());
+
             // 应用外系统通知 · AUMID 落地（见 ensure_start_menu_shortcut 文档）。
             // 后台线程执行：COM + 文件 IO 不该卡在启动路径上；失败仅记录，
             // 下次启动会再试（幂等重建）。
@@ -222,6 +226,132 @@ fn ensure_start_menu_shortcut(app_id: &str) -> Result<(), String> {
             .map_err(|e| format!("Save({:?}) 失败: {e}", lnk.display()))?;
     }
     Ok(())
+}
+
+// ── WebView2 渲染进程崩溃自愈 ────────────────────────────────────────────
+// 2026-10-17 用户实拍「页面时不时莫名其妙全白」：crashpad 转储四连
+// （10:06 / 11:33 / 11:35 / 11:36）全部是渲染进程 OOM 被杀
+// （ProcessType=renderer / SubCode=0xe0000008），触发源是笔记正文里数百张
+// 4K 原片截图整篇解码（内存峰值由前端懒加载 + 缩略图修复）。但渲染进程
+// 一旦被杀，WebView2 不会自动恢复——页面永久白屏、只能重启整个应用。
+// 这里挂 ProcessFailed 事件兜底：
+//   - 渲染进程退出（含 OOM/崩溃）→ 自动 Reload，白屏变成闪一下；
+//   - 每次事件落一行到 <安装目录>/logs/frontend_crash.log 便于事后对账；
+//   - 10 分钟内最多自动重载 3 次，防止「坏页面反复 OOM → 无限重载」循环。
+#[cfg(windows)]
+static CRASH_RELOAD_TIMES: std::sync::Mutex<Vec<Instant>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(windows)]
+fn take_crash_reload_permit() -> bool {
+    let mut times = match CRASH_RELOAD_TIMES.lock() {
+        Ok(guard) => guard,
+        // 锁中毒也照常放行：崩溃计数的一致性无关紧要，恢复能力更重要
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let now = Instant::now();
+    times.retain(|t| now.duration_since(*t) < Duration::from_secs(600));
+    if times.len() >= 3 {
+        return false;
+    }
+    times.push(now);
+    true
+}
+
+/// 前端崩溃日志：本地时间 + 一行说明，追加到安装目录 logs/frontend_crash.log。
+/// release 构建没装 tauri-plugin-log，手写最省事（logs/ 目录后端也一直在写，
+/// 权限已实证可用）。
+#[cfg(windows)]
+fn append_crash_log(line: &str) {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    let st = unsafe { GetLocalTime() };
+    let ts = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+    );
+    eprintln!("[webview-crash] {ts} {line}");
+    let dir = env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs")))
+        .unwrap_or_else(|| std::path::PathBuf::from("logs"));
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("frontend_crash.log"))
+    {
+        let _ = writeln!(f, "{ts} {line}");
+    }
+}
+
+#[cfg(windows)]
+fn setup_webview_crash_recovery(app: &tauri::AppHandle) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs2, COREWEBVIEW2_PROCESS_FAILED_KIND,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_REASON,
+    };
+    use webview2_com::ProcessFailedEventHandler;
+    use windows::core::Interface as _;
+
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let result = window.with_webview(|webview| {
+        let controller = webview.controller();
+        let core = match unsafe { controller.CoreWebView2() } {
+            Ok(core) => core,
+            Err(e) => {
+                append_crash_log(&format!("[webview] 获取 CoreWebView2 失败：{e}"));
+                return;
+            }
+        };
+        let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
+            let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+            let mut reason = COREWEBVIEW2_PROCESS_FAILED_REASON::default();
+            let mut exit_code: i32 = 0;
+            let mut has_reason = false;
+            if let Some(args) = args.as_ref() {
+                unsafe {
+                    let _ = args.ProcessFailedKind(&mut kind);
+                    if let Ok(args2) = args.cast::<ICoreWebView2ProcessFailedEventArgs2>() {
+                        has_reason = args2.Reason(&mut reason).is_ok()
+                            && args2.ExitCode(&mut exit_code).is_ok();
+                    }
+                }
+            }
+            let detail = if has_reason {
+                format!("kind={kind:?} reason={reason:?} exit_code={exit_code}")
+            } else {
+                format!("kind={kind:?}")
+            };
+            if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED {
+                if take_crash_reload_permit() {
+                    append_crash_log(&format!(
+                        "[webview] 渲染进程退出（{detail}），自动重载恢复"
+                    ));
+                    if let Some(sender) = sender.as_ref() {
+                        unsafe {
+                            let _ = sender.Reload();
+                        }
+                    }
+                } else {
+                    append_crash_log(&format!(
+                        "[webview] 渲染进程退出（{detail}），10 分钟内已重载 3 次，暂停自动恢复"
+                    ));
+                }
+            } else {
+                append_crash_log(&format!("[webview] ProcessFailed：{detail}"));
+            }
+            Ok(())
+        }));
+        let mut token = 0i64;
+        if let Err(e) = unsafe { core.add_ProcessFailed(&handler, &mut token) } {
+            append_crash_log(&format!("[webview] 注册 ProcessFailed 监听失败：{e}"));
+        }
+    });
+    if let Err(e) = result {
+        append_crash_log(&format!("[webview] with_webview 失败：{e}"));
+    }
 }
 
 // 关闭期统一杀 sidecar，take() 把 child 从 state 拿走避免重复 kill。

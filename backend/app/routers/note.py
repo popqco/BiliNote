@@ -6,7 +6,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel, validator, field_validator, model_validator
@@ -46,6 +46,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 import asyncio
 import hashlib
 import httpx
+from PIL import Image, ImageOps
 from app.enmus.task_status_enums import TaskStatus
 
 # from app.services.downloader import download_raw_audio
@@ -904,4 +905,140 @@ async def image_proxy(request: Request, url: str):
         status_code=404,
         content={"code": 404, "msg": f"图片获取失败: {last_err}"},
         headers={"Cache-Control": "no-store"},
+    )
+
+# ---------------------------------------------------------------------------
+# 原片截图缩略（/img_thumb）
+#
+# 2026-10-17 白屏根因修复配套：笔记正文里的原片截图是 4K JPEG（3840×2160，
+# 解码后单张约 31MB），重度笔记一篇引用可达数百张（实测最多 790 张）。
+# WebView2 渲染进程按原始分辨率解码会把内存吃到 GB 级，被系统 OOM 杀掉后
+# 页面永久白屏（crashpad 转储 ProcessType=renderer SubCode=0xe0000008，
+# 同日 10:06/11:33/11:35/11:36 连崩四次）。屏幕显示统一走这里缩到 1600px
+# 宽并落盘缓存——解码内存降一个数量级、传输体积降十倍；点击放大由前端
+# 另行取原图（zoomImg），长图导出（html-to-image 自己按 src 拉图）也走缩略。
+_SCREENSHOTS_DIR = Path(os.getcwd()) / "static" / "screenshots"
+_THUMB_CACHE_DIR = Path(os.getcwd()) / "static" / "thumb_cache"
+_THUMB_CACHE_MAX_FILES = 20000
+_THUMB_DEFAULT_WIDTH = 1600
+_thumb_cache_prune_tick = 0
+
+_THUMB_MEDIA_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _resolve_local_screenshot(url: str) -> Optional[Path]:
+    """笔记图片地址 → 本地截图文件，非本机截图返回 None。
+
+    笔记里存的是相对路径（/static/screenshots/xxx.jpg），桌面端经 baseURL
+    展开成 http://127.0.0.1:8483/... 两种形态都收敛到文件名解析；外链
+    （http 图床）不走缩略，调用方原样返回 404 让前端回退原图。
+    """
+    u = _normalize_image_url(url)
+    parsed = urlparse(u)
+    host = (parsed.hostname or "").lower()
+    if host not in ("", "127.0.0.1", "localhost"):
+        return None
+    path = unquote(parsed.path or "")
+    prefix = "/static/screenshots/"
+    if not path.startswith(prefix):
+        return None
+    name = path[len(prefix):]
+    # 只认直接文件名：任何目录段（../ 等 traversal 尝试）直接拒绝
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return None
+    f = _SCREENSHOTS_DIR / name
+    try:
+        if f.is_file() and f.stat().st_size > 0:
+            return f
+    except OSError:
+        return None
+    return None
+
+
+def _thumb_cache_path(key: str) -> Optional[Path]:
+    try:
+        p = _THUMB_CACHE_DIR / f"{key}.jpg"
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    except OSError:
+        return None
+    return None
+
+
+def _maybe_prune_thumb_cache() -> None:
+    """文件数超上限时按 mtime 从旧到新清理（缩略是可再生成的，无需精确）。"""
+    global _thumb_cache_prune_tick
+    _thumb_cache_prune_tick += 1
+    if _thumb_cache_prune_tick % 100 != 0:
+        return
+    try:
+        files = [p for p in _THUMB_CACHE_DIR.glob("*.jpg") if p.is_file()]
+        if len(files) <= _THUMB_CACHE_MAX_FILES:
+            return
+        files.sort(key=lambda p: p.stat().st_mtime)
+        for p in files[: len(files) - _THUMB_CACHE_MAX_FILES]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _build_thumb(src: Path, width: int) -> Optional[Path]:
+    """生成/复用缩略图，返回可直出文件的路径；失败返回 None（回退原图）。"""
+    key = hashlib.sha1(f"{src.name}|w={width}".encode("utf-8")).hexdigest()
+    cached = _thumb_cache_path(key)
+    if cached is not None:
+        return cached
+    try:
+        with Image.open(src) as im:
+            im = ImageOps.exif_transpose(im) or im
+            if im.width <= width:
+                return src  # 原图本来就够小，不生成也不缓存
+            ratio = width / float(im.width)
+            out = im.convert("RGB").resize(
+                (width, max(1, round(im.height * ratio))), Image.LANCZOS
+            )
+        _THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _THUMB_CACHE_DIR / f"{key}.jpg"
+        tmp = p.with_name(p.name + ".tmp")
+        out.save(tmp, format="JPEG", quality=80, optimize=True)
+        os.replace(tmp, p)
+        _maybe_prune_thumb_cache()
+        return p
+    except Exception as e:  # 任何解码/写盘失败都回退原图，宁大勿断
+        logger.warning(f"缩略图生成失败，回退原图: {src.name} ({e})")
+        return None
+
+
+@router.get("/img_thumb")
+def img_thumb(url: str, w: int = _THUMB_DEFAULT_WIDTH):
+    # 同步 def：PIL 缩放是 CPU 密集操作，FastAPI 会自动丢线程池执行，
+    # 不阻塞事件循环（与其他 async 端点互不影响）
+    src = _resolve_local_screenshot(url)
+    if src is None:
+        return JSONResponse(
+            status_code=404,
+            content={"code": 404, "msg": "不是本机原片截图，不做缩略"},
+            headers={"Cache-Control": "no-store"},
+        )
+    try:
+        width = int(w)
+    except (TypeError, ValueError):
+        width = _THUMB_DEFAULT_WIDTH
+    width = max(240, min(width, 4096))
+
+    path = _build_thumb(src, width) or src
+    media = _THUMB_MEDIA_BY_SUFFIX.get(path.suffix.lower(), "image/jpeg")
+    return FileResponse(
+        str(path),
+        media_type=media,
+        headers={"Cache-Control": "public, max-age=86400"},
     )

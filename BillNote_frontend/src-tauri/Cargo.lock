@@ -105,6 +105,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-notification",
  "tauri-plugin-shell",
+ "webview2-com",
  "windows",
 ]
 

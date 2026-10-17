@@ -1,6 +1,6 @@
 import './App.css'
 import { lazy, Suspense, useEffect } from 'react'
-import { BrowserRouter, HashRouter, Navigate, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, HashRouter, Navigate, Routes, Route, useLocation } from 'react-router-dom'
 import { useTaskPolling } from '@/hooks/useTaskPolling.ts'
 import { useTasksSync } from '@/hooks/useTasksSync.ts'
 import { useCheckBackend } from '@/hooks/useCheckBackend.ts'
@@ -8,6 +8,7 @@ import { systemCheck } from '@/services/system.ts'
 import BackendInitDialog from '@/components/BackendInitDialog'
 import StartupBanner from '@/components/SystemDiagnostic/StartupBanner'
 import BackendHealthIndicator from '@/components/BackendHealth/BackendHealthIndicator'
+import ErrorBoundary from '@/components/ErrorBoundary.tsx'
 import Index from '@/pages/Index.tsx'
 import { HomePage } from './pages/HomePage/Home.tsx'
 
@@ -36,6 +37,18 @@ const GeneralPage = lazy(() => import('@/pages/SettingPage/general.tsx'))
 const ConnectionPage = lazy(() => import('@/pages/SettingPage/connection.tsx'))
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'))
 const GlobalClipboardWatcher = lazy(() => import('@/components/GlobalClipboardWatcher.tsx'))
+
+// 内容区错误边界（2026-10-17 白屏修复）：某篇笔记/某个设置页渲染崩溃时
+// 只接管内容区并给出「重新加载」入口，页面外壳（历史列表、侧边栏）仍在，
+// 用户可以直接切到别的笔记；resetKey=pathname 让路由切换自动清错误状态。
+function RouteErrorBoundary({ children }: { children: React.ReactNode }) {
+  const location = useLocation()
+  return (
+    <ErrorBoundary variant="inline" resetKey={location.pathname}>
+      {children}
+    </ErrorBoundary>
+  )
+}
 
 function App() {
   useTaskPolling(3000) // 每 3 秒轮询一次
@@ -78,39 +91,41 @@ function App() {
       <StartupBanner />
       <BackendHealthIndicator />
       <Router>
-        <Suspense fallback={<div className="flex h-screen items-center justify-center">加载中…</div>}>
-          {/* 全局剪贴板监听：首页/设置页都存活，轮询不因切页中断 */}
-          <GlobalClipboardWatcher />
-          <Routes>
-            <Route path="/onboarding" element={<Onboarding />} />
-            <Route path="/" element={<OnboardingGuard><Index /></OnboardingGuard>}>
-              <Route index element={<HomePage />} />
-              <Route path="settings" element={<SettingPage />}>
-                {/* /settings 本体即菜单总览（SettingLayout 两级导航依赖它）：
-                    index 绝不能 <Navigate> 到任何详情页——之前先跳 model 后改跳
-                    connection，都导致手机端「连接 → 设置 → 连接 → …」死循环，
-                    菜单总览永远停留不住。index 只放占位（手机端隐藏，桌面端提示选左侧）。 */}
-                <Route index element={<div className="text-muted-foreground p-8 text-sm">请从左侧选择设置项</div>} />
-                <Route path="model" element={<Model />}>
-                  <Route path="new" element={<ProviderForm isCreate />} />
-                  <Route path=":id" element={<ProviderForm />} />
+        <RouteErrorBoundary>
+          <Suspense fallback={<div className="flex h-screen items-center justify-center">加载中…</div>}>
+            {/* 全局剪贴板监听：首页/设置页都存活，轮询不因切页中断 */}
+            <GlobalClipboardWatcher />
+            <Routes>
+              <Route path="/onboarding" element={<Onboarding />} />
+              <Route path="/" element={<OnboardingGuard><Index /></OnboardingGuard>}>
+                <Route index element={<HomePage />} />
+                <Route path="settings" element={<SettingPage />}>
+                  {/* /settings 本体即菜单总览（SettingLayout 两级导航依赖它）：
+                      index 绝不能 <Navigate> 到任何详情页——之前先跳 model 后改跳
+                      connection，都导致手机端「连接 → 设置 → 连接 → …」死循环，
+                      菜单总览永远停留不住。index 只放占位（手机端隐藏，桌面端提示选左侧）。 */}
+                  <Route index element={<div className="text-muted-foreground p-8 text-sm">请从左侧选择设置项</div>} />
+                  <Route path="model" element={<Model />}>
+                    <Route path="new" element={<ProviderForm isCreate />} />
+                    <Route path=":id" element={<ProviderForm />} />
+                  </Route>
+                  <Route path="download" element={<Downloader />}>
+                    <Route path=":id" element={<DownloaderForm />} />
+                  </Route>
+                  <Route path="transcriber" element={<TranscriberPage />} />
+                  <Route path="appearance" element={<AppearancePage />} />
+                  <Route path="automation" element={<AutomationPage />} />
+                  <Route path="general" element={<GeneralPage />} />
+                  <Route path="connection" element={<ConnectionPage />} />
+                  <Route path="monitor" element={<Monitor />}></Route>
+                  <Route path="about" element={<AboutPage />}></Route>
+                  <Route path="*" element={<NotFoundPage />} />
                 </Route>
-                <Route path="download" element={<Downloader />}>
-                  <Route path=":id" element={<DownloaderForm />} />
-                </Route>
-                <Route path="transcriber" element={<TranscriberPage />} />
-                <Route path="appearance" element={<AppearancePage />} />
-                <Route path="automation" element={<AutomationPage />} />
-                <Route path="general" element={<GeneralPage />} />
-                <Route path="connection" element={<ConnectionPage />} />
-                <Route path="monitor" element={<Monitor />}></Route>
-                <Route path="about" element={<AboutPage />}></Route>
                 <Route path="*" element={<NotFoundPage />} />
               </Route>
-              <Route path="*" element={<NotFoundPage />} />
-            </Route>
-          </Routes>
-        </Suspense>
+            </Routes>
+          </Suspense>
+        </RouteErrorBoundary>
       </Router>
     </>
   )

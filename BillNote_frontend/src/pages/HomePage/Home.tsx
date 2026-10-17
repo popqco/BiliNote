@@ -6,6 +6,7 @@ import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
 import { useTaskStore, mergeAudioMeta } from '@/store/taskStore'
 import { useIsMobile } from '@/hooks/useIsMobile.ts'
 import History from '@/pages/HomePage/components/History.tsx'
+import ErrorBoundary from '@/components/ErrorBoundary.tsx'
 import { get_task_status } from '@/services/note.ts'
 type ViewStatus = 'idle' | 'loading' | 'success' | 'failed' | 'stopped'
 export const HomePage: FC = () => {
@@ -93,19 +94,27 @@ export const HomePage: FC = () => {
   // 注意 MarkdownViewer 在 master 上只认 status（内容自己从 store 取），
   // 不要传 mobile-split 旧版的 content prop（类型已删，传了 tsc 报错）。
   const isMobile = useIsMobile()
+  // 笔记预览区错误边界（2026-10-17 白屏修复）：单篇笔记/某个版本渲染崩溃
+  // 时只接管预览区，历史列表/新建表单仍在，用户可直接换一篇继续用；
+  // resetKey=当前笔记 id，换笔记自动清错误状态。
+  const previewPane = (
+    <ErrorBoundary variant="inline" resetKey={currentTaskId || ''}>
+      <MarkdownViewer status={status} />
+    </ErrorBoundary>
+  )
   if (isMobile) {
     return (
       <MobileLayout
         NewForm={<NoteForm />}
         HistoryList={<History />}
-        NoteView={<MarkdownViewer status={status} />}
+        NoteView={previewPane}
       />
     )
   }
   return (
     <HomeLayout
       NoteForm={<NoteForm />}
-      Preview={<MarkdownViewer status={status} />}
+      Preview={previewPane}
       History={<History />}
     />
   )
