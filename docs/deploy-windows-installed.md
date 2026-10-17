@@ -123,6 +123,7 @@ tail logs/app.log        # 确认 [startup 5/5] 启动完成、无 ERROR
 | 自动化轮全失败 | ffmpeg 未探测（`FFMPEG_BIN_PATH` 靠健康轮询前置 PATH） | 已修（轮前预检）；日志里 grep ffmpeg 确认 |
 | `curl` exit 7 / sys_check=000 | 刚重启，后端首启慢 | 再等 25–40 秒重试 |
 | 桌面端页面时不时「全白」卡死（只能重启） | WebView2 渲染进程 OOM 被杀（笔记里数百张 4K 截图整篇解码）；渲染进程死后 WebView2 不自动恢复 | 已修（截图懒加载 + 缩略端点 + ProcessFailed 自动重载）。复发时看 `logs/frontend_crash.log` 确认 kind/reason（`OUT_OF_MEMORY` 即仍被内存打爆）与 `%LOCALAPPDATA%\com.jefferyhuang.bilinote\EBWebView\Crashpad\reports\*.dmp` |
+| 笔记正文有横线穿过文字、像被叠印/串行 | remark-gfm `singleTilde` 默认把单个 `~` 当删除线定界符，`3~5…3~5` 之间的整段被划掉、两个 `~` 被吃掉 | 已修（gfm 传 `{ singleTilde: false }`）；复发时用 remark 解析该笔记 md，看是否又出现 delete 节点 |
 
 ## 5. 手机端（Viewer）快速通道
 

@@ -61,7 +61,11 @@ const steps = [
   { label: '保存完成', key: 'SUCCESS' },
 ]
 
-const remarkPlugins = [gfm, remarkMath]
+// remark-gfm 默认 singleTilde=true：单个 ~ 也当删除线定界符，AI 写的范围号
+// （如「3~5 年…3~5 款」）会被解析成整段删除线，且两个 ~ 被吃掉后在正文里
+// 留下一条横线——看起来像文字被叠印/串行（2026-10-17 用户实拍）。
+// 关掉后只有 ~~成对~~ 才是删除线，`3~5` 原样渲染。
+const remarkPlugins = [[gfm, { singleTilde: false }], remarkMath]
 const rehypePlugins = [rehypeKatex, rehypeSlug]
 
 const PLATFORM_LABELS: Record<string, string> = {
