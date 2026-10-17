@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, mergeAudioMeta } from '@/store/taskStore'
 import { get_task_status } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
@@ -53,7 +53,8 @@ export const useTaskPolling = (interval = 3000) => {
             useTaskStore.getState().updateTaskContent(task.id, {
               markdown: failedResult.markdown,
               transcript: failedResult.transcript,
-              audioMeta: failedResult.audio_meta,
+              // 空字段不覆盖（老结果文件缺封面/标题，整包替换会把卡片元数据清掉）
+              audioMeta: mergeAudioMeta(task.audioMeta, failedResult.audio_meta),
             })
           }
         }
@@ -87,7 +88,7 @@ export const useTaskPolling = (interval = 3000) => {
               status,
               markdown,
               transcript,
-              audioMeta: audio_meta,
+              audioMeta: mergeAudioMeta(task.audioMeta, audio_meta),
               queuePosition: undefined,
               message: undefined,
               ...(touched ? { formData: merged } : {}),

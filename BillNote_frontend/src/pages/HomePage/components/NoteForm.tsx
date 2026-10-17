@@ -12,7 +12,7 @@ import { useForm, useWatch, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
-import { Info, Loader2, Plus, BookmarkPlus, ChevronDown, Trash2, Square } from 'lucide-react'
+import { Info, Plus, BookmarkPlus, ChevronDown, Trash2, Square } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert.tsx'
 import {
   Dialog,
@@ -621,11 +621,7 @@ const NoteForm = () => {
           onClick={generating ? () => handleStop() : undefined}
           disabled={generating && stopping}
         >
-          {generating ? (
-            <Square className="mr-2 h-4 w-4 fill-current" />
-          ) : (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          )}
+          {generating && <Square className="mr-2 h-4 w-4 fill-current" />}
           {generating && stopping ? '正在停止…' : label}
         </Button>
 

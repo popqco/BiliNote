@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, mergeAudioMeta } from '@/store/taskStore'
 import { get_recent_tasks, get_task_status } from '@/services/note.ts'
 
 const ACTIVE = ['PENDING', 'PARSING', 'DOWNLOADING', 'TRANSCRIBING', 'SUMMARIZING', 'SAVING']
@@ -188,7 +188,8 @@ export const useTasksSync = (interval = 30000) => {
                 status: 'SUCCESS',
                 markdown,
                 transcript,
-                audioMeta: audio_meta,
+                // 空字段不覆盖本地（老结果文件缺封面/标题，整包替换会清掉卡片元数据）
+                audioMeta: mergeAudioMeta(local.audioMeta, audio_meta),
                 message: undefined,
               }
               const fd = local.formData || {}
