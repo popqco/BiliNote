@@ -113,6 +113,27 @@ const hasMarkdownContent = (md: any): boolean =>
     ? !!md.trim()
     : !!(Array.isArray(md) && md.some((v: any) => !!v?.content?.trim()))
 
+/**
+ * 结果文件 audio_meta 落地前的合并：空字段不覆盖本地已有值。
+ *
+ * 老笔记的结果文件里经常没有封面/标题（早期版本才补全元数据），而懒加载正文 /
+ * 轮询 / 增量同步过去都是整包替换 audioMeta——一条老笔记点开一次，卡片上刚从
+ * /tasks/recent 拿到的好封面就被空值清掉，表现为「封面刷不出来」（2026-10-17
+ * 用户反馈）。这里只让非空字段覆盖本地，其余保留。
+ */
+export const mergeAudioMeta = (
+  prev: Partial<AudioMeta> | undefined | null,
+  incoming: any,
+): AudioMeta => {
+  const base: any = { ...(prev || {}) }
+  for (const [k, v] of Object.entries(incoming || {})) {
+    if (v === undefined || v === null) continue
+    if (typeof v === 'string' && !v.trim()) continue
+    base[k] = v
+  }
+  return base as AudioMeta
+}
+
 /** 后端 /tasks/recent 概要（+可选结果）→ 本地 Task。
  *  徽标数据源优先级：结果文件（model_name/provider_id/style）＞ 概要 ＞ 空。
  *  addBackendTask（增量）与 backfillBackendTasks（全量回填）共用一份映射。 */
@@ -139,15 +160,19 @@ const backendTaskToTask = (bt: any, result?: any, createdAt?: string): Task => {
     origin: bt.origin || 'manual',
     markdown: result?.markdown || '',
     transcript: result?.transcript || { full_text: '', language: '', raw: null, segments: [] },
-    audioMeta: result?.audio_meta || {
-      cover_url: bt.cover_url || '',
-      duration: bt.duration || 0,
-      file_path: '',
-      platform: bt.platform || '',
-      raw_info: null,
-      title: bt.title || '',
-      video_id: bt.video_id || '',
-    },
+    // 概要与结果文件合并：结果文件缺封面/标题时保留 /tasks/recent 的值
+    audioMeta: mergeAudioMeta(
+      {
+        cover_url: bt.cover_url || '',
+        duration: bt.duration || 0,
+        file_path: '',
+        platform: bt.platform || '',
+        raw_info: null,
+        title: bt.title || '',
+        video_id: bt.video_id || '',
+      },
+      result?.audio_meta,
+    ),
     createdAt: createdAt ?? new Date().toISOString(),
     formData,
   }

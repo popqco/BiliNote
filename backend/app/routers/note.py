@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -41,7 +42,9 @@ from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id, normalize_video_url
 from app.validators.video_url_validator import is_supported_video_url
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+import asyncio
+import hashlib
 import httpx
 from app.enmus.task_status_enums import TaskStatus
 
@@ -731,28 +734,174 @@ def get_recent_tasks(limit: int = 80):
     return R.success({"tasks": list_recent_tasks(limit=limit)})
 
 
+# ---------------------------------------------------------------------------
+# 封面图代理（/image_proxy）
+#
+# 2026-10-17 加固（用户反馈「老笔记封面有时候刷新不出来」），三个实测根因：
+#  1. 上游 CDN（i*.hdslb.com / i.ytimg.com）单张 3~4s，没有缓存时历史列表
+#     上百张封面要几分钟才逐个刷出来；
+#  2. http://i.ytimg.com/... 之类 http 地址在 CDN 侧直接挂死（实测 15s 无响应），
+#     只按原样请求一次必然失败——需要 https 变体兜底；
+#  3. 旧实现不跟随重定向（302 直接当失败）、任何异常返回 500 且不重试，
+#     一次网络抖动这张封面就废了。
+#
+# 现在：磁盘缓存（static/cover_cache，键=URL 的 sha1）→ 命中直接返回；
+# 未命中按候选地址（原地址 + https 变体）各试两次（20s 超时 + 跟随重定向），
+# 全失败返回 404 + no-store（前端 onError 回退占位图，也不会被浏览器缓存住）。
+_COVER_CACHE_DIR = Path(os.getcwd()) / "static" / "cover_cache"
+_COVER_CACHE_MAX_FILES = 1500
+_cover_cache_prune_tick = 0
+# 取不到的封面做短时负缓存（URL → 失败时间戳）：视频被删/封面被改的地址
+# 每次浏览都去上游试一遍（每轮 3~12s）纯属浪费，10 分钟内直接按失败返回。
+_COVER_FAIL_CACHE: dict[str, float] = {}
+_COVER_FAIL_TTL_SECONDS = 600
+
+_COVER_EXT_BY_TYPE = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/avif": ".avif",
+}
+
+
+def _normalize_image_url(url: str) -> str:
+    """协议相对地址（//i.ytimg.com/...）补 https，否则 httpx 直接报 InvalidURL。"""
+    u = (url or "").strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    return u
+
+
+def _cached_cover_path(key: str) -> Optional[Path]:
+    try:
+        for p in _COVER_CACHE_DIR.glob(f"{key}.*"):
+            if p.is_file() and p.stat().st_size > 0:
+                return p
+    except OSError:
+        return None
+    return None
+
+
+def _maybe_prune_cover_cache() -> None:
+    """文件数超过上限时按 mtime 从旧到新清理，避免缓存无限膨胀。"""
+    global _cover_cache_prune_tick
+    _cover_cache_prune_tick += 1
+    if _cover_cache_prune_tick % 50 != 0:
+        return
+    try:
+        files = [p for p in _COVER_CACHE_DIR.glob("*") if p.is_file()]
+        if len(files) <= _COVER_CACHE_MAX_FILES:
+            return
+        files.sort(key=lambda p: p.stat().st_mtime)
+        for p in files[: len(files) - _COVER_CACHE_MAX_FILES]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def _store_cached_cover(key: str, content_type: str, content: bytes) -> Optional[Path]:
+    ext = _COVER_EXT_BY_TYPE.get(content_type, ".jpg")
+    try:
+        _COVER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _COVER_CACHE_DIR / f"{key}{ext}"
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_bytes(content)
+        os.replace(tmp, p)
+        _maybe_prune_cover_cache()
+        return p
+    except OSError:
+        return None
+
+
 @router.get("/image_proxy")
 async def image_proxy(request: Request, url: str):
+    target = _normalize_image_url(url)
+    if not target.startswith(("http://", "https://")):
+        return JSONResponse(
+            status_code=400,
+            content={"code": 400, "msg": "无效的图片地址"},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    key = hashlib.sha1(target.encode("utf-8")).hexdigest()
+    cached = _cached_cover_path(key)
+    if cached is not None:
+        ctype = next(
+            (ct for ct, ext in _COVER_EXT_BY_TYPE.items() if ext == cached.suffix),
+            "image/jpeg",
+        )
+        return FileResponse(
+            str(cached),
+            media_type=ctype,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    # 负缓存命中的地址不再打上游（明细见 _COVER_FAIL_CACHE 定义处）
+    failed_at = _COVER_FAIL_CACHE.get(key)
+    if failed_at is not None:
+        if time.time() - failed_at < _COVER_FAIL_TTL_SECONDS:
+            return JSONResponse(
+                status_code=404,
+                content={"code": 404, "msg": "图片暂不可用（近期获取失败，稍后自动重试）"},
+                headers={"Cache-Control": "no-store"},
+            )
+        _COVER_FAIL_CACHE.pop(key, None)
+
+    # http 地址追加一个 https 变体：i.ytimg.com 等 CDN 只认 https，http 会挂死
+    candidates = [target]
+    if target.startswith("http://"):
+        candidates.append("https://" + target[len("http://"):])
+
+    is_youtube = "ytimg" in target or "youtube" in target
     headers = {
-        "Referer": "https://www.bilibili.com/",
-        "User-Agent": request.headers.get("User-Agent", ""),
+        "Referer": "https://www.youtube.com/" if is_youtube else "https://www.bilibili.com/",
+        "User-Agent": request.headers.get("User-Agent")
+        or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers=headers)
+    last_err = ""
+    for cand in candidates:
+        for _ in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                    resp = await client.get(cand, headers=headers)
+                if resp.status_code == 200 and resp.content:
+                    ctype = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip().lower()
+                    if not ctype.startswith("image/"):
+                        ctype = "image/jpeg"
+                    p = _store_cached_cover(key, ctype, resp.content)
+                    if p is not None:
+                        return FileResponse(
+                            str(p),
+                            media_type=ctype,
+                            headers={"Cache-Control": "public, max-age=86400"},
+                        )
+                    return Response(
+                        content=resp.content,
+                        media_type=ctype,
+                        headers={"Cache-Control": "public, max-age=86400"},
+                    )
+                last_err = f"HTTP {resp.status_code}"
+                # 明确的"没有/被拒"（403/404/410）：重试无意义，直接换候选地址
+                if resp.status_code in (400, 403, 404, 410):
+                    break
+            except Exception as e:  # 网络级异常：换候选地址/重试
+                last_err = str(e)
+            await asyncio.sleep(0.4)
 
-            if resp.status_code != 200:
-                raise HTTPException(status_code=resp.status_code, detail="图片获取失败")
-
-            content_type = resp.headers.get("Content-Type", "image/jpeg")
-            return StreamingResponse(
-                resp.aiter_bytes(),
-                media_type=content_type,
-                headers={
-                    "Cache-Control": "public, max-age=86400",  #  缓存一天
-                    "Content-Type": content_type,
-                }
-            )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    logger.warning(f"封面代理失败: {target} ({last_err})")
+    _COVER_FAIL_CACHE[key] = time.time()
+    # 返回 404 而不是 500：图片"取不到"是常态（视频被删/封面被改），
+    # 让前端走 onError 回退占位图；no-store 避免错误被缓存住
+    return JSONResponse(
+        status_code=404,
+        content={"code": 404, "msg": f"图片获取失败: {last_err}"},
+        headers={"Cache-Control": "no-store"},
+    )
