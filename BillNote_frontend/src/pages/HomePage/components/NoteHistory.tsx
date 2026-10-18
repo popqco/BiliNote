@@ -51,10 +51,10 @@ const isActiveStatus = (s: string) => ACTIVE_STATUSES.includes(s as any)
  * 卡片右下角的「停止生成」小按钮。
  *
  * 2026-10-18 误触修复：槽位常驻（不可用时 visibility:hidden 占位）——
- * 旧实现只在任务进行中才渲染这个图标，它出现的位置恰好是删除按钮原来的
- * 位置（flex 右对齐，新图标把删除按钮往左挤），光标停在原地就会点到
- * 刚冒出来的停止按钮。常驻占位后删除按钮永远不动，且生成刚启动的
- * 2 秒内不显示/不可用（防误触窗口，见 useStopArmed）。
+ * 旧实现只在任务进行中才渲染这个图标，它会在按钮组里凭空出现（右侧
+ * 按钮组向左生长），光标恰在那一带的话一点就误停；且生成刚启动的
+ * 2 秒内不显示/不可用（防误触窗口，见 useStopArmed）。常驻占位还能
+ * 让按钮组宽度恒定、删除按钮的视觉位置纹丝不动。
  */
 const CardStopButton: FC<{ task: Task }> = ({ task }) => {
   const armed = useStopArmed(task.id)
