@@ -27,6 +27,9 @@ import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import { useSmoothScroll } from '@/hooks/useSmoothScroll'
+import { useStopArmed } from '@/hooks/useStopArmed'
+import NoteImage from '@/components/NoteImage'
+import { setScreenshotExportMode } from '@/utils/screenshotLoadPolicy'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import TocPanel from '@/pages/HomePage/components/TocPanel.tsx'
@@ -104,7 +107,7 @@ const formatPosterDate = (value?: string | Date): string => {
  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
  * 使用函数 + useMemo 避免每次渲染都创建新的函数实例。
  */
-function createMarkdownComponents(baseURL: string) {
+function createMarkdownComponents(baseURL: string, scrollRoot: HTMLElement | null) {
   return {
     h1: ({ children, ...props }: any) => (
       <h1
@@ -222,11 +225,14 @@ function createMarkdownComponents(baseURL: string) {
         src = baseURL + src
       }
       // 原片截图是 4K JPEG（3840×2160，解码后单张约 31MB），重度笔记一篇
-      // 引用可达数百张（实测最多 790 张）：必须懒加载 + 走 1600px 缩略，
-      // 否则 WebView2 渲染进程整篇解码内存吃到 GB 级被 OOM 杀掉、页面永久
-      // 白屏（2026-10-17 实拍，crashpad 转储 ProcessType=renderer
-      // SubCode=0xe0000008 连崩四次）。显示用缩略（后端磁盘缓存），点击
-      // 放大仍取原图（zoomImg）——缩放查看细节不受影响。
+      // 引用可达数百张（实测最多 790 张）：显示走 1600px 缩略（后端磁盘
+      // 缓存），点击放大仍取原图（zoomImg）。
+      //
+      // 2026-10-18 白屏根治：此前只做懒加载——装载不卸载，滚过的图解码位图
+      // 全部常驻，长笔记读一遍累计数 GB，渲染进程被 OOM 杀掉整页白屏
+      // （frontend_crash.log reason=OUT_OF_MEMORY 连发）。现交给 NoteImage：
+      // 离视口 ±2500px 即把 src 换成透明占位释放解码内存，滚回来再挂上；
+      // 长图导出期间由 screenshotLoadPolicy 强制全部挂载（见 handleExport）。
       const isScreenshot =
         typeof src === 'string' && src.includes('/static/screenshots/')
       const displaySrc = isScreenshot
@@ -236,24 +242,26 @@ function createMarkdownComponents(baseURL: string) {
       return (
         <div className="my-8 flex w-full justify-center">
           <Zoom {...(isScreenshot ? { zoomImg: { src, alt: props.alt } } : {})}>
-            <img
-              {...props}
-              src={displaySrc}
-              loading="lazy"
-              decoding="async"
-              // 缩略端点不可用（旧后端/缓存损坏）时回退原图：宁慢勿裂。
-              // 判据用 getAttribute 防死循环——回退后 src 已是原图，不再重试。
-              onError={(e: any) => {
-                const el = e.currentTarget as HTMLImageElement
-                if (isScreenshot && el.getAttribute('src') !== src) {
-                  el.setAttribute('src', src)
-                }
-              }}
-              // w-full + max-w-full：图片永远不超过正文列宽（笔记里嵌 1920×1080
-              // 原片截图，缺任一个都会把整篇内容撑宽、右侧被裁）
-              className="h-auto w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-md transition-all hover:shadow-lg"
-              style={{ maxHeight: '500px' }}
-            />
+            {isScreenshot ? (
+              <NoteImage
+                src={displaySrc}
+                fallbackSrc={src}
+                alt={props.alt}
+                root={scrollRoot}
+                // w-full + max-w-full：图片永远不超过正文列宽（笔记里嵌 1920×1080
+                // 原片截图，缺任一个都会把整篇内容撑宽、右侧被裁）
+                className="h-auto w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-md transition-all hover:shadow-lg"
+              />
+            ) : (
+              <img
+                {...props}
+                src={displaySrc}
+                loading="lazy"
+                decoding="async"
+                className="h-auto w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-md transition-all hover:shadow-lg"
+                style={{ maxHeight: '500px' }}
+              />
+            )}
           </Zoom>
         </div>
       )
@@ -414,6 +422,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
   // （见下面的回顶 effect）。
   const readerViewportRef = useRef<HTMLDivElement>(null)
+  // 同一元素的 state 镜像：作为截图懒挂/卸载 IO 的 root 传给 NoteImage
+  // （挂载回调里同步，见 attachViewport）
+  const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null)
   // 滚轮惯性平滑（设置页可关/三档手感）：Lenis 包住上面的 Viewport。
   // 编程式滚动（回顶/章节跳转）必须走 smoothScrollTo，直接 element.scrollTo
   // 会和进行中的惯性动画互相拉扯。
@@ -424,6 +435,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const attachViewport = useCallback(
     (node: HTMLDivElement | null) => {
       readerViewportRef.current = node
+      // 阅读区滚动容器同时作为截图懒挂/卸载的 IO root（见 NoteImage）
+      setScrollRoot(node)
       attachSmoothScroll(node)
     },
     [attachSmoothScroll],
@@ -432,6 +445,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const [exporting, setExporting] = useState<ExportFormat | null>(null)
   // 「停止生成」请求进行中：按钮转「正在停止…」并防连点
   const [stopping, setStopping] = useState(false)
+  // 「停止」防误触武装（2026-10-18）：点完「重新生成/重试」后这块加载面板
+  // 会立刻顶替刚才的「重新生成」按钮，第二下点击会停在刚变出的停止按钮上
+  // （用户实拍：stop 紧跟 retry 到达）。启动后的 STOP_ARM_MS 内不渲染
+  // 停止按钮（见 useStopArmed）。
+  const stopArmed = useStopArmed(currentTask?.id)
   const [posterData, setPosterData] = useState<PosterData | null>(null)
   const contentCaptureRef = useRef<HTMLDivElement>(null)
   const posterRef = useRef<HTMLDivElement>(null)
@@ -459,8 +477,11 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       return next
     })
 
-  // 缓存 ReactMarkdown components，仅在 baseURL 变化时重建
-  const markdownComponents = useMemo(() => createMarkdownComponents(baseURL), [baseURL])
+  // 缓存 ReactMarkdown components，仅在 baseURL / 滚动容器变化时重建
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(baseURL, scrollRoot),
+    [baseURL, scrollRoot],
+  )
 
   // 正文预处理：隐藏截图时在 markdown 层摘掉截图标记（只靠 CSS 隐藏会留下
   // 截图外层的大边距，全篇莫名空行）；来源链接行不展示。
@@ -897,6 +918,21 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   // 长图：截取阅读区（视频信息条 + 正文）。超长内容按画布上限自适应降低倍率，
   // 上限同 MarkmapComponent（32767 边长 / 2.68 亿像素）
+  const waitForNoteShots = async (timeoutMs = 20000) => {
+    const node = contentCaptureRef.current
+    if (!node) return
+    const start = Date.now()
+    for (;;) {
+      const imgs = Array.from(
+        node.querySelectorAll('img[data-note-shot]'),
+      ) as HTMLImageElement[]
+      // 卸载态的占位图 naturalWidth=1：等在挂载且加载完成的图上
+      if (imgs.every(im => im.complete && im.naturalWidth > 1)) return
+      if (Date.now() - start >= timeoutMs) return // 超时照截：宁少勿卡死
+      await new Promise(r => setTimeout(r, 150))
+    }
+  }
+
   const exportLongImage = async (title: string) => {
     const node = contentCaptureRef.current
     if (!node) {
@@ -972,11 +1008,16 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       if (format === 'longimage') {
         // 导出始终包含截图：临时摘掉 hide-screenshots，等重渲染后再截
         setExportForceShow(true)
+        // NoteImage 平时把离屏截图卸载成透明占位（省内存）；导出要整篇入画，
+        // 先开导出模式强制全部挂上真 src，等加载完再 capture，截完恢复
+        setScreenshotExportMode(true)
         try {
           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+          await waitForNoteShots()
           await exportLongImage(title)
           toast.success('长图已导出')
         } finally {
+          setScreenshotExportMode(false)
           setExportForceShow(false)
         }
         return
@@ -1099,8 +1140,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
           </p>
         </div>
         {/* 停止生成（2026-10-16 用户需求）：模型/参数设置错了时不必干等整条
-            流程（含转写重试、总结降级阶梯）跑完，停止后可直接改设置重来 */}
-        {currentTask && (
+            流程（含转写重试、总结降级阶梯）跑完，停止后可直接改设置重来。
+            2026-10-18 防误触：刚启动的 2 秒内不渲染（用户点完「重新生成」
+            的下一拍就点到这里，会把刚起来的新任务停掉）。 */}
+        {currentTask && stopArmed && (
           <Button
             variant="outline"
             className="border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"

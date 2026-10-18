@@ -1,4 +1,5 @@
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, ACTIVE_STATUSES, type Task } from '@/store/taskStore'
+import { useStopArmed } from '@/hooks/useStopArmed'
 import { Badge } from '@/components/ui/badge.tsx'
 import { cn } from '@/lib/utils.ts'
 import { Square, Trash } from 'lucide-react'
@@ -42,8 +43,51 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   RUNNING: { label: '生成中', cls: 'bg-sky-100 text-sky-700 dark:bg-sky-500/20 dark:text-sky-200' },
 }
 
-/** 进行中的状态（卡片上给「停止生成」小按钮）：不是这些就没有可停的 */
-const ACTIVE_STATUSES = ['PENDING', 'PARSING', 'DOWNLOADING', 'TRANSCRIBING', 'SUMMARIZING', 'SAVING', 'RUNNING']
+/** 进行中的状态（卡片上给「停止生成」小按钮）：不是这些就没有可停的。
+ *  列表与 taskStore 共用一份（startedAt 记时也用这套），防止两边漂移。 */
+const isActiveStatus = (s: string) => ACTIVE_STATUSES.includes(s as any)
+
+/**
+ * 卡片右下角的「停止生成」小按钮。
+ *
+ * 2026-10-18 误触修复：槽位常驻（不可用时 visibility:hidden 占位）——
+ * 旧实现只在任务进行中才渲染这个图标，它出现的位置恰好是删除按钮原来的
+ * 位置（flex 右对齐，新图标把删除按钮往左挤），光标停在原地就会点到
+ * 刚冒出来的停止按钮。常驻占位后删除按钮永远不动，且生成刚启动的
+ * 2 秒内不显示/不可用（防误触窗口，见 useStopArmed）。
+ */
+const CardStopButton: FC<{ task: Task }> = ({ task }) => {
+  const armed = useStopArmed(task.id)
+  const visible = isActiveStatus(task.status) && armed
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            size="small"
+            variant="ghost"
+            aria-label="停止生成"
+            tabIndex={visible ? 0 : -1}
+            onClick={e => {
+              e.stopPropagation()
+              if (!visible) return
+              // 生成中/排队中的卡片可直接停止（不必先选中它）：
+              // 设置错了模型时第一时间止损（2026-10-16 用户需求）
+              useTaskStore.getState().cancelTask(task.id)
+            }}
+            className={cn('shrink-0', !visible && 'invisible')}
+          >
+            <Square className="text-muted-foreground h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+          <p>停止生成</p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
 
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const tasks = useTaskStore(state => state.tasks)
@@ -172,32 +216,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
               </div>
 
               <div className="flex items-center gap-1">
-                {ACTIVE_STATUSES.includes(task.status) && (
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          size="small"
-                          variant="ghost"
-                          aria-label="停止生成"
-                          onClick={e => {
-                            e.stopPropagation()
-                            // 生成中/排队中的卡片可直接停止（不必先选中它）：
-                            // 设置错了模型时第一时间止损（2026-10-16 用户需求）
-                            useTaskStore.getState().cancelTask(task.id)
-                          }}
-                          className="shrink-0"
-                        >
-                          <Square className="text-muted-foreground h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        <p>停止生成</p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                )}
+                <CardStopButton task={task} />
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>

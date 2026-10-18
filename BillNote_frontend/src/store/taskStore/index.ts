@@ -52,7 +52,7 @@ export interface Markdown {
 
 export interface Task {
   id: string
-  markdown: string|Markdown [] //为了兼容之前的笔记
+  markdown: string|Markdown [] //为了兼容以前的笔记
   transcript: Transcript
   status: TaskStatus
   audioMeta: AudioMeta
@@ -62,6 +62,13 @@ export interface Task {
   queuePosition?: number
   /** 任务来源：manual=界面提交，auto=自动化检查轮创建 */
   origin?: string
+  /**
+   * 本次执行在本地被观察/发起的时刻（ms）。「停止生成」入口在刚启动后的
+   * STOP_ARM_MS 内保持不可用——点「重新生成」后按钮位/面板会在毫秒级变成
+   * 「停止生成」，手停在原位的第二下点击会把刚起来的新 run 停掉
+   * （2026-10-18 用户实拍：两次 stop 都紧跟 retry 到达）。
+   */
+  startedAt?: number
   createdAt: string
   formData: {
     video_url: string
@@ -106,6 +113,26 @@ interface TaskStore {
    *  改完模型/参数可直接重新生成，不必干等整条流程跑完 */
   cancelTask: (id: string) => Promise<boolean>
 }
+
+/** 「进行中」状态集合（排队/执行中的全部阶段）：停止按钮的可见性、startedAt
+ *  的记时点都以此为准（NoteHistory 卡片、NoteForm 按钮、MarkdownViewer 面板共用） */
+export const ACTIVE_STATUSES: TaskStatus[] = [
+  'PENDING',
+  'PARSING',
+  'DOWNLOADING',
+  'TRANSCRIBING',
+  'SUMMARIZING',
+  'SAVING',
+  'RUNNING',
+]
+
+/** 「停止」入口的防误触窗口：任务刚启动后这么久内停止请求会被拒/按钮不可用 */
+export const STOP_ARM_MS = 2000
+
+/** 停止入口当前是否可用（无 startedAt 视为可用：自动化任务/老数据没有
+ *  「刚刚点击启动」这个上下文，不存在误触窗口） */
+export const isTaskStopArmed = (task?: Pick<Task, 'startedAt'> | null): boolean =>
+  !task?.startedAt || Date.now() - task.startedAt >= STOP_ARM_MS
 
 /** markdown 字段（string | Markdown[]）是否已有可展示正文 */
 const hasMarkdownContent = (md: any): boolean =>
@@ -192,6 +219,8 @@ export const useTaskStore = create<TaskStore>()(
               formData: formData,
               id: taskId,
               status: 'PENDING',
+              // 本地刚提交：停止按钮从这个时刻起才有防误触窗口
+              startedAt: Date.now(),
               markdown: '',
               platform: platform,
               transcript: {
@@ -231,15 +260,27 @@ export const useTaskStore = create<TaskStore>()(
               )
                 return task
 
+              // 被外部（自动化/MCP/另一客户端）启动的任务也要有 startedAt：
+              // 状态从「非进行中」变为「进行中」时记时，停止入口的防误触
+              // 窗口对外部启动同样成立（仅当本地没有更近的记时点时才覆盖）
+              let patch: any = data
+              if (
+                data.status &&
+                ACTIVE_STATUSES.includes(data.status as TaskStatus) &&
+                !ACTIVE_STATUSES.includes(task.status)
+              ) {
+                patch = { ...data, startedAt: Date.now() }
+              }
+
               // 如果是 markdown 字符串，封装为版本
-              if (typeof data.markdown === 'string') {
+              if (typeof patch.markdown === 'string') {
                 const prev = task.markdown
                 // 版本徽标用合并后的 formData：轮询/同步可能在同一 patch 里带来
                 // 后端结果文件的 model_name/style（旧 task.formData 还是空的）。
-                const fd = (data as any).formData || task.formData || {}
+                const fd = (patch as any).formData || task.formData || {}
                 const newVersion: Markdown = {
                   ver_id: `${task.id}-${uuidv4()}`,
-                  content: data.markdown,
+                  content: patch.markdown,
                   style: fd.style || '',
                   model_name: fd.model_name || '',
                   created_at: new Date().toISOString(),
@@ -265,12 +306,12 @@ export const useTaskStore = create<TaskStore>()(
 
                 return {
                   ...task,
-                  ...data,
+                  ...patch,
                   markdown: updatedMarkdown,
                 }
               }
 
-              return { ...task, ...data }
+              return { ...task, ...patch }
             }),
           })),
 
@@ -361,12 +402,30 @@ export const useTaskStore = create<TaskStore>()(
           toast.error('该任务缺少模型参数（老任务无参数快照），请先在表单重选模型后再点重新生成')
           return
         }
+        // 乐观反馈（2026-10-18）：提交请求在后端繁忙时要几秒才回来，期间
+        // 界面毫无变化，用户会以为没点上而再点一次——那第二下正落在随后
+        // 变出的「停止生成」上。先本地切 PENDING，失败再回滚。
+        const prevStatus = task.status
+        const prevMessage = task.message
+        set(state => ({
+          tasks: state.tasks.map(t =>
+            t.id === id
+              ? { ...t, status: 'PENDING', message: undefined, queuePosition: undefined, startedAt: Date.now() }
+              : t,
+          ),
+        }))
         try {
           await generateNote({
             ...newFormData,
             task_id: id,
           })
         } catch (e: any) {
+          // 回滚乐观状态（成功路径不需要再改：PENDING 已是目标态）
+          set(state => ({
+            tasks: state.tasks.map(t =>
+              t.id === id ? { ...t, status: prevStatus, message: prevMessage } : t,
+            ),
+          }))
           // 后端去重拦截：该视频已有未完成任务，选中已存在的那张卡
           if (e?.data?.duplicated && e?.data?.existing_task_id) {
             set({ currentTaskId: e.data.existing_task_id })
@@ -397,6 +456,7 @@ export const useTaskStore = create<TaskStore>()(
                     // 重试后的加载面板会先显示旧消息，等下一次轮询才刷新
                     message: undefined,
                     queuePosition: undefined,
+                    startedAt: Date.now(),
                   }
                   : t
           ),
@@ -453,6 +513,13 @@ export const useTaskStore = create<TaskStore>()(
         const task = get().tasks.find(t => t.id === id)
         if (!task) {
           toast.error('任务不存在')
+          return false
+        }
+        // 防误触（2026-10-18）：刚点过「重新生成/提交」的 STOP_ARM_MS 内，
+        // 停止入口一律不生效——用户实拍里那两次「莫名其妙被停止」都是
+        // 启动后 1 秒内的第二下点击落在刚变出的停止按钮上。
+        if (!isTaskStopArmed(task)) {
+          toast('任务刚刚开始，稍候即可停止', { icon: '⏳' })
           return false
         }
         try {

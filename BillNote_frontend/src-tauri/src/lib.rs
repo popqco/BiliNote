@@ -235,9 +235,13 @@ fn ensure_start_menu_shortcut(app_id: &str) -> Result<(), String> {
 // 4K 原片截图整篇解码（内存峰值由前端懒加载 + 缩略图修复）。但渲染进程
 // 一旦被杀，WebView2 不会自动恢复——页面永久白屏、只能重启整个应用。
 // 这里挂 ProcessFailed 事件兜底：
-//   - 渲染进程退出（含 OOM/崩溃）→ 自动 Reload，白屏变成闪一下；
+//   - 渲染进程退出（含 OOM/崩溃）→ 自动重载，白屏变成闪一下；
+//   - 重载时 URL 带上 ?bn_crash=1：前端启动读到标记后不自动打开上次的
+//     笔记（几百张截图的重量级笔记正是把渲染进程推爆的元凶），停在列表页
+//     ——否则「重载→又落在同一篇→再崩」就是死循环；
 //   - 每次事件落一行到 <安装目录>/logs/frontend_crash.log 便于事后对账；
-//   - 10 分钟内最多自动重载 3 次，防止「坏页面反复 OOM → 无限重载」循环。
+//   - 10 分钟内前 3 次随时重载；预算用尽后退避到每 60 秒一次（2026-10-18：
+//     旧策略「用尽即永久放弃」会把白屏一直挂在那，只能手点 Ctrl+R）。
 #[cfg(windows)]
 static CRASH_RELOAD_TIMES: std::sync::Mutex<Vec<Instant>> = std::sync::Mutex::new(Vec::new());
 
@@ -250,11 +254,43 @@ fn take_crash_reload_permit() -> bool {
     };
     let now = Instant::now();
     times.retain(|t| now.duration_since(*t) < Duration::from_secs(600));
-    if times.len() >= 3 {
-        return false;
+    // 快预算：10 分钟内 3 次。用尽后允许「每 60 秒一次」的退避重载——
+    // 配合 bn_crash 标记（重载后停在列表页，不再打开重笔记），
+    // 退避循环的开销可控，而用户永远不会被永久性白屏卡死。
+    let fast_budget_ok = times.len() < 3;
+    let backoff_ok = times
+        .last()
+        .map(|t| now.duration_since(*t) >= Duration::from_secs(60))
+        .unwrap_or(true);
+    if fast_budget_ok || backoff_ok {
+        times.push(now);
+        return true;
     }
-    times.push(now);
-    true
+    false
+}
+
+/// 带崩溃标记的重载：在 URL 上追加 `?bn_crash=1`（hash 路由的 query 必须在
+/// `#` 之前），前端启动读它→停在列表页不自动打开重笔记。Source()/Navigate
+/// 任一失败就退回普通 Reload（恢复优先，标记只是锦上添花）。
+#[cfg(windows)]
+unsafe fn reload_with_crash_flag(sender: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2) {
+    use windows::core::{HSTRING, PWSTR};
+    let mut pw = PWSTR::null();
+    if sender.Source(&mut pw).is_ok() && !pw.is_null() {
+        if let Ok(url) = pw.to_string() {
+            if !url.is_empty() {
+                let sep = if url.contains('?') { '&' } else { '?' };
+                let flagged = match url.split_once('#') {
+                    Some((base, hash)) => format!("{base}{sep}bn_crash=1#{hash}"),
+                    None => format!("{url}{sep}bn_crash=1"),
+                };
+                if sender.Navigate(&HSTRING::from(flagged)).is_ok() {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = sender.Reload();
 }
 
 /// 前端崩溃日志：本地时间 + 一行说明，追加到安装目录 logs/frontend_crash.log。
@@ -327,16 +363,16 @@ fn setup_webview_crash_recovery(app: &tauri::AppHandle) {
             if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED {
                 if take_crash_reload_permit() {
                     append_crash_log(&format!(
-                        "[webview] 渲染进程退出（{detail}），自动重载恢复"
+                        "[webview] 渲染进程退出（{detail}），自动重载恢复（带 bn_crash 标记）"
                     ));
                     if let Some(sender) = sender.as_ref() {
                         unsafe {
-                            let _ = sender.Reload();
+                            reload_with_crash_flag(sender);
                         }
                     }
                 } else {
                     append_crash_log(&format!(
-                        "[webview] 渲染进程退出（{detail}），10 分钟内已重载 3 次，暂停自动恢复"
+                        "[webview] 渲染进程退出（{detail}），重载预算内（10 分钟 3 次 + 60 秒退避），本次跳过"
                     ));
                 }
             } else {

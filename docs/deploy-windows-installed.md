@@ -122,7 +122,8 @@ tail logs/app.log        # 确认 [startup 5/5] 启动完成、无 ERROR
 | `_internal` 替换失败 | 后端进程还在运行，目录被锁 | 先杀后端再 robocopy |
 | 自动化轮全失败 | ffmpeg 未探测（`FFMPEG_BIN_PATH` 靠健康轮询前置 PATH） | 已修（轮前预检）；日志里 grep ffmpeg 确认 |
 | `curl` exit 7 / sys_check=000 | 刚重启，后端首启慢 | 再等 25–40 秒重试 |
-| 桌面端页面时不时「全白」卡死（只能重启） | WebView2 渲染进程 OOM 被杀（笔记里数百张 4K 截图整篇解码）；渲染进程死后 WebView2 不自动恢复 | 已修（截图懒加载 + 缩略端点 + ProcessFailed 自动重载）。复发时看 `logs/frontend_crash.log` 确认 kind/reason（`OUT_OF_MEMORY` 即仍被内存打爆）与 `%LOCALAPPDATA%\com.jefferyhuang.bilinote\EBWebView\Crashpad\reports\*.dmp` |
+| 桌面端页面时不时「全白」卡死（只能重启） | WebView2 渲染进程 OOM 被杀（笔记里数百张 4K 截图整篇解码）；渲染进程死后 WebView2 不自动恢复 | 已修两轮（10-17 懒加载+缩略；10-18 截图离屏卸 src「装了不放」也会爆 + 重载退避不再永久放弃 + 重载带 `?bn_crash=1` 回列表不重开重笔记）。复发时看 `logs/frontend_crash.log`（`OUT_OF_MEMORY` 即仍被内存打爆）与 `%LOCALAPPDATA%\com.jefferyhuang.bilinote\EBWebView\Crashpad\reports\*.dmp`；`bn_crash` 落地逻辑在 `src/utils/crashBoot.ts` |
+| 点「重新生成」后刚起来的新任务又被「莫名其妙停止」 | 停止按钮原地变形（表单主按钮/加载面板/卡片图标都在启动瞬间出现在刚点过的位置），双击或补点一下就命中停止 | 已修（停止入口启动后 2 秒防误触窗口 `useStopArmed` + 表单主位改禁用的「生成中…」+ 卡片停止槽位常驻 + 重试乐观反馈）。排查时 grep app.log 的「已请求停止任务」是否紧跟「重试模式」出现 |
 | 笔记正文有横线穿过文字、像被叠印/串行 | remark-gfm `singleTilde` 默认把单个 `~` 当删除线定界符，`3~5…3~5` 之间的整段被划掉、两个 `~` 被吃掉 | 已修（gfm 传 `{ singleTilde: false }`）；复发时用 remark 解析该笔记 md，看是否又出现 delete 节点 |
 
 ## 5. 手机端（Viewer）快速通道

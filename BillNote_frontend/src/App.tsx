@@ -9,6 +9,7 @@ import BackendInitDialog from '@/components/BackendInitDialog'
 import StartupBanner from '@/components/SystemDiagnostic/StartupBanner'
 import BackendHealthIndicator from '@/components/BackendHealth/BackendHealthIndicator'
 import ErrorBoundary from '@/components/ErrorBoundary.tsx'
+import { handleCrashBoot } from '@/utils/crashBoot.ts'
 import Index from '@/pages/Index.tsx'
 import { HomePage } from './pages/HomePage/Home.tsx'
 
@@ -58,6 +59,13 @@ function App() {
   const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
   useTasksSync(isDesktopApp ? 5000 : 30000)
   const { loading, initialized, failed, lastError, retry } = useCheckBackend()
+
+  // 渲染进程崩溃自愈重载的落地（Rust 侧重载时带 ?bn_crash=1）：不自动打开
+  // 上一篇笔记，停在列表页——避免「重载→又落在重笔记→再崩」的死循环
+  // （2026-10-18 白屏根治配套，见 utils/crashBoot.ts）
+  useEffect(() => {
+    handleCrashBoot()
+  }, [])
 
   // 在后端初始化完成后执行系统检查
   useEffect(() => {
