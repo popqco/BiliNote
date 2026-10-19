@@ -107,7 +107,11 @@ const formatPosterDate = (value?: string | Date): string => {
  * 构建 ReactMarkdown components 对象，baseURL 用于修正图片路径。
  * 使用函数 + useMemo 避免每次渲染都创建新的函数实例。
  */
-function createMarkdownComponents(baseURL: string, scrollRoot: HTMLElement | null) {
+function createMarkdownComponents(
+  baseURL: string,
+  scrollRoot: HTMLElement | null,
+  noteKey?: string,
+) {
   return {
     h1: ({ children, ...props }: any) => (
       <h1
@@ -231,8 +235,13 @@ function createMarkdownComponents(baseURL: string, scrollRoot: HTMLElement | nul
       // 2026-10-18 白屏根治：此前只做懒加载——装载不卸载，滚过的图解码位图
       // 全部常驻，长笔记读一遍累计数 GB，渲染进程被 OOM 杀掉整页白屏
       // （frontend_crash.log reason=OUT_OF_MEMORY 连发）。现交给 NoteImage：
-      // 离视口 ±2500px 即把 src 换成透明占位释放解码内存，滚回来再挂上；
+      // 离开可视区 ±2500px 即卸载真 src 释放解码内存，滚回来再挂上；
       // 长图导出期间由 screenshotLoadPolicy 强制全部挂载（见 handleExport）。
+      //
+      // 2026-10-19 外层容器从 flex 改成普通块：flex 行里的内容宽度是
+      // shrink-to-fit，占位盒的 width:100% 会反过来依赖内容宽度（空盒时
+      // 塌成十几像素的破图尺寸）。块级布局下宽度就是正文列宽，占位盒的
+      // aspect-ratio 才有稳定的计算基准。
       const isScreenshot =
         typeof src === 'string' && src.includes('/static/screenshots/')
       const displaySrc = isScreenshot
@@ -240,17 +249,18 @@ function createMarkdownComponents(baseURL: string, scrollRoot: HTMLElement | nul
         : src
 
       return (
-        <div className="my-8 flex w-full justify-center">
+        <div className="my-8 w-full">
           <Zoom {...(isScreenshot ? { zoomImg: { src, alt: props.alt } } : {})}>
             {isScreenshot ? (
               <NoteImage
                 src={displaySrc}
                 fallbackSrc={src}
                 alt={props.alt}
+                noteKey={noteKey}
                 root={scrollRoot}
-                // w-full + max-w-full：图片永远不超过正文列宽（笔记里嵌 1920×1080
-                // 原片截图，缺任一个都会把整篇内容撑宽、右侧被裁）
-                className="h-auto w-full max-w-full cursor-zoom-in rounded-lg object-contain shadow-md transition-all hover:shadow-lg"
+                // 尺寸交给 NoteImage 的占位盒（img 是盒内 absolute 图层），
+                // 这里只保留视觉样式
+                className="cursor-zoom-in rounded-lg shadow-md transition-all hover:shadow-lg"
               />
             ) : (
               <img
@@ -477,10 +487,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       return next
     })
 
-  // 缓存 ReactMarkdown components，仅在 baseURL / 滚动容器变化时重建
+  // 缓存 ReactMarkdown components，仅在 baseURL / 滚动容器 / 当前笔记变化时重建
   const markdownComponents = useMemo(
-    () => createMarkdownComponents(baseURL, scrollRoot),
-    [baseURL, scrollRoot],
+    () => createMarkdownComponents(baseURL, scrollRoot, currentTask?.id),
+    [baseURL, scrollRoot, currentTask?.id],
   )
 
   // 正文预处理：隐藏截图时在 markdown 层摘掉截图标记（只靠 CSS 隐藏会留下
