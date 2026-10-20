@@ -1,10 +1,9 @@
 import { useEffect, useRef } from 'react'
-import { useTaskStore, mergeAudioMeta } from '@/store/taskStore'
+import { useTaskStore, isTerminalStatus } from '@/store/taskStore'
 import { get_task_status } from '@/services/note.ts'
 import toast from 'react-hot-toast'
 
 // CANCELLED（用户主动停止）也是终态：不再继续轮询
-const TERMINAL = ['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED']
 
 /**
  * 任务状态轮询。
@@ -50,17 +49,13 @@ export const useTaskPolling = (interval = 3000) => {
         } catch (e: any) {
           const failedResult = e?.data?.result
           if (failedResult) {
-            useTaskStore.getState().updateTaskContent(task.id, {
-              markdown: failedResult.markdown,
-              transcript: failedResult.transcript,
-              // 空字段不覆盖（老结果文件缺封面/标题，整包替换会把卡片元数据清掉）
-              audioMeta: mergeAudioMeta(task.audioMeta, failedResult.audio_meta),
-            })
+            // 失败但已有结果：正文/转写/元信息走统一合并，保留失败原因
+            useTaskStore.getState().applyServerResult(task.id, failedResult, { clearMessage: false })
           }
         }
       }
 
-      const pendingTasks = tasksRef.current.filter(task => !TERMINAL.includes(task.status))
+      const pendingTasks = tasksRef.current.filter(task => !isTerminalStatus(task.status))
       if (pendingTasks.length === 0) return
 
       for (const task of pendingTasks) {
@@ -71,28 +66,8 @@ export const useTaskPolling = (interval = 3000) => {
           const { status } = res
 
           if (status === 'SUCCESS') {
-            const { markdown, transcript, audio_meta } = res.result
             toast.success('笔记生成成功')
-            // 结果文件里的生成参数快照一并合进 formData（徽标数据源），
-            // 不覆盖本地已有的提交值。
-            const fd = task.formData || {}
-            const merged: any = { ...fd }
-            let touched = false
-            for (const k of ['model_name', 'provider_id', 'style', 'quality', 'video_url', 'platform'] as const) {
-              if (!merged[k] && res.result[k]) {
-                merged[k] = res.result[k]
-                touched = true
-              }
-            }
-            useTaskStore.getState().updateTaskContent(task.id, {
-              status,
-              markdown,
-              transcript,
-              audioMeta: mergeAudioMeta(task.audioMeta, audio_meta),
-              queuePosition: undefined,
-              message: undefined,
-              ...(touched ? { formData: merged } : {}),
-            })
+            useTaskStore.getState().applyServerResult(task.id, res.result)
             continue
           }
 
@@ -123,16 +98,12 @@ export const useTaskPolling = (interval = 3000) => {
             // 把老结果一并写入 store，前端失败视图可展示已有笔记内容。
             const reason = String(e.msg || '任务失败')
             const failedResult = e?.data?.result
+            if (failedResult) {
+              useTaskStore.getState().applyServerResult(task.id, failedResult, { clearMessage: false })
+            }
             useTaskStore.getState().updateTaskContent(task.id, {
               status: 'FAILED',
               message: reason,
-              ...(failedResult
-                ? {
-                    markdown: failedResult.markdown,
-                    transcript: failedResult.transcript,
-                    audioMeta: failedResult.audio_meta,
-                  }
-                : {}),
             })
             toast.error(`「${task.audioMeta?.title || '未命名笔记'}」生成失败：${reason}`)
           } else {

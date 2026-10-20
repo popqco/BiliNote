@@ -3,7 +3,7 @@ import HomeLayout from '@/layouts/HomeLayout.tsx'
 import MobileLayout from '@/layouts/MobileLayout.tsx'
 import NoteForm from '@/pages/HomePage/components/NoteForm.tsx'
 import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
-import { useTaskStore, mergeAudioMeta } from '@/store/taskStore'
+import { useTaskStore } from '@/store/taskStore'
 import { useIsMobile } from '@/hooks/useIsMobile.ts'
 import History from '@/pages/HomePage/components/History.tsx'
 import ErrorBoundary from '@/components/ErrorBoundary.tsx'
@@ -53,29 +53,7 @@ export const HomePage: FC = () => {
       try {
         const res: any = await get_task_status(id)
         if (!res?.result) return
-        const { markdown, transcript, audio_meta } = res.result
-        const cur = useTaskStore.getState().tasks.find(t => t.id === id)
-        const patch: any = {
-          status: 'SUCCESS',
-          markdown,
-          transcript,
-          // 空字段不覆盖本地（老结果文件缺封面/标题，整包替换会把卡片元数据清掉）
-          audioMeta: mergeAudioMeta(cur?.audioMeta, audio_meta),
-          message: undefined,
-        }
-        // 结果文件里的生成参数快照（model_name/provider_id/style）合进
-        // formData 缺失的键：徽标与 NoteForm 回显的数据源
-        const fd = cur?.formData || {}
-        const merged: any = { ...fd }
-        let touched = false
-        for (const k of ['model_name', 'provider_id', 'style', 'quality', 'video_url', 'platform'] as const) {
-          if (!merged[k] && res.result[k]) {
-            merged[k] = res.result[k]
-            touched = true
-          }
-        }
-        if (touched) patch.formData = merged
-        useTaskStore.getState().updateTaskContent(id, patch)
+        useTaskStore.getState().applyServerResult(id, res.result)
       } catch {
         // 概要仍在；重新点开这条笔记会再次尝试
       } finally {

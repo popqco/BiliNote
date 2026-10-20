@@ -23,7 +23,7 @@ import {
 } from '@/components/ui/dialog.tsx'
 import { generateNote, get_video_meta } from '@/services/note.ts'
 import { uploadFile } from '@/services/upload.ts'
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, isTerminalStatus } from '@/store/taskStore'
 import { useStopArmed } from '@/hooks/useStopArmed'
 import { useModelStore } from '@/store/modelStore'
 import { useNoteOptionsStore, pickLastNoteOptions } from '@/store/noteOptionsStore'
@@ -452,7 +452,7 @@ const NoteForm = () => {
   // 终态（含 CANCELLED 已停止与历史遗留的 FAILD）：不算「生成中」，
   // 否则停止后按钮会一直停在「停止生成」而不给重试的机会
   const isGenerating = () =>
-    !['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED', undefined].includes(getCurrentTask()?.status)
+    !isTerminalStatus(getCurrentTask()?.status)
   const generating = isGenerating()
   // 「停止」防误触武装：刚提交/重新生成后的 2 秒内停止入口不可用
   // （见 hooks/useStopArmed.ts——点重新生成后同位置的按钮会立刻变成停止，
@@ -528,7 +528,7 @@ const NoteForm = () => {
           t => extractVideoKey((t.formData as any)?.video_url) === key,
         )
       if (dup) {
-        if (!['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED'].includes(dup.status)) {
+        if (!isTerminalStatus(dup.status)) {
           toast.error('该视频已在队列/生成中，已为你选中对应任务')
         } else {
           toast.success('该视频已有笔记，将在原卡片上重新生成（新版本）')

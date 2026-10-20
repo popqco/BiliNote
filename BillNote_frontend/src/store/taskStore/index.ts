@@ -93,7 +93,17 @@ interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
   addPendingTask: (taskId: string, platform: string, formData: any) => void
-  updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
+  updateTaskContent: (
+    id: string,
+    data: Partial<Omit<Task, 'id' | 'createdAt'>>,
+    options?: { force?: boolean },
+  ) => void
+  /** 后端结果文件 → 本地任务：三条同步路径共用的唯一合并入口 */
+  applyServerResult: (
+    id: string,
+    result: any,
+    options?: { status?: TaskStatus; clearMessage?: boolean; force?: boolean },
+  ) => void
   /** 局部合并 audioMeta（早期标题/封面 / 轮询到的元信息），不覆盖已有字段 */
   mergeTaskAudioMeta: (id: string, meta: Partial<AudioMeta>) => void
   /** 把后端发现的任务（如自动化任务）补进本地列表 */
@@ -125,6 +135,12 @@ export const ACTIVE_STATUSES: TaskStatus[] = [
   'SAVING',
   'RUNNING',
 ]
+
+/** 终态集合：轮询/同步/计数/停止入口共用一份，避免各处各写一份数组 */
+export const TERMINAL_STATUSES: TaskStatus[] = ['SUCCESS', 'FAILED', 'FAILD', 'CANCELLED']
+
+export const isTerminalStatus = (status?: string | null): boolean =>
+  !!status && TERMINAL_STATUSES.includes(status as TaskStatus)
 
 /** 「停止」入口的防误触窗口：任务刚启动后这么久内停止请求会被拒/按钮不可用 */
 export const STOP_ARM_MS = 2000
@@ -160,6 +176,16 @@ export const mergeAudioMeta = (
   }
   return base as AudioMeta
 }
+
+/** 结果文件里的生成参数快照键：只补本地缺失值，不覆盖用户提交时的选择 */
+const RESULT_FORM_KEYS = [
+  'model_name',
+  'provider_id',
+  'style',
+  'quality',
+  'video_url',
+  'platform',
+] as const
 
 /** 后端 /tasks/recent 概要（+可选结果）→ 本地 Task。
  *  徽标数据源优先级：结果文件（model_name/provider_id/style）＞ 概要 ＞ 空。
@@ -245,18 +271,19 @@ export const useTaskStore = create<TaskStore>()(
           currentTaskId: taskId, // 默认设置为当前任务
         })),
 
-      updateTaskContent: (id, data) =>
+      updateTaskContent: (id, data, options) =>
           set(state => ({
             tasks: state.tasks.map(task => {
               if (task.id !== id) return task
 
               // SUCCESS→SUCCESS 且本地已有正文时短路：防止轮询/同步冲掉用户
               // 已有的版本列表。回填的历史概要（SUCCESS 但无正文）要放行——
-              // 懒加载正文靠这条路径写进来。
+              // 懒加载正文靠这条路径写进来。外部内容水位线变化时传 force 绕过。
               if (
                 task.status === 'SUCCESS' &&
                 data.status === 'SUCCESS' &&
-                hasMarkdownContent(task.markdown)
+                hasMarkdownContent(task.markdown) &&
+                !options?.force
               )
                 return task
 
@@ -314,6 +341,32 @@ export const useTaskStore = create<TaskStore>()(
               return { ...task, ...patch }
             }),
           })),
+
+      applyServerResult: (id, result, options) => {
+        const task = get().tasks.find(t => t.id === id)
+        if (!task || !result) return
+        const patch: any = {
+          markdown: result.markdown,
+          transcript: result.transcript,
+          // 空字段不覆盖本地（老结果文件缺封面/标题，整包替换会清掉卡片元数据）
+          audioMeta: mergeAudioMeta(task.audioMeta, result.audio_meta),
+          queuePosition: undefined,
+        }
+        if (options?.status !== undefined) patch.status = options.status
+        if (options?.clearMessage !== false) patch.message = undefined
+        // 结果文件里的生成参数快照只补本地缺失的键，不覆盖提交时的选择。
+        const fd = task.formData || {}
+        const merged: any = { ...fd }
+        let touched = false
+        for (const k of RESULT_FORM_KEYS) {
+          if (!merged[k] && result[k]) {
+            merged[k] = result[k]
+            touched = true
+          }
+        }
+        if (touched) patch.formData = merged
+        get().updateTaskContent(id, patch, { force: options?.force })
+      },
 
 
       mergeTaskAudioMeta: (id, meta) =>

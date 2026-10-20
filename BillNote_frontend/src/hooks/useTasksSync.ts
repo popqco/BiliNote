@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useTaskStore, mergeAudioMeta } from '@/store/taskStore'
+import { useTaskStore } from '@/store/taskStore'
 import { get_recent_tasks, get_task_status } from '@/services/note.ts'
 
 const ACTIVE = ['PENDING', 'PARSING', 'DOWNLOADING', 'TRANSCRIBING', 'SUMMARIZING', 'SAVING']
@@ -180,29 +180,11 @@ export const useTasksSync = (interval = 30000) => {
           try {
             const res: any = await get_task_status(bt.task_id)
             if (res?.result) {
-              const { markdown, transcript, audio_meta } = res.result
-              // 结果文件里的生成参数快照（model_name/provider_id/style）一并合进
-              // formData：徽标与 NoteForm 回显的数据源。只补本地缺失的键，
-              // 不覆盖用户本地已有的提交值。
-              const patch: any = {
-                status: 'SUCCESS',
-                markdown,
-                transcript,
-                // 空字段不覆盖本地（老结果文件缺封面/标题，整包替换会清掉卡片元数据）
-                audioMeta: mergeAudioMeta(local.audioMeta, audio_meta),
-                message: undefined,
-              }
-              const fd = local.formData || {}
-              const merged: any = { ...fd }
-              let touched = false
-              for (const k of ['model_name', 'provider_id', 'style', 'quality', 'video_url', 'platform'] as const) {
-                if (!merged[k] && res.result[k]) {
-                  merged[k] = res.result[k]
-                  touched = true
-                }
-              }
-              if (touched) patch.formData = merged
-              useTaskStore.getState().updateTaskContent(bt.task_id, patch)
+              // 内容水位线变化时 force 绕过 SUCCESS→SUCCESS 短路，让外部重写落地；
+              // 首次见到成功结果时只补正文，不覆盖本地已有版本。
+              useTaskStore.getState().applyServerResult(bt.task_id, res.result, {
+                force: needsResultPull,
+              })
             }
           } catch (e) {
             console.warn('同步任务结果失败:', bt.task_id, e)
