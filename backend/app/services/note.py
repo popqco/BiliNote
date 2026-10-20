@@ -1296,17 +1296,6 @@ class NoteGenerator:
             logger.warning(f"截图插入完成，{failed}/{len(matches)} 张失败被跳过")
         return markdown
 
-    @staticmethod
-    def _extract_screenshot_timestamps(markdown: str) -> List[Tuple[str, int]]:
-        """
-        从 Markdown 文本中提取所有 '*Screenshot-mm:ss' 或 'Screenshot-[mm:ss]' 标记，
-        返回 [(原始标记文本, 时间戳秒数), ...] 列表。
-
-        :param markdown: 原始 Markdown 文本
-        :return: 标记与对应时间戳秒数的列表
-        """
-        return extract_screenshot_timestamps(markdown)
-
     def _save_metadata(self, video_id: str, platform: str, task_id: str) -> None:
         """
         将生成的笔记任务记录插入数据库

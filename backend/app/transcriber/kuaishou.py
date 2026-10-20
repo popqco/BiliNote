@@ -7,7 +7,6 @@ from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptSegment, TranscriptResult
 from app.transcriber.base import Transcriber
 from app.utils.logger import get_logger
-from events import transcription_finished
 
 logger = get_logger(__name__)
 
@@ -98,18 +97,8 @@ class KuaishouTranscriber(Transcriber):
                 raw=result_data
             )
             
-            # 触发完成事件
-            # self.on_finish(file_path, result)
-            
             return result
             
         except Exception as e:
             logger.error(f"快手ASR处理失败: {str(e)}")
             raise
-
-    def on_finish(self, video_path: str, result: TranscriptResult) -> None:
-        """转录完成的回调"""
-        logger.info(f"快手ASR转写完成: {video_path}")
-        transcription_finished.send({
-            "file_path": video_path,
-        })

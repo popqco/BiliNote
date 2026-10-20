@@ -428,7 +428,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     return () => mq.removeEventListener('change', onChange)
   }, [])
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
-  const svgRef = useRef<SVGSVGElement>(null)
   // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
   // （见下面的回顶 effect）。
   const readerViewportRef = useRef<HTMLDivElement>(null)
@@ -850,33 +849,6 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     } catch (e) {
       toast.error('复制失败')
     }
-  }
-  const alertButton = {
-    id: 'alert',
-    title: '测试警告',
-    content: '⚠️',
-    onClick: () => alert('你点击了自定义按钮！'),
-  }
-  const exportButton = {
-    id: 'export',
-    title: '导出思维导图',
-    content: '⤓',
-    onClick: () => {
-      const svgEl = svgRef.current
-      if (!svgEl) return
-      // 同上面的序列化逻辑
-      const serializer = new XMLSerializer()
-      const source = serializer.serializeToString(svgEl)
-      const blob = new Blob(['<?xml version="1.0" encoding="UTF-8"?>', source], {
-        type: 'image/svg+xml;charset=utf-8',
-      })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'mindmap.svg'
-      a.click()
-      URL.revokeObjectURL(url)
-    },
   }
   const buildPosterData = (): PosterData | null => {
     const task = getCurrentTask()

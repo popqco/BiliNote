@@ -9,7 +9,6 @@ from app.models.transcriber_model import TranscriptSegment, TranscriptResult
 from app.transcriber.base import Transcriber
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_model_dir
-from events import transcription_finished
 
 logger = get_logger(__name__)
 
@@ -106,15 +105,8 @@ class MLXWhisperTranscriber(Transcriber):
                 raw=result
             )
             
-            # self.on_finish(file_path, transcript_result)
             return transcript_result
             
         except Exception as e:
             logger.error(f"MLX Whisper 转写失败：{e}")
             raise e
-
-    def on_finish(self, video_path: str, result: TranscriptResult) -> None:
-        logger.info("MLX Whisper 转写完成")
-        transcription_finished.send({
-            "file_path": video_path,
-        }) 

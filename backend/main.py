@@ -27,7 +27,6 @@ from app.utils.logger import get_logger
 from app.utils.proc import no_window_kwargs
 from app import create_app
 from app.services.transcriber_config_manager import TranscriberConfigManager
-from events import register_handler
 from ffmpeg_helper import ensure_ffmpeg_or_raise
 
 logger = get_logger(__name__)
@@ -50,16 +49,13 @@ if not os.path.exists(out_dir):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动序列拆成 5 步、每步独立日志 + 异常时打明确的 [startup N/5 FAILED] 标记。
+    # 启动序列拆成 4 步、每步独立日志 + 异常时打明确的 [startup N/4 FAILED] 标记。
     # 目的：用户 docker logs 一眼能看出后端死在哪一步，避免「容器一直重启但看不出原因」。
     try:
-        logger.info("[startup 1/5] register_handler() — 注册事件处理器")
-        register_handler()
-
-        logger.info("[startup 2/5] init_db() — 初始化 SQLite 数据库")
+        logger.info("[startup 1/4] init_db() — 初始化 SQLite 数据库")
         init_db()
 
-        logger.info("[startup 3/5] TranscriberConfigManager — 读取转写器配置")
+        logger.info("[startup 2/4] TranscriberConfigManager — 读取转写器配置")
         # 转写器不再在启动时强制初始化，而是在首次生成笔记时按需创建。
         # 如果配置了不可用的类型（如 mlx-whisper 未安装），会在使用时报错而非静默回退。
         _cfg = TranscriberConfigManager().get_config()
@@ -68,7 +64,7 @@ async def lifespan(app: FastAPI):
             f"model_size={_cfg['whisper_model_size']}"
         )
 
-        logger.info("[startup 4/5] seed_default_providers() — 初始化默认 LLM 供应商")
+        logger.info("[startup 3/4] seed_default_providers() — 初始化默认 LLM 供应商")
         seed_default_providers()
 
         # 把已配置的代理 export 到环境变量，让 huggingface_hub（whisper 模型下载）
@@ -78,7 +74,7 @@ async def lifespan(app: FastAPI):
         if _proxy:
             logger.info(f"           已应用全局代理到环境变量: {_proxy}")
 
-        logger.info("[startup 5/5] 启动完成，等待请求")
+        logger.info("[startup 4/4] 启动完成，等待请求")
 
         # 收敛上一个进程遗留的「非终态」任务（崩溃/强杀留下的 PENDING、SUMMARIZING
         # 会永远显示成「排队中」）：启动即标记为失败并写明原因。
@@ -109,7 +105,7 @@ async def lifespan(app: FastAPI):
         import threading
         _reap_thread = threading.Thread(target=_reap_loop, name="reap-stale-tasks", daemon=True)
         _reap_thread.start()
-        logger.info("[startup 5/5] 停滞任务定时收敛已启动（每 10 分钟一轮）")
+        logger.info("[startup 4/4] 停滞任务定时收敛已启动（每 10 分钟一轮）")
 
         # 自动化调度线程：稍后再看定期检查 + 汇总通知（enabled=false 时空转，
         # 见 docs/adr/0004；Windows 计划任务入口 automation_cli.py 与其文件锁互斥）
