@@ -108,6 +108,21 @@ def test_single_submit_writes_pending_and_schedules(ready, tmp_path, monkeypatch
     assert scheduled[0][2]["output_dir"] == tmp_path
 
 
+def test_local_submit_without_video_id_still_gets_task_id(ready, tmp_path, monkeypatch):
+    """local 平台 extract_video_id 返回 None，也必须生成 task_id（历史 500 回归）。"""
+    monkeypatch.setattr(note_tasks_mod, "extract_video_id", lambda url, platform: None)
+
+    result = _submit(
+        NoteTaskService(), tmp_path,
+        video_url="/uploads/test.mp4", platform="local",
+    )
+
+    assert result.task_id
+    data = json.loads((tmp_path / f"{result.task_id}.status.json").read_text(encoding="utf-8"))
+    assert data["status"] == "PENDING"
+    assert data["platform"] == "local"
+
+
 def test_watchlater_batch_returns_created(ready, tmp_path, monkeypatch):
     from app.services import watchlater
 

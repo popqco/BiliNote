@@ -279,6 +279,9 @@ class NoteTaskService:
                     )
             logger.info(f"重试模式，复用已有 task_id={task_id}")
         else:
+            # 新提交：先分配 task_id。没有 video_id 的平台（如 local）也必须
+            # 有任务 id，否则后续状态写入/预取线程会拿到 None。
+            task_id = str(uuid.uuid4())
             # 提交去重：同一视频已有未完成任务时不再重复建任务。
             if video_id:
                 active_tid = task_state.active_task_for_video(video_id)
@@ -297,8 +300,6 @@ class NoteTaskService:
                 if existing_tids:
                     task_id = existing_tids[0]
                     logger.info(f"同视频复用历史任务: video_id={video_id} → task_id={task_id}")
-                else:
-                    task_id = str(uuid.uuid4())
 
         # 新提交（含重试/复用）视为对旧停止请求的作废：清掉预取消墓碑。
         task_state.clear_cancel_request(task_id)
