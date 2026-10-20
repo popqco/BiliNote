@@ -10,3 +10,6 @@ from pathlib import Path
 CONFIG_DIR = Path(os.getenv("BILINOTE_CONFIG_DIR", "config"))
 NOTE_OUTPUT_DIR = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
 UPLOAD_DIR = Path(os.getenv("BILINOTE_UPLOAD_DIR", "uploads"))
+
+# 历史上 note.py 在 import 时就建目录；保持同样的启动行为。
+NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

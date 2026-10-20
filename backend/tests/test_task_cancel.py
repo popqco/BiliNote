@@ -29,7 +29,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from app.enmus.task_status_enums import TaskStatus  # noqa: E402
 from app.exceptions.task_cancel import TaskCancelled  # noqa: E402
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment  # noqa: E402
-from app.services import task_runs  # noqa: E402
+from app.services.task_state import runs as task_runs  # noqa: E402
 from app.services.task_serial_executor import ConcurrentTaskExecutor  # noqa: E402
 import app.services.note as note_svc  # noqa: E402
 from app.services.note import NoteGenerator  # noqa: E402

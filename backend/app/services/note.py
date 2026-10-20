@@ -3,7 +3,6 @@ import logging
 import math
 import os
 import shutil
-import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -21,7 +20,7 @@ from app.downloaders.youtube_downloader import YoutubeDownloader
 from app.db.video_task_dao import delete_task_by_video, insert_video_task
 from app.db.model_dao import get_model_by_provider_and_name
 from app.enmus.exception import NoteErrorEnum, ProviderErrorEnum
-from app.enmus.task_status_enums import TaskStatus
+from app.enmus.task_status_enums import TERMINAL_STATUSES, TaskStatus
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.exceptions.provider import ProviderError
@@ -33,6 +32,7 @@ from app.models.gpt_model import GPTSource
 from app.models.model_config import ModelConfig
 from app.models.notes_model import AudioDownloadResult, NoteResult
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
+from app.paths import NOTE_OUTPUT_DIR
 from app.services.constant import SUPPORT_PLATFORM_MAP
 from app.services.provider import ProviderService
 from app.services.task_config_manager import TaskConfigManager
@@ -46,6 +46,13 @@ from app.services.task_runs import (
     finish_run,
     is_run_cancelled,
     register_run,
+)
+from app.services import task_state
+from app.services.task_state.runs import (
+    active_task_for_video,
+    is_task_active,
+    mark_task_active,
+    mark_task_done,
 )
 from app.services.video_meta import fetch_video_meta
 from app.transcriber.base import Transcriber
@@ -75,8 +82,6 @@ BACKEND_PORT = os.getenv("BACKEND_PORT", "8483")
 BACKEND_BASE_URL = f"{API_BASE_URL}:{BACKEND_PORT}"
 
 # 输出目录（用于缓存音频、转写、Markdown 文件，以及存储截图）
-NOTE_OUTPUT_DIR = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
-NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
 # 图片基础 URL（用于生成 Markdown 中的图片链接，需前端静态目录对应）
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
@@ -98,7 +103,7 @@ def _image_budget() -> int:
 
 # 非终态判定用（提交去重 / 任务列表）。CANCELLED 也是终态：用户停掉的任务
 # 不该再拦住同视频的重新提交，也不该被 reap 当成「执行中」。
-TERMINAL_STATUSES = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELLED.value}
+# 定义已移到 app.enmus.task_status_enums，这里保留导入名供历史调用点使用。
 
 
 def _should_segment(audio_file: str, max_bytes: int) -> bool:
@@ -467,80 +472,22 @@ class NoteGenerator:
 
     def _update_status(self, task_id: Optional[str], status: Union[str, TaskStatus],
                        message: Optional[str] = None, extra: Optional[dict] = None):
-        """
-        创建或更新 {task_id}.status.json，记录当前任务状态。
-
-        合并式写入：保留文件中已有的附加字段（video_id/origin/video_url/audio_meta），
-        只覆盖 status/message/extra——阶段推进不会丢掉提交时写入的元数据。
-
-        取消语义（2026-10-16）：本 Generator 绑定的 run 若已被作废（同 task_id
-        被重新提交）则整体禁写；若只是收到停止请求，则只允许写 CANCELLED——
-        /cancel_task 已把「正在停止」落盘，迟到的阶段推进不许把它覆盖回
-        「总结中」之类。
-
-        :param task_id: 任务唯一 ID
-        :param status: TaskStatus 枚举或自定义状态字符串
-        :param message: 可选消息；为空时清除上一阶段的 message
-        :param extra: 附加字段，与状态一起原子写入
-        """
-        if not task_id:
-            return
-        run = self._run
-        if run is not None and run.task_id == task_id:
-            if run.superseded:
-                logger.debug(f"陈旧 run 的状态写入已抑制 (task_id={task_id}, status={status})")
-                return
-            if run.cancelled and status != TaskStatus.CANCELLED:
-                logger.debug(f"任务已请求停止，抑制状态推进 (task_id={task_id}, status={status})")
-                return
-        self.write_task_status(task_id, status, message=message, extra=extra)
+        """阶段推进：委托 task_state 写状态，并带本 Generator 的 run 抑制规则。"""
+        task_state.write_status(
+            task_id, status, message=message, extra=extra, run=self._run,
+            root=NOTE_OUTPUT_DIR,
+        )
 
     @staticmethod
     def write_task_status(task_id: Optional[str], status: Union[str, TaskStatus],
                           message: Optional[str] = None, extra: Optional[dict] = None) -> None:
-        """合并式写 {task_id}.status.json（不构造 NoteGenerator）。
-
-        与实例方法 _update_status 的唯一区别：不查 run 抑制表（调用方负责）。
-        `/cancel_task` 走这条轻量路径——构造 NoteGenerator 会初始化转写器
-        （首次构建实测 >10s，要在 HF 缓存/模型上做一轮检查），而用户点「停止」
-        要的是即时反馈；这里只碰一个 JSON 文件，毫秒级返回。
-        """
-        if not task_id:
-            return
-        status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-        data: dict = {}
-        try:
-            if status_file.exists():
-                data = json.loads(status_file.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        data["status"] = status.value if isinstance(status, TaskStatus) else status
-        if message:
-            data["message"] = message
-        else:
-            data.pop("message", None)
-        if extra:
-            data.update(extra)
-        _write_status_file_atomic(status_file, data)
-
-    def _write_status_file(self, task_id: str, data: dict) -> None:
-        """原子写 {task_id}.status.json（tmp + rename）。"""
-        _write_status_file_atomic(NOTE_OUTPUT_DIR / f"{task_id}.status.json", data)
+        """轻量写状态（不构造 NoteGenerator），调用方负责 run 抑制。"""
+        task_state.write_status(task_id, status, message=message, extra=extra,
+                                root=NOTE_OUTPUT_DIR)
 
     def _merge_status_meta(self, task_id: Optional[str], extra: dict) -> None:
-        """在不改变当前 status 的前提下，把附加字段并入 {task_id}.status.json。"""
-        if not task_id:
-            return
-        status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-        data: dict = {}
-        try:
-            if status_file.exists():
-                data = json.loads(status_file.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        data.setdefault("status", TaskStatus.PENDING.value)
-        data.update(extra)
-        self._write_status_file(task_id, data)
+        """在不改变当前 status 的前提下并入附加字段。"""
+        task_state.merge_status_meta(task_id, extra, root=NOTE_OUTPUT_DIR)
 
     @staticmethod
     def _format_error(exc: Exception) -> str:
@@ -1313,32 +1260,11 @@ class NoteGenerator:
 
 # ---------------- 模块级辅助（供路由 / 自动化复用） ----------------
 
-def _write_status_file_atomic(status_file: Path, data: dict) -> None:
-    """原子写状态文件（tmp + rename），失败降级直写。"""
-    NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        temp_file = status_file.with_suffix(".tmp")
-        with temp_file.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        temp_file.replace(status_file)
-    except Exception as e:
-        logger.error(f"写入状态文件失败 ({status_file.name})：{e}")
-        try:
-            with status_file.open("w", encoding="utf-8") as f:
-                f.write(f"Error writing status: {str(e)}")
-        except Exception:
-            logger.error(f"写入错误 {e}")
-
-
 def write_task_status(task_id: str, status: Union[str, TaskStatus],
                      message: Optional[str] = None, extra: Optional[dict] = None) -> None:
-    """供路由/脚本用的轻量状态写入（不构造 NoteGenerator）。
-
-    `/cancel_task` 专用路径：构造 NoteGenerator 会初始化转写器（首次实测
-    >10s，要做一轮模型/缓存检查），而用户点「停止」要即时反馈；这里只碰
-    一个 JSON 文件。合并语义与 NoteGenerator._update_status 一致。
-    """
-    NoteGenerator.write_task_status(task_id, status, message=message, extra=extra)
+    """供路由/脚本用的轻量状态写入（不构造 NoteGenerator）。"""
+    task_state.write_status(task_id, status, message=message, extra=extra,
+                            root=NOTE_OUTPUT_DIR)
 
 
 def build_gpt(model_name: Optional[str], provider_id: Optional[str]) -> GPT:
@@ -1441,335 +1367,36 @@ def refinalize_stored_note(
 
 
 def find_active_task_by_video(video_id: str) -> Optional[dict]:
-    """查找同一 video_id 的未终态任务（提交去重用）。
-
-    状态文件是任务的唯一事实源；video_id 在提交时即写入状态文件
-    （routers.note.generate_note）。返回 {"task_id","status"} 或 None。
-    """
-    if not video_id:
-        return None
-    from app.utils.url_parser import normalize_video_id
-
-    video_id = normalize_video_id(video_id, "bilibili") if video_id.startswith("BV") else video_id
-    try:
-        candidates = sorted(
-            NOTE_OUTPUT_DIR.glob("*.status.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return None
-    for f in candidates:
-        stem = f.name[: -len(".status.json")]
-        if "_" in stem:
-            continue  # 过滤历史遗留的 {task_id}_markdown.status.json
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        # 状态文件的 video_id 可能被带 _pN 后缀的下载器元数据覆盖（多 P 视频），
-        # 归一化后再比对，否则正在跑的任务会被自动化当成「无任务」重复提交
-        if normalize_video_id(data.get("video_id"), data.get("platform")) != video_id:
-            continue
-        if data.get("status") in TERMINAL_STATUSES:
-            continue
-        return {"task_id": stem, "status": data.get("status")}
-    return None
-
-
-def _result_file_meta(stem: str) -> dict:
-    """从 {stem}.json 结果文件（或 {stem}_audio.json 缓存）补标题/封面等元信息。
-
-    背景：3 天前的老任务状态文件里只有 {"status": ...}（早期元数据写入是
-    10-01 才加的，见 5044da5），/tasks/recent 只读状态文件，于是 64 篇老笔记
-    在手机上全显示「未命名笔记」（2026-10-04 用户反馈）。结果文件和音频缓存里
-    的 audio_meta 完好，直接拿来用——纯读文件，不改任何状态，安全。
-    """
-    try:
-        p = NOTE_OUTPUT_DIR / f"{stem}.json"
-        if p.exists():
-            d = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(d, dict):
-                am = d.get("audio_meta")
-                if isinstance(am, dict) and (am.get("title") or am.get("cover_url")):
-                    return am
-                # 有些结果文件顶层也带标题字段，顺手收下
-                alt = {k: d.get(k) for k in ("title", "cover_url", "duration", "video_id", "platform") if d.get(k)}
-                if alt.get("title"):
-                    return alt
-    except Exception:
-        pass
-    try:
-        p = NOTE_OUTPUT_DIR / f"{stem}_audio.json"
-        if p.exists():
-            d = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(d, dict) and (d.get("title") or d.get("cover_url")):
-                return d
-    except Exception:
-        pass
-    return {}
+    """查找同一 video_id 的未终态任务（提交去重用）。"""
+    return task_state.find_active_task_by_video(video_id, root=NOTE_OUTPUT_DIR)
 
 
 def list_recent_tasks(limit: int = 80) -> List[dict]:
-    """按最近更新倒序返回任务概要列表（供 /tasks/recent 增量同步）。
-
-    只保留 {uuid}.status.json 主文件，字段与前端任务卡片所需对齐。
-    视频级去重：同一 video_id 只返回一条（进行中 > SUCCESS > FAILED，
-    同优先级取新者），否则失败风暴留下的几十条 FAILED 会把历史列表
-    刷成重复卡（2026-10-06 用户反馈）。去重前先多扫 3 倍原始条目，
-    避免重复占比高的库里去重后不足 limit 条。
-    """
-    scan_cap = max(limit * 3, 240)
-    items: List[dict] = []
-    try:
-        files = sorted(
-            NOTE_OUTPUT_DIR.glob("*.status.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:scan_cap]
-    except OSError:
-        return items
-    for f in files:
-        stem = f.name[: -len(".status.json")]
-        if "_" in stem:
-            continue
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        meta = data.get("audio_meta") or {}
-        # 老任务状态文件里只有 status（标题封面全丢）：从结果文件/_audio 缓存补，
-        # 否则手机历史列表里全是「未命名笔记」。
-        if not meta.get("title"):
-            fb = _result_file_meta(stem)
-            if fb:
-                meta = {**fb, **{k: v for k, v in meta.items() if v}}
-        try:
-            updated_at = int(f.stat().st_mtime)
-        except OSError:
-            updated_at = 0
-        items.append({
-            "task_id": stem,
-            "status": data.get("status"),
-            "message": data.get("message"),
-            "video_id": data.get("video_id") or meta.get("video_id"),
-            "platform": data.get("platform") or meta.get("platform"),
-            "video_url": data.get("video_url"),
-            "origin": data.get("origin", "manual"),
-            # 徽标数据源：提交时即写入状态文件，老任务没有则为空
-            "model_name": data.get("model_name"),
-            "provider_id": data.get("provider_id"),
-            "style": data.get("style"),
-            "title": meta.get("title"),
-            "cover_url": meta.get("cover_url"),
-            "duration": meta.get("duration"),
-            "updated_at": updated_at,
-            "has_result": (NOTE_OUTPUT_DIR / f"{stem}.json").exists(),
-        })
-
-    from app.services.recent_dedupe import pick_latest_per_video
-
-    return pick_latest_per_video(items)[:limit]
+    """按最近更新倒序返回任务概要列表（供 /tasks/recent 增量同步）。"""
+    return task_state.list_recent_tasks(limit=limit, root=NOTE_OUTPUT_DIR)
 
 
-# ---------------- 运行中任务登记表（进程内） ----------------
-# 作用有两个：
-#   1) 拦截「同一个任务在跑的时候又被点一次重新生成」——否则第二次提交会把
-#      正在跑的任务状态文件改写成 PENDING，前端就一直显示「排队中」直到前一次
-#      真正跑完（2026-10-01 实测复现）。
-#   2) 删除任务时判断是否正在生成，正在跑的不允许删（否则状态文件会被下一次
-#      _update_status 重新写回来）。
-# 只对本进程可见：进程重启后的残留任务由 reap_interrupted_tasks() 收敛。
-# token（2026-10-16 加）：登记归属到具体 run——「停止后立刻重试」时旧 run 的
-# 收尾摘除不能把新 run 的登记一起摘掉（否则去重门禁失效，可重复提交）。
-
-_active_tasks: dict[str, dict] = {}          # task_id -> {"video_id": str, "token": object}
-_active_tasks_lock = threading.Lock()
-
-
-def mark_task_active(task_id: str, video_id: Optional[str] = None, token: object = None) -> None:
-    if not task_id:
-        return
-    with _active_tasks_lock:
-        _active_tasks[task_id] = {"video_id": video_id or "", "token": token}
-
-
-def mark_task_done(task_id: str, token: object = None) -> None:
-    if not task_id:
-        return
-    with _active_tasks_lock:
-        info = _active_tasks.get(task_id)
-        if info is None:
-            return
-        if token is not None and info.get("token") is not None and info["token"] is not token:
-            logger.info(f"任务登记已被新的执行接管，跳过本次摘除 (task_id={task_id})")
-            return
-        _active_tasks.pop(task_id, None)
-
-
-def is_task_active(task_id: str) -> bool:
-    with _active_tasks_lock:
-        return task_id in _active_tasks
-
-
-def active_task_for_video(video_id: str) -> Optional[str]:
-    """同视频是否已有任务在本进程排队/执行中（跨进程靠状态文件兜底）。"""
-    if not video_id:
-        return None
-    with _active_tasks_lock:
-        for tid, info in _active_tasks.items():
-            if info.get("video_id") and info["video_id"] == video_id:
-                return tid
-    return None
+# 运行中任务登记（活跃表 / run / 取消墓碑）已移到 app.services.task_state.runs；
+# 本文件保留同名导入，供 router 与历史调用点继续 from app.services.note import。
 
 
 def release_stale_active_task(task_id: str) -> bool:
-    """内存登记 vs 磁盘终态对齐（P1-①：双事实源脱节收敛）。
-
-    磁盘 `{task_id}.status.json` 与内存 `_active_tasks` 是双事实源、无对齐：
-    用户看到失败卡片（读磁盘），点重试却被内存登记拦回（读内存）。
-    内存命中但磁盘已是终态（SUCCESS/FAILED）→ 登记是僵尸，清掉并返回 True
-    （调用方放行走正常重试流程）；否则返回 False（调用方保持 400 拦截）。
-
-    磁盘文件缺失/损坏时保守返回 False——宁可多拦一次，不放行覆盖真在跑的任务。
-    """
-    if not task_id or not is_task_active(task_id):
-        return False
-    data = _read_status_file(NOTE_OUTPUT_DIR / f"{task_id}.status.json")
-    if not data:
-        return False
-    if data.get("status") in TERMINAL_STATUSES:
-        logger.warning(
-            "清理僵尸任务登记：内存仍登记但磁盘已是终态 "
-            f"(task_id={task_id}, disk_status={data.get('status')})，放行重试"
-        )
-        mark_task_done(task_id)
-        return True
-    return False
+    """内存登记 vs 磁盘终态对齐；root 跟随本模块的 NOTE_OUTPUT_DIR。"""
+    return task_state.release_stale_active_task(task_id, root=NOTE_OUTPUT_DIR)
 
 
 # ---------------- 任务删除 / 中断收敛 ----------------
 
-_TASK_ARTIFACT_SUFFIXES = (
-    ".status.json",
-    ".json",
-    "_audio.json",
-    "_transcript.json",
-    "_markdown.md",
-    "_markdown.status.json",
-    "_markdown.gpt.checkpoint.json",
-)
-
-
-def _read_status_file(path: Path) -> Optional[dict]:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
 def find_task_ids_by_video(video_id: str, platform: Optional[str] = None) -> List[str]:
     """按 video_id 找任务（老前端只传 video_id 时用）。"""
-    if not video_id:
-        return []
-    found: List[str] = []
-    for f in NOTE_OUTPUT_DIR.glob("*.status.json"):
-        stem = f.name[: -len(".status.json")]
-        if "_" in stem:
-            continue
-        data = _read_status_file(f) or {}
-        if data.get("video_id") != video_id:
-            continue
-        if platform and data.get("platform") and data.get("platform") != platform:
-            continue
-        found.append(stem)
-    return found
+    return task_state.find_task_ids_by_video(video_id, platform, root=NOTE_OUTPUT_DIR)
 
 
 def purge_task(task_id: str) -> dict:
-    """真正删除一个任务：状态文件 + 缓存 + 导出结果 + 向量索引。
-
-    只删 {task_id} 前缀的文件——同一视频的多份笔记各有独立 task_id，互不牵连。
-    数据库里的 video→task 记录仅在「该视频已无任何任务文件」时才清，避免误伤
-    同一视频的另一份笔记。
-    """
-    if not task_id:
-        return {"deleted": 0, "files": []}
-
-    # 先读状态（要等文件删完就来不及了）：video_id / platform 用于后面判断
-    # 是否连数据库记录一起清。
-    status_file = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-    data = _read_status_file(status_file) if status_file.exists() else None
-
-    deleted_files: List[str] = []
-    for suffix in _TASK_ARTIFACT_SUFFIXES:
-        path = NOTE_OUTPUT_DIR / f"{task_id}{suffix}"
-        if path.exists():
-            try:
-                path.unlink()
-                deleted_files.append(path.name)
-            except OSError as e:
-                logger.warning(f"删除任务文件失败 {path}: {e}")
-
-    # 向量索引：留着会让「AI 问答」继续检索到已删除的笔记
-    try:
-        from app.services.vector_store import VectorStoreManager
-        VectorStoreManager().delete_index(task_id)
-    except Exception as e:
-        logger.warning(f"删除向量索引失败 (task_id={task_id}): {e}")
-
-    # 数据库记录：只有该视频再没有任何任务文件时才清（否则会连带其他笔记的归属）
-    if data:
-        video_id, platform = data.get("video_id"), data.get("platform")
-        if video_id and not find_task_ids_by_video(video_id, platform):
-            try:
-                delete_task_by_video(video_id=video_id, platform=platform or "bilibili")
-                logger.info(f"已清理数据库任务记录 (video_id={video_id})")
-            except Exception as e:
-                logger.warning(f"清理数据库任务记录失败 (video_id={video_id}): {e}")
-
-    logger.info(f"任务已删除 (task_id={task_id})，清理文件 {len(deleted_files)} 个")
-    return {"deleted": len(deleted_files), "files": deleted_files}
+    """真正删除一个任务：状态文件 + 缓存 + 导出结果 + 向量索引。"""
+    return task_state.purge_task(task_id, root=NOTE_OUTPUT_DIR)
 
 
 def reap_interrupted_tasks(process_started_at: float) -> int:
-    """把上一个进程遗留的「非终态」任务标记为失败。
-
-    后端崩溃 / 蓝屏 / 强杀会留下永远停在 PENDING、SUMMARIZING 的状态文件，
-    前端就永远显示「排队中、第 N 位」——本进程既没有它的队列记录，也不可能
-    再把它跑完。启动时统一收敛成 FAILED 并写明原因，比留个假排队诚实。
-    只收敛「本进程启动前就存在」且「超过 30 秒没被写过」的文件，避免误伤
-    刚提交/正在执行的任务。
-    """
-    if not NOTE_OUTPUT_DIR.exists():
-        return 0
-    reaped = 0
-    cutoff = process_started_at - 30
-    for f in NOTE_OUTPUT_DIR.glob("*.status.json"):
-        stem = f.name[: -len(".status.json")]
-        if "_" in stem:
-            continue
-        try:
-            if f.stat().st_mtime > cutoff:
-                continue
-        except OSError:
-            continue
-        data = _read_status_file(f)
-        if not data:
-            continue
-        status = data.get("status")
-        if not status or status in TERMINAL_STATUSES:
-            continue
-        if is_task_active(stem):
-            continue
-        data["status"] = TaskStatus.FAILED.value
-        data["message"] = "后端在任务执行中重启（或异常退出），任务已中断；请重新生成这份笔记"
-        try:
-            tmp = f.with_suffix(".status.json.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(f)
-            reaped += 1
-            logger.warning(f"收敛中断任务：{stem}（原状态 {status}）→ FAILED")
-        except OSError as e:
-            logger.warning(f"写入状态文件失败 {f}: {e}")
-    return reaped
+    """把上一个进程遗留的非终态任务标记为失败。"""
+    return task_state.reap_interrupted_tasks(process_started_at, root=NOTE_OUTPUT_DIR)

@@ -30,3 +30,12 @@ class TaskStatus(str, enum.Enum):
             cls.CANCELLED: "已停止",
         }
         return desc_map.get(status, "未知状态")
+
+
+# 非终态判定用（提交去重 / 任务列表）。CANCELLED 也是终态：用户停掉的任务
+# 不该再拦住同视频的重新提交，也不该被 reap 当成「执行中」。
+TERMINAL_STATUSES = {
+    TaskStatus.SUCCESS.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+}
