@@ -86,7 +86,10 @@ const captureNodeToPng = async (
         ...(opts.filter ? { filter: opts.filter } : {}),
       }),
     )
-  } catch {
+  } catch (e: any) {
+    // 超时说明这次截图本身太重（长笔记/大量截图），再打一次同样重的
+    // capture 只会让主线程更久无法恢复；直接交给上层报错。
+    if (String(e?.message || '').includes('截图超时')) throw e
     return await withTimeout(
       toPng(node, { pixelRatio: opts.pixelRatio, backgroundColor: opts.backgroundColor }),
     )
@@ -213,12 +216,20 @@ export const useNoteExport = ({
         // NoteImage 平时把离屏截图卸载成透明占位（省内存）；导出要整篇入画，
         // 先开导出模式强制全部挂上真 src，等加载完再 capture，截完恢复
         setScreenshotExportMode(true)
+        let watchdog: number | undefined
         try {
           await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
           await waitForNoteShots()
-          await exportLongImage(title)
+          const timeout = new Promise<never>((_, reject) => {
+            watchdog = window.setTimeout(
+              () => reject(new Error('长图导出超时，请改用 PDF 或 Word')),
+              90000,
+            )
+          })
+          await Promise.race([exportLongImage(title), timeout])
           toast.success('长图已导出')
         } finally {
+          if (watchdog) window.clearTimeout(watchdog)
           setScreenshotExportMode(false)
           setExportForceShow(false)
         }
