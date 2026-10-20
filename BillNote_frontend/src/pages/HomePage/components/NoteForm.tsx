@@ -451,8 +451,12 @@ const NoteForm = () => {
   /* ---- 帮助函数 ---- */
   // 终态（含 CANCELLED 已停止与历史遗留的 FAILD）：不算「生成中」，
   // 否则停止后按钮会一直停在「停止生成」而不给重试的机会
-  const isGenerating = () =>
-    !isTerminalStatus(getCurrentTask()?.status)
+  const isGenerating = () => {
+    // 没有当前任务（刚点「新建笔记」）不算生成中——isTerminalStatus(undefined)
+    // 为 false，直接取反会把空表单误判成「生成中…」并禁用提交按钮。
+    const status = getCurrentTask()?.status
+    return !!status && !isTerminalStatus(status)
+  }
   const generating = isGenerating()
   // 「停止」防误触武装：刚提交/重新生成后的 2 秒内停止入口不可用
   // （见 hooks/useStopArmed.ts——点重新生成后同位置的按钮会立刻变成停止，
