@@ -45,9 +45,17 @@ _transcribers = {
 _transcriber_configs = {key: None for key in _transcribers}
 _transcriber_init_lock = threading.Lock()
 
+# 有内部上传会话状态（etags/upload_id/task_id）的转写器：共享实例会让并发
+# 任务交错读写会话，只能在实例上加全局锁把并发串行化。改为每次调用新建实例，
+# 锁随实例隔离，在线并发信号量（TRANSCRIBE_ONLINE_CONCURRENCY）才真正生效。
+_PER_CALL_TYPES = {TranscriberType.BCUT}
+
 # 公共实例初始化函数
 def _init_transcriber(key: TranscriberType, cls, *args, **kwargs):
     init_config = (args, tuple(sorted(kwargs.items())))
+    if key in _PER_CALL_TYPES:
+        logger.info(f'创建 {cls.__name__} 实例（每任务独立，不缓存）')
+        return cls(*args, **kwargs)
     with _transcriber_init_lock:
         instance = _transcribers[key]
         if instance is None or _transcriber_configs[key] != init_config:

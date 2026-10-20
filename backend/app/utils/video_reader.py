@@ -6,6 +6,7 @@ import subprocess
 from typing import Callable, Optional
 
 from app.exceptions.task_cancel import TaskCancelled
+from app.utils.ffmpeg_limiter import ffmpeg_slots
 from app.utils.proc import no_window_kwargs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ffmpeg
@@ -90,9 +91,13 @@ class VideoReader:
         cmd = ["ffmpeg", "-ss", str(ts), "-i", self.video_path, "-frames:v", "1", "-q:v", "2", "-y", output_path,
                "-hide_banner", "-loglevel", "error"]
         try:
-            subprocess.run(cmd, check=True, **no_window_kwargs())
+            with ffmpeg_slots:
+                subprocess.run(cmd, check=True, timeout=120, **no_window_kwargs())
             return output_path
         except subprocess.CalledProcessError:
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning(f"抽帧超时，跳过 (t={ts}s)")
             return None
 
     def extract_frames(self, max_frames=None) -> list[str]:

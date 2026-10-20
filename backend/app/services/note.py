@@ -226,6 +226,7 @@ class NoteGenerator:
         if run is None and task_id:
             run = register_run(task_id)
         self._run = run
+        downloader = None
 
         try:
             self._check_cancelled()
@@ -407,6 +408,13 @@ class NoteGenerator:
         finally:
             # 清理任务专属的帧/拼图临时目录（并发隔离方案的配套清理）
             self._cleanup_task_scratch(task_id)
+            # 下载器是每任务独立实例（取消谓词不跨任务）；顺带释放它生成的临时
+            # cookiefile 等资源。
+            if downloader is not None:
+                try:
+                    downloader.cleanup()
+                except Exception:
+                    pass
             # 摘除本次 run 登记：仅当自己仍是当前 run 时才摘
             finish_run(self._run)
 
@@ -449,25 +457,23 @@ class NoteGenerator:
 
     def _get_downloader(self, platform: str) -> Downloader:
         """
-        根据平台名称获取对应的下载器实例
+        根据平台名称创建本次任务专用的下载器实例。
 
         :param platform: 平台标识，需在 SUPPORT_PLATFORM_MAP 中
         :return: 对应的 Downloader 子类实例
         """
         downloader_cls = SUPPORT_PLATFORM_MAP.get(platform)
         logger.debug(f"实例化下载器 -  {platform}")
-        instance = None
         if not downloader_cls:
             logger.error(f"不支持的平台：{platform}")
             raise NoteError(code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
                             message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message)
         try:
-            instance = downloader_cls
+            instance = downloader_cls()
         except Exception as e:
             logger.error(f"实例化下载器失败：{e}")
-
-
-        logger.info(f"使用下载器：{downloader_cls.__class__}")
+            raise
+        logger.info(f"使用下载器：{downloader_cls.__name__}")
         return instance
 
     def _update_status(self, task_id: Optional[str], status: Union[str, TaskStatus],

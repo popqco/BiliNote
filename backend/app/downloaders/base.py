@@ -70,6 +70,9 @@ class Downloader(ABC):
         hooks.append(self._progress_hook_with_cancel())
         return {**ydl_opts, "progress_hooks": hooks}
 
+    def cleanup(self) -> None:
+        """释放本次实例持有的临时资源（默认无）。"""
+
     @abstractmethod
     def download(self, video_url: str, output_dir: str = None,
                  quality: DownloadQuality = "fast", need_video: Optional[bool] = False,

@@ -127,6 +127,17 @@ class BilibiliDownloader(Downloader, ABC):
         logger.info("已生成 B站 Netscape Cookie 文件: %s (条目: %d)", tmp.name, len(lines) - 1)
         return tmp.name
 
+    def cleanup(self) -> None:
+        """删除本实例在 __init__ 时生成的临时 cookiefile。"""
+        path = getattr(self, "_cookiefile", None)
+        if not path:
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        self._cookiefile = None
+
     def download(
         self,
         video_url: str,

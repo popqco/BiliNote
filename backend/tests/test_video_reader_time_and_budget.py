@@ -37,7 +37,7 @@ def test_extract_frames_accepts_legacy_max_frames_arg(reader):
 
     from app.utils import video_reader as vr_mod
 
-    def fake_run(cmd, check=True):
+    def fake_run(cmd, check=True, **kwargs):
         out = next(a for a in cmd if isinstance(a, str) and a.endswith(".jpg"))
         m = _re.search(r"frame_(\d{2})_(\d{2})\.jpg$", out)
         sec = int(m.group(1)) * 60 + int(m.group(2))

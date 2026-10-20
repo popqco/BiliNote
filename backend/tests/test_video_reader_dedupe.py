@@ -95,7 +95,7 @@ VideoReader = video_reader_module.VideoReader
 
 
 def _make_fake_ffmpeg_runner(colors_by_second):
-    def _runner(cmd, check=True):
+    def _runner(cmd, check=True, **kwargs):
         output_path = next((arg for arg in cmd if isinstance(arg, str) and arg.endswith(".jpg")), None)
         if output_path is None:
             raise AssertionError("Output path not found in ffmpeg cmd")
