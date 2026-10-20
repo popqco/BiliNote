@@ -1,28 +1,16 @@
-import json
 import os
-from pathlib import Path
 from typing import Optional, Dict, Any
+
+from app.config.json_store import JsonFileStore
+from app.paths import CONFIG_DIR
+from app.transcriber import model_download_state, model_readiness
 
 
 class TranscriberConfigManager:
     """管理转写器配置，存储在 JSON 文件中，支持前端动态修改。"""
 
-    def __init__(self, filepath: str = "config/transcriber.json"):
-        self.path = Path(filepath)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _read(self) -> Dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        try:
-            with self.path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _write(self, data: Dict[str, Any]):
-        with self.path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    def __init__(self, filepath: str = str(CONFIG_DIR / "transcriber.json")):
+        self._store = JsonFileStore(filepath)
 
     def get_config(self) -> Dict[str, Any]:
         """获取当前转写器配置，fallback 到环境变量默认值。
@@ -31,7 +19,7 @@ class TranscriberConfigManager:
         新装用户没主动设置时不应该被首次下载卡住。想要更高精度可在「音频转写配置」
         页主动切换。
         """
-        data = self._read()
+        data = self._store.read()
         return {
             "transcriber_type": data.get(
                 "transcriber_type",
@@ -49,11 +37,11 @@ class TranscriberConfigManager:
         whisper_model_size: Optional[str] = None,
     ) -> Dict[str, Any]:
         """更新转写器配置并持久化。"""
-        data = self._read()
+        data = self._store.read()
         data["transcriber_type"] = transcriber_type
         if whisper_model_size is not None:
             data["whisper_model_size"] = whisper_model_size
-        self._write(data)
+        self._store.write(data)
         return self.get_config()
 
     def get_transcriber_type(self) -> str:
@@ -84,24 +72,12 @@ class TranscriberConfigManager:
         if ttype not in ("fast-whisper", "mlx-whisper"):
             return result  # 在线引擎无需本地模型
 
-        # 延迟 import 避免与 routers.config 的循环依赖；只取纯函数，不触发路由副作用
-        try:
-            from app.routers.config import (
-                _check_whisper_model_exists,
-                _check_mlx_whisper_model_exists,
-                _downloading,
-            )
-        except Exception as e:
-            # 拿不到检查函数时保守放行，不要把用户卡死
-            result["reason"] = f"无法检查模型状态: {e}"
-            return result
-
         if ttype == "fast-whisper":
-            downloaded = _check_whisper_model_exists(size, "whisper")
-            downloading = _downloading.get(size) == "downloading"
+            downloaded = model_readiness.check_whisper_model_exists(size, "whisper")
+            downloading = model_download_state.is_downloading(size)
         else:  # mlx-whisper
-            downloaded = _check_mlx_whisper_model_exists(size)
-            downloading = _downloading.get(f"mlx-{size}") == "downloading"
+            downloaded = model_readiness.check_mlx_whisper_model_exists(size)
+            downloading = model_download_state.is_downloading(f"mlx-{size}")
 
         result["downloading"] = downloading
         if downloaded:

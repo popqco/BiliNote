@@ -1,10 +1,10 @@
-import json
 import os
 import socket
 import urllib.parse
-from pathlib import Path
 from typing import Any, Dict, Optional
 
+from app.config.json_store import JsonFileStore
+from app.paths import CONFIG_DIR
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,36 +37,22 @@ class ProxyConfigManager:
     这样桌面端/web 用户在设置页填，docker/服务器部署用环境变量兜底。
     """
 
-    def __init__(self, filepath: str = "config/proxy.json"):
-        self.path = Path(filepath)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _read(self) -> Dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        try:
-            with self.path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _write(self, data: Dict[str, Any]):
-        with self.path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    def __init__(self, filepath: str = str(CONFIG_DIR / "proxy.json")):
+        self._store = JsonFileStore(filepath)
 
     def get_config(self) -> Dict[str, Any]:
-        data = self._read()
+        data = self._store.read()
         return {
             "enabled": bool(data.get("enabled", False)),
             "url": data.get("url", "") or "",
         }
 
     def update_config(self, enabled: bool, url: Optional[str] = None) -> Dict[str, Any]:
-        data = self._read()
+        data = self._store.read()
         data["enabled"] = bool(enabled)
         if url is not None:
             data["url"] = url.strip()
-        self._write(data)
+        self._store.write(data)
         return self.get_config()
 
     def get_proxy_url(self) -> Optional[str]:

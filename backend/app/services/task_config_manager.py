@@ -11,11 +11,10 @@
 用户定版的激进档（旧档 2400/500）；环境变量保留作部署侧逃生口——一旦在 UI
 保存过一次，四个键都会落盘，环境变量随即失效。
 """
-import json
-import os
-from pathlib import Path
 from typing import Any, Dict
 
+from app.config.json_store import JsonFileStore, resolve_int
+from app.paths import CONFIG_DIR
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,40 +45,25 @@ def _clamp(key: str, value: Any) -> int:
 
 
 class TaskConfigManager:
-    def __init__(self, filepath: str = "config/task_config.json"):
-        self.path = Path(filepath)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _read(self) -> Dict[str, Any]:
-        try:
-            with self.path.open("r", encoding="utf-8") as f:
-                return json.load(f) or {}
-        except Exception:
-            # 文件不存在/损坏 = 从未在 UI 保存过，交给环境变量/默认值
-            return {}
+    def __init__(self, filepath: str = str(CONFIG_DIR / "task_config.json")):
+        self._store = JsonFileStore(filepath)
 
     def get(self, key: str) -> int:
         """单个参数的生效值：文件 > 环境变量 > 默认，越界自动夹取。"""
         if key not in DEFAULT_CONFIG:
             raise KeyError(key)
-        raw = self._read().get(key)
-        if raw is not None:
-            return _clamp(key, raw)
-        env_raw = os.getenv(_LIMITS[key][0])
-        if env_raw:
-            return _clamp(key, env_raw)
-        return DEFAULT_CONFIG[key]
+        env_name, lo, hi = _LIMITS[key]
+        return resolve_int(self._store.read().get(key), env_name, DEFAULT_CONFIG[key], lo, hi)
 
     def get_config(self) -> Dict[str, int]:
         return {k: self.get(k) for k in DEFAULT_CONFIG}
 
     def update_config(self, patch: Dict[str, Any]) -> Dict[str, int]:
         """只接受已知键，逐键夹取后落盘；返回保存后的生效配置。"""
-        current = self._read()
+        current = self._store.read()
         for k in DEFAULT_CONFIG:
             if k in (patch or {}):
                 current[k] = _clamp(k, patch[k])
-        with self.path.open("w", encoding="utf-8") as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
+        self._store.write(current)
         logger.info(f"生成性能与预算配置已更新: {self.get_config()}")
         return self.get_config()

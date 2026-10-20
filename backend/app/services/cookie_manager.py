@@ -1,8 +1,9 @@
-import json
 import re
 import time
-from pathlib import Path
 from typing import Optional, Dict, Any
+
+from app.config.json_store import JsonFileStore
+from app.paths import CONFIG_DIR
 
 # 「key=」开头即视为已经带了键名的 Cookie 串
 _HAS_KEY_RE = re.compile(r"^\s*[A-Za-z0-9_\-.\[\]]+\s*=")
@@ -76,25 +77,12 @@ def normalize_cookie(platform: str, raw: Optional[str]) -> Optional[str]:
 
 
 class CookieConfigManager:
-    def __init__(self, filepath: str = "config/downloader.json"):
-        self.path = Path(filepath)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._write({})
-
-    def _read(self) -> Dict[str, Dict[str, Any]]:
-        try:
-            with self.path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _write(self, data: Dict[str, Dict[str, Any]]):
-        with self.path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    def __init__(self, filepath: str = str(CONFIG_DIR / "downloader.json")):
+        self._store = JsonFileStore(filepath)
+        self._store.ensure_exists()
 
     def get(self, platform: str) -> Optional[str]:
-        data = self._read()
+        data = self._store.read()
         return normalize_cookie(platform, data.get(platform, {}).get("cookie"))
 
     def get_auth(self, platform: str) -> Dict[str, Any]:
@@ -102,7 +90,7 @@ class CookieConfigManager:
 
         旧结构（只有 cookie 键）天然兼容：缺的键按 None 处理。
         """
-        entry = self._read().get(platform) or {}
+        entry = self._store.read().get(platform) or {}
         return {
             "cookie": normalize_cookie(platform, entry.get("cookie")),
             "refresh_token": entry.get("refresh_token"),
@@ -125,7 +113,7 @@ class CookieConfigManager:
         （用户手动粘贴完整 Cookie 也能自动续期）；否则仅当 SESSDATA 没变才
         沿用旧值——换了账号后旧 refresh_token 必然失配（刷新报 86095），不能留。
         """
-        data = self._read()
+        data = self._store.read()
         old = data.get(platform) or {}
         if refresh_token is None:
             refresh_token = extract_cookie_value(cookie, "ac_time_value")
@@ -141,29 +129,29 @@ class CookieConfigManager:
             "refreshed_at": refreshed_at if refreshed_at is not None else old.get("refreshed_at"),
             "checked_at": checked_at if checked_at is not None else old.get("checked_at"),
         }
-        self._write(data)
+        self._store.write(data)
 
     def mark_checked(self, platform: str):
         """记录最近一次「Cookie 是否需要刷新」的探测时间（用于节流，不改动凭据）。"""
-        data = self._read()
+        data = self._store.read()
         entry = data.get(platform)
         if not entry:
             return
         entry["checked_at"] = time.time()
-        self._write(data)
+        self._store.write(data)
 
     def set(self, platform: str, cookie: str):
         # 兼容旧签名：手动保存走 set_auth（保留可用的续期凭据）
         self.set_auth(platform, cookie)
 
     def delete(self, platform: str):
-        data = self._read()
+        data = self._store.read()
         if platform in data:
             del data[platform]
-            self._write(data)
+            self._store.write(data)
 
     def list_all(self) -> Dict[str, str]:
-        data = self._read()
+        data = self._store.read()
         return {k: v.get("cookie", "") for k, v in data.items()}
 
     def exists(self, platform: str) -> bool:

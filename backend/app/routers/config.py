@@ -15,6 +15,10 @@ from app.services.cookie_manager import CookieConfigManager
 from app.services.pairing_manager import PairingManager
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.transcriber import model_download_state as dl_state
+from app.transcriber.model_readiness import (
+    check_mlx_whisper_model_exists as _check_mlx_whisper_model_exists,
+    check_whisper_model_exists as _check_whisper_model_exists,
+)
 from ffmpeg_helper import ensure_ffmpeg_or_raise
 
 logger = get_logger(__name__)
@@ -265,56 +269,8 @@ def automation_check_login():
 # 修复 issue #402 衍生问题：原先只回传 downloading/downloaded，下载失败时前端无任何提示。
 
 
-def _check_whisper_model_exists(model_size: str, subdir: str = "whisper") -> bool:
-    """检查指定 whisper 模型是否已下载完整到本地。
-
-    先把模型名 resolve 成可加载标识，再按类型判定：
-      - 本地路径模型 → 直接看该目录下有没有 model.bin
-      - HF repo_id → 看 HF cache 布局
-        <model_dir>/models--{org}--{name}/snapshots/<hash>/model.bin
-        （历史 modelscope 布局 <model_dir>/whisper-{size}/model.bin 也兼容识别）
-    """
-    from app.transcriber.whisper_models import (
-        resolve_whisper_model,
-        is_local_target,
-        hf_cache_dirname,
-    )
-    try:
-        target = resolve_whisper_model(model_size)
-    except Exception:
-        return False
-    if is_local_target(target):
-        return (Path(target) / "model.bin").exists()
-
-    model_dir = Path(get_model_dir(subdir))
-    # HF cache 布局（适配任意 org/repo，不再写死 Systran）
-    hf_repo_dir = model_dir / hf_cache_dirname(target) / "snapshots"
-    if hf_repo_dir.exists():
-        for snapshot in hf_repo_dir.iterdir():
-            if (snapshot / "model.bin").exists():
-                return True
-    # 历史 modelscope 布局（向后兼容老用户）
-    legacy = model_dir / f"whisper-{model_size}" / "model.bin"
-    return legacy.exists()
-
-
-def _check_mlx_whisper_model_exists(model_size: str) -> bool:
-    """检查 mlx-whisper 模型是否已下载完整到本地。
-
-    与 fast-whisper 的目录布局不同：mlx 模型按 HuggingFace repo_id
-    （如 mlx-community/whisper-tiny-mlx）落盘，且没有 model.bin，
-    用 config.json 作为「下载完成」的判据，和 mlx_whisper_transcriber.py 保持一致。
-    """
-    try:
-        from app.transcriber.mlx_whisper_transcriber import MLX_MODEL_MAP
-    except Exception:
-        return False
-    repo_id = MLX_MODEL_MAP.get(model_size)
-    if not repo_id:
-        return False
-    model_dir = get_model_dir("mlx-whisper")
-    model_path = os.path.join(model_dir, repo_id)
-    return (Path(model_path) / "config.json").exists()
+# 模型落盘检测已移到 app.transcriber.model_readiness，供 service 与路由共用；
+# 这里保留私有别名，避免改动本文件历史调用点。
 
 
 @router.get("/transcriber_models_status")

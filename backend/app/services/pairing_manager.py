@@ -1,8 +1,9 @@
-import json
 import os
 import secrets
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional
+
+from app.config.json_store import JsonFileStore
+from app.paths import CONFIG_DIR
 
 
 class PairingManager:
@@ -17,22 +18,8 @@ class PairingManager:
 
     ENV_KEY = "WORKER_PAIRING_TOKEN"
 
-    def __init__(self, filepath: str = "config/pairing.json"):
-        self.path = Path(filepath)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    def _read(self) -> Dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        try:
-            with self.path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _write(self, data: Dict[str, Any]):
-        with self.path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    def __init__(self, filepath: str = str(CONFIG_DIR / "pairing.json")):
+        self._store = JsonFileStore(filepath)
 
     def _env_token(self) -> Optional[str]:
         val = os.getenv(self.ENV_KEY, "")
@@ -43,26 +30,26 @@ class PairingManager:
         env_token = self._env_token()
         if env_token:
             return env_token
-        data = self._read()
+        data = self._store.read()
         token = (data.get("token") or "").strip()
         if token:
             return token
         token = secrets.token_urlsafe(32)
-        self._write({"token": token})
+        self._store.write({"token": token})
         return token
 
     def has_custom_token(self) -> bool:
         """是否已有用户侧 token（环境变量或文件），用于判断是否首次生成。"""
         if self._env_token():
             return True
-        return bool((self._read().get("token") or "").strip())
+        return bool((self._store.read().get("token") or "").strip())
 
     def regenerate(self) -> str:
         """重新生成 token 并持久化；环境变量覆盖时拒绝（需改环境变量本身）。"""
         if self._env_token():
             raise RuntimeError("当前 token 由环境变量 WORKER_PAIRING_TOKEN 提供，请直接修改该变量")
         token = secrets.token_urlsafe(32)
-        self._write({"token": token})
+        self._store.write({"token": token})
         return token
 
     def verify(self, candidate: Optional[str]) -> bool:
@@ -74,7 +61,7 @@ class PairingManager:
 
     def get_allow_remote(self) -> bool:
         """远端 Viewer 是否可改全局配置；缺省 True（历史行为：配对即全开）。"""
-        data = self._read()
+        data = self._store.read()
         # 文件里没写过该键 → 默认允许（老用户升级不断连）。
         if "allow_remote" not in data:
             return True
@@ -82,9 +69,9 @@ class PairingManager:
 
     def set_allow_remote(self, allowed: bool) -> bool:
         """设置远控开关。token 缺失时先生成（保证文件结构完整），返回生效值。"""
-        data = self._read()
+        data = self._store.read()
         if not (data.get("token") or "").strip():
             data["token"] = secrets.token_urlsafe(32)
         data["allow_remote"] = bool(allowed)
-        self._write(data)
+        self._store.write(data)
         return bool(allowed)

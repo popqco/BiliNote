@@ -8,10 +8,10 @@
 - gen 段是「自动化生成配置」：独立于首页表单当前选择的模型/风格/视频理解开关，
   无人值守时结果可预期（用户决策 Q10）。
 """
-import json
-from pathlib import Path
 from typing import Any, Dict
 
+from app.config.json_store import JsonFileStore
+from app.paths import CONFIG_DIR
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -49,39 +49,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-def _deep_merge(base: dict, patch: dict) -> dict:
-    out = dict(base)
-    for k, v in (patch or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
-
-
 class AutomationConfigManager:
-    def __init__(self, filepath: str = "config/automation.json"):
-        self.path = Path(filepath)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            self._write(DEFAULT_CONFIG)
-
-    def _read(self) -> Dict[str, Any]:
-        try:
-            with self.path.open("r", encoding="utf-8") as f:
-                return json.load(f) or {}
-        except Exception:
-            return {}
-
-    def _write(self, data: Dict[str, Any]) -> None:
-        with self.path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    def __init__(self, filepath: str = str(CONFIG_DIR / "automation.json")):
+        self._store = JsonFileStore(filepath, DEFAULT_CONFIG)
+        self._store.ensure_exists()
 
     def get_config(self) -> Dict[str, Any]:
         """读取配置，并以默认值补齐缺失字段（老配置文件向前兼容）。"""
-        return _deep_merge(DEFAULT_CONFIG, self._read())
+        return self._store.read_merged()
 
     def update_config(self, patch: Dict[str, Any]) -> Dict[str, Any]:
-        merged = _deep_merge(self.get_config(), patch or {})
-        self._write(merged)
-        return merged
+        return self._store.update(patch)
