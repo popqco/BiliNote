@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
         # 收敛上一个进程遗留的「非终态」任务（崩溃/强杀留下的 PENDING、SUMMARIZING
         # 会永远显示成「排队中」）：启动即标记为失败并写明原因。
         try:
-            from app.services.note import reap_interrupted_tasks
+            from app.services.task_state import reap_interrupted_tasks
             reaped = reap_interrupted_tasks(time.time())
             if reaped:
                 logger.warning(f"           已收敛 {reaped} 个被中断的任务（标记为失败）")
@@ -92,7 +92,7 @@ async def lifespan(app: FastAPI):
         # 不会误伤真在跑的任务：mtime 30 秒内写过的文件跳过 + 内存已登记跳过。
         def _reap_loop() -> None:
             import threading as _threading
-            from app.services.note import reap_interrupted_tasks as _reap
+            from app.services.task_state import reap_interrupted_tasks as _reap
             while True:
                 _threading.Event().wait(600)
                 try:

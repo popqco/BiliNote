@@ -15,27 +15,11 @@ from dataclasses import asdict
 from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
+from app.enmus.task_status_enums import TERMINAL_STATUSES, TaskStatus
 from app.exceptions.note import NoteError
-from app.services.note import (
-    NoteGenerator,
-    logger,
-    active_task_for_video,
-    find_active_task_by_video,
-    list_recent_tasks,
-    find_task_ids_by_video,
-    is_task_active,
-    mark_task_active,
-    mark_task_done,
-    purge_task,
-    release_stale_active_task,
-    write_task_status,
-)
-from app.services.task_runs import (
-    clear_cancel_request,
-    finish_run,
-    register_run,
-    request_cancel_task,
-)
+from app.paths import NOTE_OUTPUT_DIR, UPLOAD_DIR
+from app.services import task_state
+from app.services.note import NoteGenerator, logger
 from app.services.task_serial_executor import task_serial_executor, video_task_locks
 from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
@@ -47,7 +31,6 @@ import asyncio
 import hashlib
 import httpx
 from PIL import Image, ImageOps
-from app.enmus.task_status_enums import TaskStatus
 
 # from app.services.downloader import download_raw_audio
 # from app.services.whisperer import transcribe_audio
@@ -66,21 +49,17 @@ def _spawn_meta_prefetch(task_id: str, video_url: str, platform: str) -> None:
 
     def _work():
         try:
-            # 已有标题（重试/复用历史任务）就不再抓
-            from app.services.note import NOTE_OUTPUT_DIR
+            # 已有标题（重试/复用历史任务）就不再抓。root 取 services.note 的
+            # NOTE_OUTPUT_DIR（历史行为：测试与运行期都以该模块属性为准）。
+            from app.services.note import NOTE_OUTPUT_DIR as note_out
 
-            sf = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-            if sf.exists():
-                try:
-                    cur = json.loads(sf.read_text(encoding="utf-8"))
-                    if (cur.get("audio_meta") or {}).get("title"):
-                        return
-                except Exception:
-                    pass
+            cur = task_state.read_status(task_id, root=note_out) or {}
+            if (cur.get("audio_meta") or {}).get("title"):
+                return
             meta = fetch_video_meta(video_url, platform) or {}
             if not meta.get("title"):
                 return
-            NoteGenerator()._merge_status_meta(
+            task_state.merge_status_meta(
                 task_id,
                 {
                     "audio_meta": {
@@ -91,6 +70,7 @@ def _spawn_meta_prefetch(task_id: str, video_url: str, platform: str) -> None:
                         "platform": platform,
                     }
                 },
+                root=note_out,
             )
             logger.info(f"已补排队任务元信息 {task_id[:8]} ← {str(meta.get('title'))[:32]}")
         except Exception as e:
@@ -164,10 +144,6 @@ class VideoRequest(BaseModel):
         return v
 
 
-NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
-UPLOAD_DIR = "uploads"
-
-
 def save_note_to_file(task_id: str, note):
     os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
     with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
@@ -227,6 +203,14 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
         return
 
     def _execute_note_task():
+        # 排队中被停止：先查取消，避免为了写一个 CANCELLED 又去初始化转写器
+        # （首次构建实测 10s+，排队任务点了停止还要等这么久）。
+        if task_state.is_run_cancelled(run):
+            task_state.write_status(
+                task_id, TaskStatus.CANCELLED,
+                message="已停止生成（排队中取消）", root=NOTE_OUTPUT_DIR,
+            )
+            return None
         return NoteGenerator().generate(
             video_url=video_url,
             platform=platform,
@@ -248,19 +232,19 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
     logger.info(f"任务进入执行队列 (task_id={task_id})")
     # 取消登记先于入池：排队中的任务也要能停——run 在进线程池之前就登记，
     # 等 worker 取到它时第一件事就是检查取消（见 services/task_runs.py）
-    run = register_run(task_id)
+    run = task_state.register_run(task_id)
     # 登记「本进程正在跑」：删除接口靠它拒绝删正在生成的任务，重复提交靠它
     # 拦住「同一个 task 被点两次重新生成」导致的状态回退。token=run：
     # 「停止后立刻重试」时旧 run 的收尾摘除不会误摘新 run 的登记。
-    mark_task_active(task_id, video_id, token=run)
+    task_state.mark_task_active(task_id, video_id, token=run)
     try:
         # 同一视频互斥：防止同视频双任务并发下载/生成触发文件锁冲突（WinError 32）。
         # 不同视频互不阻塞，两个 worker 可让「转写（GPU）」与「总结（网络）」阶段重叠（ADR-0001）。
         with video_task_locks.get(video_id or task_id):
             note = task_serial_executor.run(_execute_note_task, task_id=task_id)
     finally:
-        mark_task_done(task_id, token=run)
-        finish_run(run)
+        task_state.mark_task_done(task_id, token=run)
+        task_state.finish_run(run)
     logger.info(f"Note generated: {task_id}")
     if not note or not note.markdown:
         logger.warning(f"任务 {task_id} 执行失败，跳过保存")
@@ -291,31 +275,23 @@ def cancel_task(data: RecordRequest):
         return R.error(msg="缺少 task_id，无法停止任务", code=400)
 
     # 磁盘状态：判断「没有 live run」时是已结束还是残留
-    disk_status = None
-    try:
-        status_file = Path(NOTE_OUTPUT_DIR) / f"{task_id}.status.json"
-        if status_file.exists():
-            disk_status = json.loads(status_file.read_text(encoding="utf-8")).get("status")
-    except Exception:
-        disk_status = None
+    disk_status = (task_state.read_status(task_id, root=NOTE_OUTPUT_DIR) or {}).get("status")
 
-    live = request_cancel_task(task_id)
+    live = task_state.request_cancel_task(task_id)
     if live:
         # 立即落盘，前端不用等当前步骤退出就能看到「已停止」；
         # 正在跑的 run 收尾时会再写一次终态文案（其状态写入已被抑制，只允许 CANCELLED）。
-        # 走模块级轻量写入而不是 NoteGenerator()._update_status：构造 NoteGenerator
-        # 会初始化转写器（首次实测 10s+），停止按钮要的是即时反馈（2026-10-17 冒烟实测）
-        write_task_status(
-            task_id, TaskStatus.CANCELLED, message="已停止生成（正在中止当前步骤…）"
+        task_state.write_status(
+            task_id, TaskStatus.CANCELLED,
+            message="已停止生成（正在中止当前步骤…）",
+            root=NOTE_OUTPUT_DIR,
         )
         logger.info(f"停止任务已受理：task_id={task_id}（live run）")
         return R.success({"cancelled": True, "task_id": task_id, "live": True})
 
-    from app.services.note import TERMINAL_STATUSES
-
     if disk_status in TERMINAL_STATUSES:
         # 已经结束的任务：清掉刚落的预取消墓碑，不误伤将来的重试
-        clear_cancel_request(task_id)
+        task_state.clear_cancel_request(task_id)
         return R.success({
             "cancelled": False,
             "task_id": task_id,
@@ -326,7 +302,8 @@ def cancel_task(data: RecordRequest):
     # 磁盘非终态但没有 live run：本进程没在跑它（进程重启残留 / 提交后线程还没起）。
     # request_cancel_task 已落墓碑，迟到的 run 会立即取消；这里顺手把状态收敛为
     # CANCELLED，前端不必等下一个轮询周期。
-    write_task_status(task_id, TaskStatus.CANCELLED, message="已停止生成（用户手动停止）")
+    task_state.write_status(task_id, TaskStatus.CANCELLED,
+                            message="已停止生成（用户手动停止）", root=NOTE_OUTPUT_DIR)
     logger.info(f"停止任务：无 live run，已按终态收敛 task_id={task_id}（原状态 {disk_status}）")
     return R.success({"cancelled": True, "task_id": task_id, "live": False})
 
@@ -345,12 +322,14 @@ def delete_task(data: RecordRequest):
     if not task_id and not video_id:
         return R.error(msg="缺少 task_id 或 video_id，无法删除", code=400)
 
-    task_ids = [task_id] if task_id else find_task_ids_by_video(video_id, data.platform)
+    task_ids = [task_id] if task_id else task_state.find_task_ids_by_video(
+        video_id, data.platform, root=NOTE_OUTPUT_DIR
+    )
     if not task_ids:
         # 已经是「不存在」的目标状态，按成功处理，避免前端把卡片又加回来
         return R.success({"deleted": 0, "task_ids": [], "message": "任务不存在或已被删除"})
 
-    running = [t for t in task_ids if is_task_active(t)]
+    running = [t for t in task_ids if task_state.is_task_active(t)]
     if running and not data.force:
         return R.error(
             msg="该任务正在生成中，无法删除；请等它生成完成或失败后再删",
@@ -360,7 +339,7 @@ def delete_task(data: RecordRequest):
 
     total = 0
     for tid in task_ids:
-        total += purge_task(tid).get("deleted", 0)
+        total += task_state.purge_task(tid, root=NOTE_OUTPUT_DIR).get("deleted", 0)
 
     logger.info(f"删除任务完成：task_ids={task_ids}, 清理文件 {total} 个")
     return R.success({"deleted": total, "task_ids": task_ids})
@@ -412,7 +391,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                 bv = it.get("bvid")
                 if not bv:
                     continue
-                if find_active_task_by_video(bv):
+                if task_state.find_active_task_by_video(bv, root=NOTE_OUTPUT_DIR):
                     continue
                 tid = str(uuid.uuid4())
                 NoteGenerator()._update_status(
@@ -473,11 +452,11 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             # 往队列里塞第二个同 task_id 的副本，并把正在跑的那次状态改写成
             # PENDING —— 前端于是整段时间都显示「排队中、第 N 位」（2026-10-01
             # 用户实拍复现）。这里直接告诉前端「已有同任务在跑」。
-            if is_task_active(task_id):
+            if task_state.is_task_active(task_id):
                 # P1-①：内存命中时先核磁盘终态——磁盘已 FAILED/SUCCESS 说明登记是
                 # 僵尸（进程重启前 mark_task_done 没跑到 / finally 被跳过），清掉后
                 # 继续走正常重试流程；磁盘仍非终态或文件缺失/损坏才保持 400 拦截。
-                if release_stale_active_task(task_id):
+                if task_state.release_stale_active_task(task_id, root=NOTE_OUTPUT_DIR):
                     logger.info(f"重试放行（僵尸登记已清理）: task_id={task_id}")
                 else:
                     logger.info(f"重复提交拦截（重试命中运行中任务）: task_id={task_id}")
@@ -486,11 +465,11 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                         code=400,
                         data={"duplicated": True, "existing_task_id": task_id, "video_id": video_id},
                     )
-            active_same_video = active_task_for_video(video_id) if video_id else None
+            active_same_video = task_state.active_task_for_video(video_id) if video_id else None
             if active_same_video and active_same_video != task_id:
                 # 同上：同视频的内存登记也可能是僵尸（磁盘已终态），清掉后放行；
                 # 真在跑才保持 400 拦截。
-                if release_stale_active_task(active_same_video):
+                if task_state.release_stale_active_task(active_same_video, root=NOTE_OUTPUT_DIR):
                     logger.info(f"重试放行（同视频僵尸登记已清理）: video_id={video_id} → {active_same_video}")
                 else:
                     logger.info(f"重复提交拦截（同视频运行中）: video_id={video_id} → {active_same_video}")
@@ -503,8 +482,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         else:
             # 提交去重：同一视频已有未完成任务时不再重复建任务（防重复下载与队列膨胀）
             if video_id:
-                active_tid = active_task_for_video(video_id)
-                active = {"task_id": active_tid, "status": "RUNNING"} if active_tid else find_active_task_by_video(video_id)
+                active_tid = task_state.active_task_for_video(video_id)
+                active = ({"task_id": active_tid, "status": "RUNNING"} if active_tid
+                          else task_state.find_active_task_by_video(video_id, root=NOTE_OUTPUT_DIR))
                 if active:
                     logger.info(f"重复提交拦截: video_id={video_id} 已有未完成任务 {active['task_id']}")
                     return R.error(
@@ -517,7 +497,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                 # 的 Markdown[] 版本链已支持）。之前这里无条件 uuid → 同一视频越刷越多张卡
                 # （2026-10-01 用户投诉「重试后列表里一堆同样的视频笔记」）。
                 # 自动化走 _submit_task 不经过这里，不受影响。
-                existing_tids = find_task_ids_by_video(video_id, data.platform)
+                existing_tids = task_state.find_task_ids_by_video(
+                    video_id, data.platform, root=NOTE_OUTPUT_DIR
+                )
                 if existing_tids:
                     task_id = existing_tids[0]
                     logger.info(f"同视频复用历史任务: video_id={video_id} → task_id={task_id}")
@@ -531,7 +513,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         # 手动提交的笔记一旦走 /tasks/recent 回填，模型/风格徽标即空白）
         # 新提交（含重试/复用）视为对旧停止请求的作废：清掉预取消墓碑，
         # 否则「点停止后马上重试」会被上一次的停止误伤（见 services/task_runs.py）
-        clear_cancel_request(task_id)
+        task_state.clear_cancel_request(task_id)
         NoteGenerator()._update_status(
             task_id,
             TaskStatus.PENDING,
@@ -617,23 +599,17 @@ def refinalize_note(data: RefinalizeRequest):
 
 @router.get("/task_status/{task_id}")
 def get_task_status(task_id: str):
-    status_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.status.json")
-    result_path = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json")
-
     # 优先读状态文件
-    if os.path.exists(status_path):
-        with open(status_path, "r", encoding="utf-8") as f:
-            status_content = json.load(f)
-
+    status_content = task_state.read_status(task_id, root=NOTE_OUTPUT_DIR)
+    if status_content is not None:
         status = status_content.get("status")
         message = status_content.get("message", "")
         audio_meta = status_content.get("audio_meta")
 
         if status == TaskStatus.SUCCESS.value:
             # 成功状态的话，继续读取最终笔记内容
-            if os.path.exists(result_path):
-                with open(result_path, "r", encoding="utf-8") as rf:
-                    result_content = json.load(rf)
+            result_content = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
+            if result_content is not None:
                 return R.success({
                     "status": status,
                     "result": result_content,
@@ -652,18 +628,14 @@ def get_task_status(task_id: str):
             # 老结果文件（{task_id}.json）还在——直接 500 会让之前成功的内容也
             # 看不了。信封仍走 R.error（code=500，调用方按失败处理），只是把
             # 结果附在 data.result 里，前端失败卡片可展示。
-            if os.path.exists(result_path):
-                try:
-                    with open(result_path, "r", encoding="utf-8") as rf:
-                        result_content = json.load(rf)
-                    return R.error(message or "任务失败", code=500, data={
-                        "task_id": task_id,
-                        "status": status,
-                        "has_result": True,
-                        "result": result_content,
-                    })
-                except Exception as e:
-                    logger.warning(f"读取失败任务的结果文件失败 (task_id={task_id}): {e}")
+            result_content = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
+            if result_content is not None:
+                return R.error(message or "任务失败", code=500, data={
+                    "task_id": task_id,
+                    "status": status,
+                    "has_result": True,
+                    "result": result_content,
+                })
             return R.error(message or "任务失败", code=500)
 
         if status == TaskStatus.CANCELLED.value:
@@ -693,9 +665,8 @@ def get_task_status(task_id: str):
         return R.success(resp)
 
     # 没有状态文件，但有结果
-    if os.path.exists(result_path):
-        with open(result_path, "r", encoding="utf-8") as f:
-            result_content = json.load(f)
+    result_content = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
+    if result_content is not None:
         return R.success({
             "status": TaskStatus.SUCCESS.value,
             "result": result_content,
@@ -732,7 +703,7 @@ def get_recent_tasks(limit: int = 80):
         limit = max(1, min(int(limit), 300))
     except Exception:
         limit = 80
-    return R.success({"tasks": list_recent_tasks(limit=limit)})
+    return R.success({"tasks": task_state.list_recent_tasks(limit=limit, root=NOTE_OUTPUT_DIR)})
 
 
 # ---------------------------------------------------------------------------

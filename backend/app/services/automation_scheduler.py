@@ -21,7 +21,8 @@ from app.db.video_task_dao import get_task_by_video
 from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TaskStatus
 from app.services.automation_config_manager import AutomationConfigManager
-from app.services.note import NOTE_OUTPUT_DIR, TERMINAL_STATUSES, NoteGenerator, find_active_task_by_video
+from app.services.note import NOTE_OUTPUT_DIR, TERMINAL_STATUSES, find_active_task_by_video
+from app.services import task_state
 from app.services.notifier import send_round_failure_alert, send_summary
 from app.services.watchlater import fetch_watchlater
 from app.utils.logger import get_logger
@@ -405,8 +406,9 @@ class AutomationScheduler:
     def _submit_task(self, item: dict, cfg: dict) -> str:
         gen = cfg.get("gen") or {}
         task_id = str(uuid.uuid4())
-        # 先把标题/封面写进状态文件（前端生成历史无需等任务开始就能显示）
-        NoteGenerator()._update_status(
+        # 先把标题/封面写进状态文件（前端生成历史无需等任务开始就能显示）。
+        # 直接走状态写入，不构造 NoteGenerator（后者会初始化转写器）。
+        task_state.write_status(
             task_id,
             TaskStatus.PENDING,
             extra={
@@ -425,6 +427,7 @@ class AutomationScheduler:
                     "platform": "bilibili",
                 },
             },
+            root=NOTE_OUTPUT_DIR,
         )
 
         # 复用桌面端同一条执行路径（执行队列 / 同视频锁 / 向量索引），仅入口不同
@@ -451,11 +454,7 @@ class AutomationScheduler:
         return task_id
 
     def _read_status(self, task_id: str) -> Optional[dict]:
-        f = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
-        try:
-            return json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            return None
+        return task_state.read_status(task_id, root=NOTE_OUTPUT_DIR)
 
     def _wait_and_summarize(self, submitted: List[dict], skipped: List[dict], started: datetime,
                             cfg: Optional[dict] = None) -> Dict:
