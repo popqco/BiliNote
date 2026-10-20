@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { resolveApiBaseUrl } from '@/utils/workerConnection.ts'
+import { apiFetch } from '@/utils/apiFetch.ts'
 import { isBackendAlive } from '@/utils/backendAliveProbe.ts'
 
 // 后端就绪检测的几个时间常量
@@ -13,20 +13,11 @@ const PROBE_TIMEOUT_MS = 5_000
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
-// 直接用 fetch 而非 utils/request 的共享 axios：那个 axios 装了全局 toast 拦截器，
-// 启动期每次 /sys_check 失败都会弹一个红色 toast，2s 一次轮询会叠出十几个。
-function getBackendBase(): string {
-  // 已配对的 Worker 地址优先（含用户在配对页填的局域网/组网地址），否则回退构建期 env。
-  // 同源直服（后端 serve 前端）场景下 resolveApiBaseUrl 返回 '/api'，fetch 同源即可。
-  return resolveApiBaseUrl()
-}
-
 async function probeSysCheck(): Promise<boolean> {
-  const url = `${getBackendBase()}/sys_check`
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS)
   try {
-    const res = await fetch(url, { signal: ctrl.signal })
+    const res = await apiFetch('/sys_check', { signal: ctrl.signal })
     if (!res.ok) return false
     const json = await res.json().catch(() => null)
     return json?.code === 0

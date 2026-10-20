@@ -1,7 +1,6 @@
 import axios from 'axios'
 import type { AxiosError } from 'axios'
-
-const API_BASE = String(import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '')
+import { loadWorkerConnection, resolveApiBaseUrl } from '@/utils/workerConnection.ts'
 
 /** 导出菜单里的全部格式 */
 export type ExportFormat = 'markdown' | 'pdf' | 'docx' | 'longimage' | 'poster'
@@ -22,10 +21,18 @@ export interface ExportNotePayload {
  */
 export async function exportNoteFile(payload: ExportNotePayload): Promise<Blob> {
   try {
-    const resp = await axios.post(`${API_BASE}/export_note`, payload, {
-      responseType: 'blob',
-      timeout: 120000,
-    })
+    // 不能用 /api 的共享 axios：它的响应拦截器按 JSON 信封解析，会把二进制流
+    // 误判成业务失败。这里单独请求，但地址与配对 token 必须跟随当前 Worker。
+    const token = loadWorkerConnection()?.token
+    const resp = await axios.post(
+      `${resolveApiBaseUrl().replace(/\/$/, '')}/export_note`,
+      payload,
+      {
+        responseType: 'blob',
+        timeout: 120000,
+        headers: token ? { 'X-Pairing-Token': token } : undefined,
+      },
+    )
     return resp.data as Blob
   } catch (e) {
     throw new Error(await extractErrorMessage(e))

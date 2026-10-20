@@ -9,6 +9,7 @@ import {
   resolveApiBaseUrl,
   saveWorkerConnection,
 } from '@/utils/workerConnection.ts'
+import { apiFetch } from '@/utils/apiFetch.ts'
 
 /**
  * 「连接 Worker」设置页：Viewer 直连 Worker 的配对入口（票 3）。
@@ -85,7 +86,10 @@ export default function ConnectionPage() {
       try {
         const u = new URL(base)
         if (u.port) {
-          const pc = await fetch(`${base}/api/port_check?port=${u.port}`)
+          const pc = await apiFetch(`/api/port_check?port=${u.port}`, {
+            baseUrl: base,
+            noAuth: true,
+          })
           const pj = await pc.json().catch(() => null)
           if (pc.ok && pj?.code === 0 && pj?.data?.taken === false) {
             throw new Error(`Worker 本机上端口 ${u.port} 没有程序在监听：地址或端口写错了？`)
@@ -96,9 +100,11 @@ export default function ConnectionPage() {
         if (typeof e?.message === 'string' && e.message.includes('没有程序在监听')) throw e
       }
       // 免鉴接口：先验连通性（/sys_check），再验 token（/pairing_verify）
-      const sysRes = await fetch(`${base}/api/sys_check`)
+      const sysRes = await apiFetch('/api/sys_check', { baseUrl: base, noAuth: true })
       if (!sysRes.ok) throw new Error('Worker 无响应')
-      const verifyRes = await fetch(`${base}/api/pairing_verify`, {
+      const verifyRes = await apiFetch('/api/pairing_verify', {
+        baseUrl: base,
+        noAuth: true,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: t }),
@@ -210,15 +216,6 @@ export default function ConnectionPage() {
 }
 
 /**
- * raw fetch 不走 axios 拦截器，配对 token 要手动带上——否则远端 Viewer
- * （明明已配对）调这些接口也会 401，「远端配置总开关」就永远卡在「读取中…」。
- */
-const pairingHeaders = (): Record<string, string> => {
-  const token = loadWorkerConnection()?.token
-  return token ? { 'X-Pairing-Token': token } : {}
-}
-
-/**
  * Worker 本机 token 面板：调用需鉴权的 /pairing_token 查看完整 token、
  * /pairing_regenerate 重生成。远端未配对调不通（401），本机回环免鉴可看。
  * token 显示后提供复制按钮；重生成后旧 Viewer 全部失效，需重新配对。
@@ -232,7 +229,7 @@ function WorkerTokenPanel() {
   const fetchToken = async () => {
     setLoading(true)
     try {
-      const res = await fetch(`${resolveApiBaseUrl()}/pairing_token`)
+      const res = await apiFetch('/pairing_token')
       if (res.status === 401) {
         toast.error('远端未配对无权查看：请在本机 All-in-One 上打开此页')
         return
@@ -255,7 +252,7 @@ function WorkerTokenPanel() {
     if (!window.confirm('重生成后已配对的 Viewer 全部失效，需重新配对。确定继续？')) return
     setRegenLoading(true)
     try {
-      const res = await fetch(`${resolveApiBaseUrl()}/pairing_regenerate`, { method: 'POST' })
+      const res = await apiFetch('/pairing_regenerate', { method: 'POST' })
       if (res.status === 401) {
         toast.error('远端未配对无权操作：请在本机 All-in-One 上打开此页')
         return
@@ -341,7 +338,7 @@ function WorkerAddressPanel() {
 
   useEffect(() => {
     // 仅本机可见：worker_info 对远端 401，整块隐藏，token 也不必再取
-    fetch(`${resolveApiBaseUrl()}/worker_info`)
+    apiFetch('/worker_info')
       .then(async r => {
         if (!r.ok) throw new Error(String(r.status))
         const j = await r.json().catch(() => null)
@@ -353,7 +350,7 @@ function WorkerAddressPanel() {
           state: 'ok',
           detail: `端口 ${j.data.port} 由本 Worker 后端监听，一切正常。`,
         })
-        return fetch(`${resolveApiBaseUrl()}/pairing_token`)
+        return apiFetch('/pairing_token')
       })
       .then(async r => {
         if (!r || !r.ok) return
@@ -468,7 +465,7 @@ function RemoteControlPanel() {
   const loadRemoteConfig = async () => {
     setLoadError(false)
     try {
-      const r = await fetch(`${resolveApiBaseUrl()}/remote_config`, { headers: pairingHeaders() })
+      const r = await apiFetch('/remote_config')
       if (r.status === 401) throw new Error('未配对')
       const j = await r.json().catch(() => null)
       if (j?.code !== 0) throw new Error(j?.msg || '读取失败')
@@ -487,9 +484,9 @@ function RemoteControlPanel() {
   const handleToggle = async (next: boolean) => {
     setSaving(true)
     try {
-      const res = await fetch(`${resolveApiBaseUrl()}/remote_config`, {
+      const res = await apiFetch('/remote_config', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...pairingHeaders() },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ allow_remote: next }),
       })
       const json = await res.json().catch(() => null)

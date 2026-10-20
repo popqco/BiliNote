@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { addProvider, addModel, testConnection, getProviderList, updateProviderById } from '@/services/model'
 import { getTranscriberConfig, updateTranscriberConfig } from '@/services/transcriber'
-import { resolveApiBaseUrl } from '@/utils/workerConnection.ts'
+import { apiFetch } from '@/utils/apiFetch.ts'
 import logo from '@/assets/icon.svg'
 
 // 后端 R.error / ProviderError 的形状是 { code, msg, data }，没有 .message。
@@ -15,14 +15,9 @@ function errText(e: any): string {
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
-// 后端连通性自检不走共享 axios（会弹 toast），用裸 fetch 避免启动期 toast 叠堆
-function getBackendBase(): string {
-  // 已配对的 Worker 地址优先，否则回退构建期 env（Viewer 场景 onboarding 也要连 Worker）。
-  return resolveApiBaseUrl()
-}
 async function pingBackend(): Promise<boolean> {
   try {
-    const res = await fetch(`${getBackendBase()}/sys_check`)
+    const res = await apiFetch('/sys_check')
     if (!res.ok) return false
     const json = await res.json().catch(() => null)
     return json?.code === 0

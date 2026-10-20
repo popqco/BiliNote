@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useBackendEvents } from './useBackendEvents'
-import { resolveApiBaseUrl } from '@/utils/workerConnection.ts'
+import { apiFetch } from '@/utils/apiFetch.ts'
 import BackendLogPanel from './BackendLogPanel'
 
 // 健康度判定：
@@ -11,14 +11,9 @@ import BackendLogPanel from './BackendLogPanel'
 type Health = 'green' | 'yellow' | 'red' | 'unknown'
 
 const HEALTH_POLL_MS = 5000
-// 路径不带 /api/，因为 backendBase() 已经把它包进 baseURL 了（同 axios 实例的语义）。
+// 路径不带 /api/：apiFetch 的 base 已经包含 /api（与 axios 实例语义一致）。
 // 之前写 '/api/sys_health' + base='http://host/api' = 双 /api → 一直 404。
 const SYS_HEALTH_PATH = '/sys_health'
-
-function backendBase(): string {
-  // 与 utils/request.ts 的 baseURL 计算保持一致（含已配对 Worker 地址）。
-  return resolveApiBaseUrl()
-}
 
 const BackendHealthIndicator = () => {
   const { status, isTauri, exitCode, logs, restart, copyLogs } = useBackendEvents()
@@ -33,7 +28,7 @@ const BackendHealthIndicator = () => {
 
     async function ping() {
       try {
-        const res = await fetch(`${backendBase()}${SYS_HEALTH_PATH}`)
+        const res = await apiFetch(SYS_HEALTH_PATH)
         const ok = res.ok
         if (!mounted) return
         if (ok) {
