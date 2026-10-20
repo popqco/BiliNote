@@ -218,7 +218,18 @@ export const useNoteExport = ({
         setScreenshotExportMode(true)
         let watchdog: number | undefined
         try {
-          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+          // 等两帧让 exportForceShow / 截图挂载生效；后台标签或锁屏下 rAF
+          // 会被暂停，必须有定时器兜底，否则导出永远停在等待阶段。
+          await new Promise<void>(resolve => {
+            let settled = false
+            const done = () => {
+              if (settled) return
+              settled = true
+              resolve()
+            }
+            requestAnimationFrame(() => requestAnimationFrame(done))
+            window.setTimeout(done, 300)
+          })
           await waitForNoteShots()
           const timeout = new Promise<never>((_, reject) => {
             watchdog = window.setTimeout(
