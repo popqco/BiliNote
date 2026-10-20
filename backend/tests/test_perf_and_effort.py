@@ -776,38 +776,39 @@ def test_strip_screenshot_markers_handles_forms():
 
 def test_meta_prefetch_merges_title_when_missing(tmp_path, monkeypatch):
     """提交后的元信息预取：文件无标题时抓取并合并。"""
-    from app.routers import note as note_router_mod
+    from app.services import note_tasks as note_tasks_mod
 
-    monkeypatch.setattr(note_mod, "NOTE_OUTPUT_DIR", tmp_path)
-    merged = []
-    monkeypatch.setattr(NoteGenerator, "_merge_status_meta", lambda self, tid, extra: merged.append((tid, extra)))
     monkeypatch.setattr(
-        note_router_mod, "fetch_video_meta",
+        note_tasks_mod, "fetch_video_meta",
         lambda url, platform: {"title": "抓到啦", "cover_url": "http://c/1.jpg",
                                "video_id": "vid1", "duration": 60, "platform": platform},
     )
     (tmp_path / "t-1.status.json").write_text(json.dumps({"status": "PENDING"}), encoding="utf-8")
-    note_router_mod._spawn_meta_prefetch("t-1", "https://y/watch?v=1", "youtube")
+    note_tasks_mod.note_task_service._spawn_meta_prefetch(
+        "t-1", "https://y/watch?v=1", "youtube", output_dir=tmp_path
+    )
 
     deadline = time.time() + 3
-    while not merged and time.time() < deadline:
+    data = {}
+    while time.time() < deadline:
+        data = json.loads((tmp_path / "t-1.status.json").read_text(encoding="utf-8"))
+        if (data.get("audio_meta") or {}).get("title"):
+            break
         time.sleep(0.05)
-    assert merged, "预取线程应合并元信息"
-    tid, extra = merged[0]
-    assert tid == "t-1"
-    assert extra["audio_meta"]["title"] == "抓到啦"
+    assert data["audio_meta"]["title"] == "抓到啦"
+    assert data["status"] == "PENDING"
 
 
 def test_meta_prefetch_skips_when_title_present(tmp_path, monkeypatch):
-    from app.routers import note as note_router_mod
+    from app.services import note_tasks as note_tasks_mod
 
-    monkeypatch.setattr(note_mod, "NOTE_OUTPUT_DIR", tmp_path)
     called = []
-    monkeypatch.setattr(note_router_mod, "fetch_video_meta", lambda url, platform: called.append(url))
-    monkeypatch.setattr(NoteGenerator, "_merge_status_meta", lambda self, tid, extra: called.append(tid))
+    monkeypatch.setattr(note_tasks_mod, "fetch_video_meta", lambda url, platform: called.append(url))
     (tmp_path / "t-2.status.json").write_text(
         json.dumps({"status": "PENDING", "audio_meta": {"title": "已有"}}), encoding="utf-8"
     )
-    note_router_mod._spawn_meta_prefetch("t-2", "https://y/watch?v=2", "youtube")
+    note_tasks_mod.note_task_service._spawn_meta_prefetch(
+        "t-2", "https://y/watch?v=2", "youtube", output_dir=tmp_path
+    )
     time.sleep(0.4)
     assert called == [], "已有标题不应再抓取/合并"

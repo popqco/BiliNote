@@ -1,17 +1,14 @@
 # app/routers/note.py
 import json
 import os
-import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
-from pydantic import BaseModel, validator, field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
-from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TERMINAL_STATUSES, TaskStatus
@@ -19,14 +16,14 @@ from app.exceptions.note import NoteError
 from app.paths import NOTE_OUTPUT_DIR, UPLOAD_DIR
 from app.services import task_state
 from app.services.note import logger
-from app.services.note_tasks import note_task_service
+from app.services.note_tasks import NoteTaskError, note_task_service
 from app.services.task_serial_executor import task_serial_executor
 from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
-from app.utils.url_parser import extract_video_id, normalize_video_url
+from app.utils.url_parser import normalize_video_url
 from app.validators.video_url_validator import is_supported_video_url
-from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi import Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 import asyncio
 import hashlib
 import httpx
@@ -36,47 +33,6 @@ from PIL import Image, ImageOps
 # from app.services.whisperer import transcribe_audio
 
 router = APIRouter()
-
-
-def _spawn_meta_prefetch(task_id: str, video_url: str, platform: str) -> None:
-    """提交后后台轻量抓一次标题/封面并合并进状态文件。
-
-    手动单条提交不等元信息（yt-dlp 需数秒）也不阻塞响应：先写 PENDING 让卡片
-    出现，元信息到手后合并刷新（前端轮询 /tasks/recent 即可显示标题/封面）。
-    2026-10-13 用户实拍：手动粘贴的 YouTube 链接排了几十个，卡片全是
-    「未命名笔记」。任务真正开跑后拿到的元信息更权威，会自然覆盖这份。
-    """
-
-    def _work():
-        try:
-            # 已有标题（重试/复用历史任务）就不再抓。root 取 services.note 的
-            # NOTE_OUTPUT_DIR（历史行为：测试与运行期都以该模块属性为准）。
-            from app.services.note import NOTE_OUTPUT_DIR as note_out
-
-            cur = task_state.read_status(task_id, root=note_out) or {}
-            if (cur.get("audio_meta") or {}).get("title"):
-                return
-            meta = fetch_video_meta(video_url, platform) or {}
-            if not meta.get("title"):
-                return
-            task_state.merge_status_meta(
-                task_id,
-                {
-                    "audio_meta": {
-                        "title": meta.get("title"),
-                        "cover_url": meta.get("cover_url"),
-                        "video_id": meta.get("video_id"),
-                        "duration": meta.get("duration"),
-                        "platform": platform,
-                    }
-                },
-                root=note_out,
-            )
-            logger.info(f"已补排队任务元信息 {task_id[:8]} ← {str(meta.get('title'))[:32]}")
-        except Exception as e:
-            logger.debug(f"补排队任务元信息失败（忽略，任务开跑后仍会拿到）: {e}")
-
-    threading.Thread(target=_work, name=f"meta-{task_id[:8]}", daemon=True).start()
 
 
 class RecordRequest(BaseModel):
@@ -142,18 +98,6 @@ class VideoRequest(BaseModel):
                                 message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message)
 
         return v
-
-
-def save_note_to_file(task_id: str, note):
-    """兼容入口：结果持久化已移到 NoteTaskService。"""
-    note_task_service.save_note_to_file(task_id, note, output_dir=NOTE_OUTPUT_DIR)
-
-
-def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
-    """兼容入口：预取字幕缓存已移到 NoteTaskService。"""
-    note_task_service.persist_prefetched_transcript(
-        task_id, transcript, output_dir=NOTE_OUTPUT_DIR
-    )
 
 
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
@@ -274,202 +218,28 @@ async def upload(file: UploadFile = File(...)):
 @router.post("/generate_note")
 def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
     try:
-        # 就绪门禁：本地转写引擎（fast-whisper / mlx-whisper）必须等模型下载完才能跑视频，
-        # 否则任务会卡在首次下载（慢 / OOM / 截断），用户只看到一个静默失败的任务。
-        # 客户端已抓好字幕（prefetched_transcript）则不需要转写，跳过检查。
-        if not data.prefetched_transcript:
-            from app.services.transcriber_config_manager import TranscriberConfigManager
-            readiness = TranscriberConfigManager().is_model_ready()
-            if not readiness["ready"]:
-                logger.warning(f"拒绝 generate_note：{readiness['reason']}")
-                return R.error(
-                    msg=readiness["reason"],
-                    code=300102,
-                    data={
-                        "reason": "transcriber_model_not_ready",
-                        "transcriber_type": readiness["transcriber_type"],
-                        "model_size": readiness["model_size"],
-                        "downloading": readiness["downloading"],
-                    },
-                )
-
-        # 稍后再看「列表页」链接：批量导入（拉列表 → 去重 → 逐条建任务）
-        from app.services.watchlater import is_watchlater_list_url, fetch_watchlater
-        if is_watchlater_list_url(str(data.video_url)):
-            try:
-                items = fetch_watchlater(max_items=50)
-            except Exception as e:
-                return R.error(msg=f"获取稍后再看列表失败：{e}", code=400)
-            created = []
-            for it in items:
-                bv = it.get("bvid")
-                if not bv:
-                    continue
-                if task_state.find_active_task_by_video(bv, root=NOTE_OUTPUT_DIR):
-                    continue
-                tid = str(uuid.uuid4())
-                task_state.write_status(
-                    tid,
-                    TaskStatus.PENDING,
-                    extra={
-                        "video_id": bv,
-                        "platform": "bilibili",
-                        "origin": "manual",
-                        "video_url": it["video_url"],
-                        "model_name": data.model_name,
-                        "provider_id": data.provider_id,
-                        "style": data.style,
-                        "audio_meta": {
-                            "title": it.get("title"),
-                            "cover_url": it.get("cover_url"),
-                            "video_id": bv,
-                            "duration": it.get("duration"),
-                            "platform": "bilibili",
-                        },
-                    },
-                    root=NOTE_OUTPUT_DIR,
-                )
-                # 并发提交（2026-10-11）：原来 background_tasks 按注册顺序同步逐条
-                # 跑，上一条全部完成才开始下一条，批量导入实际完全串行（2 个 worker
-                # 只用得上 1 个）。改为每条一个 daemon 线程提交（与自动化调度器同款
-                # 范式），线程内经 video_task_locks + 任务池排队，并发度仍受
-                # max_workers 约束，不会把上游打爆。
-                threading.Thread(
-                    target=run_note_task,
-                    args=(tid, it["video_url"], "bilibili", data.quality, data.link,
-                          data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                          data.extras, data.video_understanding, data.video_interval, data.grid_size, bv),
-                    name=f"batch-{tid[:8]}",
-                    daemon=True,
-                ).start()
-                created.append({"task_id": tid, "video_id": bv, "title": it.get("title")})
-            return R.success({"batch": True, "created": created, "count": len(created)})
-
-        video_id = extract_video_id(data.video_url, data.platform)
-        if (
-            not video_id
-            and data.platform in ("bilibili", "youtube", "douyin")
-            and str(data.video_url).startswith("http")
-        ):
-            return R.error(msg="无法从链接中提取视频 ID，请确认粘贴的是单个视频链接", code=400)
-
-        # 提交入口参数校验：model_name/provider_id 缺了直接 400 拒绝，不要建
-        # PENDING 任务再丢给后台——后台里 raise 只会炸成响应已发出的异常，
-        # 状态文件永远 PENDING，前端永远"排队中"（2026-10-03 陀螺仪任务实测）。
-        if not data.model_name or not data.provider_id:
-            logger.warning(f"拒绝 generate_note：缺少模型参数（video_id={video_id}）")
-            return R.error(msg="请选择模型和提供者后再提交", code=400)
-
-        if data.task_id:
-            # 如果传了task_id，说明是重试！
-            task_id = data.task_id
-            # 重试也必须去重：任务还在跑的时候再点一次「重新生成」，如果放行就会
-            # 往队列里塞第二个同 task_id 的副本，并把正在跑的那次状态改写成
-            # PENDING —— 前端于是整段时间都显示「排队中、第 N 位」（2026-10-01
-            # 用户实拍复现）。这里直接告诉前端「已有同任务在跑」。
-            if task_state.is_task_active(task_id):
-                # P1-①：内存命中时先核磁盘终态——磁盘已 FAILED/SUCCESS 说明登记是
-                # 僵尸（进程重启前 mark_task_done 没跑到 / finally 被跳过），清掉后
-                # 继续走正常重试流程；磁盘仍非终态或文件缺失/损坏才保持 400 拦截。
-                if task_state.release_stale_active_task(task_id, root=NOTE_OUTPUT_DIR):
-                    logger.info(f"重试放行（僵尸登记已清理）: task_id={task_id}")
-                else:
-                    logger.info(f"重复提交拦截（重试命中运行中任务）: task_id={task_id}")
-                    return R.error(
-                        msg="该任务正在生成中，无需重复提交",
-                        code=400,
-                        data={"duplicated": True, "existing_task_id": task_id, "video_id": video_id},
-                    )
-            active_same_video = task_state.active_task_for_video(video_id) if video_id else None
-            if active_same_video and active_same_video != task_id:
-                # 同上：同视频的内存登记也可能是僵尸（磁盘已终态），清掉后放行；
-                # 真在跑才保持 400 拦截。
-                if task_state.release_stale_active_task(active_same_video, root=NOTE_OUTPUT_DIR):
-                    logger.info(f"重试放行（同视频僵尸登记已清理）: video_id={video_id} → {active_same_video}")
-                else:
-                    logger.info(f"重复提交拦截（同视频运行中）: video_id={video_id} → {active_same_video}")
-                    return R.error(
-                        msg="该视频已在生成队列中，请等这一次跑完",
-                        code=400,
-                        data={"duplicated": True, "existing_task_id": active_same_video, "video_id": video_id},
-                    )
-            logger.info(f"重试模式，复用已有 task_id={task_id}")
-        else:
-            # 提交去重：同一视频已有未完成任务时不再重复建任务（防重复下载与队列膨胀）
-            if video_id:
-                active_tid = task_state.active_task_for_video(video_id)
-                active = ({"task_id": active_tid, "status": "RUNNING"} if active_tid
-                          else task_state.find_active_task_by_video(video_id, root=NOTE_OUTPUT_DIR))
-                if active:
-                    logger.info(f"重复提交拦截: video_id={video_id} 已有未完成任务 {active['task_id']}")
-                    return R.error(
-                        msg=f"该视频已在队列/生成中（当前状态：{active['status']}），无需重复提交",
-                        code=400,
-                        data={"duplicated": True, "existing_task_id": active["task_id"], "video_id": video_id},
-                    )
-                # 同视频已有历史任务文件（成功或失败）时，复用最近一个 task_id：
-                # 重试/重提不再开新卡，新内容追加为该任务的新版本（前端 updateTaskContent
-                # 的 Markdown[] 版本链已支持）。之前这里无条件 uuid → 同一视频越刷越多张卡
-                # （2026-10-01 用户投诉「重试后列表里一堆同样的视频笔记」）。
-                # 自动化走 _submit_task 不经过这里，不受影响。
-                existing_tids = task_state.find_task_ids_by_video(
-                    video_id, data.platform, root=NOTE_OUTPUT_DIR
-                )
-                if existing_tids:
-                    task_id = existing_tids[0]
-                    logger.info(f"同视频复用历史任务: video_id={video_id} → task_id={task_id}")
-                    # 复用分支走与重试相同的 PENDING 写入路径（下方统一处理）
-                else:
-                    # 正常新建任务
-                    task_id = str(uuid.uuid4())
-
-        # 统一先写入 PENDING（含 video_id/origin，供排队展示、去重与自动化任务同步；
-        # 含 model_name/provider_id/style，供徽标与 Viewer 回填——此前没写，
-        # 手动提交的笔记一旦走 /tasks/recent 回填，模型/风格徽标即空白）
-        # 新提交（含重试/复用）视为对旧停止请求的作废：清掉预取消墓碑，
-        # 否则「点停止后马上重试」会被上一次的停止误伤（见 services/task_runs.py）
-        task_state.clear_cancel_request(task_id)
-        task_state.write_status(
-            task_id,
-            TaskStatus.PENDING,
-            extra={
-                "video_id": video_id,
-                "platform": data.platform,
-                "origin": "manual",
-                "video_url": str(data.video_url),
-                "model_name": data.model_name,
-                "provider_id": data.provider_id,
-                "style": data.style,
-                # 提交时的完整参数：状态文件落盘后，即使进程重启（reap 会把非终态
-                # 任务判失败）也能凭这份记录忠实重提，不必让用户重填表单。
-                "request": {
-                    "quality": str(data.quality),
-                    "link": bool(data.link),
-                    "screenshot": bool(data.screenshot),
-                    "format": list(data.format or []),
-                    "extras": data.extras,
-                    "video_understanding": bool(data.video_understanding),
-                    "video_interval": data.video_interval,
-                    "grid_size": list(data.grid_size or []),
-                },
-            },
-            root=NOTE_OUTPUT_DIR,
+        result = note_task_service.submit(
+            video_url=str(data.video_url),
+            platform=data.platform,
+            quality=data.quality,
+            link=data.link,
+            screenshot=data.screenshot,
+            model_name=data.model_name,
+            provider_id=data.provider_id,
+            formats=data.format,
+            style=data.style,
+            extras=data.extras,
+            video_understanding=data.video_understanding,
+            video_interval=data.video_interval,
+            grid_size=data.grid_size,
+            task_id=data.task_id,
+            prefetched_transcript=data.prefetched_transcript,
+            schedule=background_tasks.add_task,
+            output_dir=NOTE_OUTPUT_DIR,
         )
-        # 排队卡片的标题/封面：后台轻量补一次（不阻塞提交）
-        _spawn_meta_prefetch(task_id, str(data.video_url), data.platform)
-
-        # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
-        if data.prefetched_transcript:
-            try:
-                _persist_prefetched_transcript(task_id, data.prefetched_transcript)
-            except Exception as e:
-                logger.warning(f"写入预取字幕失败 (task_id={task_id}): {e}")
-
-        background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
-                                  data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size,
-                                  video_id)
-        return R.success({"task_id": task_id})
+        return R.success(result.as_response())
+    except NoteTaskError as e:
+        return R.error(msg=e.message, code=e.code, data=e.data)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
