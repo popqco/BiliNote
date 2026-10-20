@@ -22,6 +22,7 @@ from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TaskStatus
 from app.services.automation_config_manager import AutomationConfigManager
 from app.services.note import NOTE_OUTPUT_DIR, TERMINAL_STATUSES, find_active_task_by_video
+from app.services.note_tasks import note_task_service
 from app.services import task_state
 from app.services.notifier import send_round_failure_alert, send_summary
 from app.services.watchlater import fetch_watchlater
@@ -430,9 +431,7 @@ class AutomationScheduler:
             root=NOTE_OUTPUT_DIR,
         )
 
-        # 复用桌面端同一条执行路径（执行队列 / 同视频锁 / 向量索引），仅入口不同
-        from app.routers.note import run_note_task
-
+        # 复用同一条执行路径（执行队列 / 同视频锁 / 向量索引），仅入口不同
         args = (
             task_id,
             item["video_url"],
@@ -450,7 +449,8 @@ class AutomationScheduler:
             gen.get("grid_size") or [],
             item["bvid"],
         )
-        threading.Thread(target=run_note_task, args=args, name=f"auto-{task_id[:8]}", daemon=True).start()
+        threading.Thread(target=note_task_service.run, args=args,
+                         name=f"auto-{task_id[:8]}", daemon=True).start()
         return task_id
 
     def _read_status(self, task_id: str) -> Optional[dict]:

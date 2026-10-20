@@ -29,18 +29,10 @@ class TestRunNoteTaskMissingParams(unittest.TestCase):
     def test_missing_model_marks_failed_not_raise(self):
         note_router = _load("note_router_under_test", "app/routers/note.py")
         with tempfile.TemporaryDirectory() as tmp:
-            # run_note_task 内部用的是 routers/note.py import 进来的那个
-            # services.note 模块对象（与直接 _load services/note.py 不是同一对象，
-            # 各自 exec 一次）——必须改 router 引用的那个模块的 NOTE_OUTPUT_DIR。
-            import sys
-            svc_mod = sys.modules.get("app.services.note")
-            if svc_mod is None:
-                # 回退：从 router 的符号表里找 NoteGenerator 类的定义模块
-                import inspect
-                svc_mod = inspect.getmodule(note_router.NoteGenerator)
-            assert svc_mod is not None, "找不到 services.note 模块对象"
-            old = svc_mod.NOTE_OUTPUT_DIR
-            svc_mod.NOTE_OUTPUT_DIR = pathlib.Path(tmp)
+            # run_note_task 现在是 NoteTaskService 的兼容包装；它把 router 的
+            # NOTE_OUTPUT_DIR 作为 output_dir 传下去，所以改 router 模块属性即可。
+            old = note_router.NOTE_OUTPUT_DIR
+            note_router.NOTE_OUTPUT_DIR = pathlib.Path(tmp)
             try:
                 task_id = "probe-task-no-model"
                 # 缺 model_name + provider_id：必须不抛异常，且状态落 FAILED
@@ -55,7 +47,7 @@ class TestRunNoteTaskMissingParams(unittest.TestCase):
                 self.assertEqual(data.get("status"), "FAILED")
                 self.assertIn("请选择模型和提供者", data.get("message", ""))
             finally:
-                svc_mod.NOTE_OUTPUT_DIR = old
+                note_router.NOTE_OUTPUT_DIR = old
 
     def test_groq_default_model_not_none(self):
         src = (ROOT / "app" / "transcriber" / "groq.py").read_text(encoding="utf-8")

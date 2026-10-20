@@ -10,7 +10,6 @@ from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel, validator, field_validator, model_validator
-from dataclasses import asdict
 
 from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
@@ -19,8 +18,9 @@ from app.enmus.task_status_enums import TERMINAL_STATUSES, TaskStatus
 from app.exceptions.note import NoteError
 from app.paths import NOTE_OUTPUT_DIR, UPLOAD_DIR
 from app.services import task_state
-from app.services.note import NoteGenerator, logger
-from app.services.task_serial_executor import task_serial_executor, video_task_locks
+from app.services.note import logger
+from app.services.note_tasks import note_task_service
+from app.services.task_serial_executor import task_serial_executor
 from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id, normalize_video_url
@@ -145,43 +145,15 @@ class VideoRequest(BaseModel):
 
 
 def save_note_to_file(task_id: str, note):
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+    """兼容入口：结果持久化已移到 NoteTaskService。"""
+    note_task_service.save_note_to_file(task_id, note, output_dir=NOTE_OUTPUT_DIR)
 
 
 def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
-    """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
-
-    NoteGenerator.generate 会优先读 <task_id>_transcript.json，命中即跳过 download_subtitles
-    与音频转写流程。要求字段：language(可空)/full_text/segments[{start,end,text}]
-    """
-    segments = transcript.get("segments") or []
-    cleaned_segments = []
-    for s in segments:
-        text = (s.get("text") or "").strip()
-        if not text:
-            continue
-        cleaned_segments.append({
-            "start": float(s.get("start", 0)),
-            "end": float(s.get("end", 0)),
-            "text": text,
-        })
-    if not cleaned_segments:
-        raise ValueError("prefetched_transcript 没有可用的 segments")
-
-    full_text = transcript.get("full_text") or " ".join(s["text"] for s in cleaned_segments)
-    payload = {
-        "language": transcript.get("language") or "zh",
-        "full_text": full_text,
-        "segments": cleaned_segments,
-    }
-
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    target = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
-    with open(target, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
+    """兼容入口：预取字幕缓存已移到 NoteTaskService。"""
+    note_task_service.persist_prefetched_transcript(
+        task_id, transcript, output_dir=NOTE_OUTPUT_DIR
+    )
 
 
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
@@ -189,74 +161,16 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
                   video_interval=0, grid_size=[], video_id: str = None
                   ):
-
-    # 后台任务里的参数缺失不能 raise HTTPException——响应早就发出去了，
-    # 异常只会炸成 "Caught handled exception, but response already started"，
-    # 状态文件永远停在 PENDING，前端永远"排队中"（2026-10-03 陀螺仪任务实测）。
-    # 缺参数直接写 FAILED 并返回，错误进状态文件 message，前端看得到。
-    if not model_name or not provider_id:
-        logger.warning(f"任务 {task_id} 缺少模型参数（model_name={model_name!r}），直接标失败")
-        NoteGenerator()._update_status(
-            task_id, TaskStatus.FAILED,
-            message="HTTPException: 请选择模型和提供者（提交时未带模型参数，请重新选择模型后生成）",
-        )
-        return
-
-    def _execute_note_task():
-        # 排队中被停止：先查取消，避免为了写一个 CANCELLED 又去初始化转写器
-        # （首次构建实测 10s+，排队任务点了停止还要等这么久）。
-        if task_state.is_run_cancelled(run):
-            task_state.write_status(
-                task_id, TaskStatus.CANCELLED,
-                message="已停止生成（排队中取消）", root=NOTE_OUTPUT_DIR,
-            )
-            return None
-        return NoteGenerator().generate(
-            video_url=video_url,
-            platform=platform,
-            quality=quality,
-            task_id=task_id,
-            model_name=model_name,
-            provider_id=provider_id,
-            link=link,
-            _format=_format,
-            style=style,
-            extras=extras,
-            screenshot=screenshot,
-            video_understanding=video_understanding,
-            video_interval=video_interval,
-            grid_size=grid_size,
-            run=run,
-        )
-
-    logger.info(f"任务进入执行队列 (task_id={task_id})")
-    # 取消登记先于入池：排队中的任务也要能停——run 在进线程池之前就登记，
-    # 等 worker 取到它时第一件事就是检查取消（见 services/task_runs.py）
-    run = task_state.register_run(task_id)
-    # 登记「本进程正在跑」：删除接口靠它拒绝删正在生成的任务，重复提交靠它
-    # 拦住「同一个 task 被点两次重新生成」导致的状态回退。token=run：
-    # 「停止后立刻重试」时旧 run 的收尾摘除不会误摘新 run 的登记。
-    task_state.mark_task_active(task_id, video_id, token=run)
-    try:
-        # 同一视频互斥：防止同视频双任务并发下载/生成触发文件锁冲突（WinError 32）。
-        # 不同视频互不阻塞，两个 worker 可让「转写（GPU）」与「总结（网络）」阶段重叠（ADR-0001）。
-        with video_task_locks.get(video_id or task_id):
-            note = task_serial_executor.run(_execute_note_task, task_id=task_id)
-    finally:
-        task_state.mark_task_done(task_id, token=run)
-        task_state.finish_run(run)
-    logger.info(f"Note generated: {task_id}")
-    if not note or not note.markdown:
-        logger.warning(f"任务 {task_id} 执行失败，跳过保存")
-        return
-    save_note_to_file(task_id, note)
-
-    # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
-    try:
-        from app.services.vector_store import VectorStoreManager
-        VectorStoreManager().index_task(task_id)
-    except Exception as e:
-        logger.warning(f"向量索引失败（不影响笔记）: {e}")
+    """兼容入口：执行编排已移到 NoteTaskService。"""
+    return note_task_service.run(
+        task_id, video_url, platform, quality,
+        link=link, screenshot=screenshot,
+        model_name=model_name, provider_id=provider_id,
+        _format=_format, style=style, extras=extras,
+        video_understanding=video_understanding,
+        video_interval=video_interval, grid_size=grid_size, video_id=video_id,
+        output_dir=NOTE_OUTPUT_DIR,
+    )
 
 
 @router.post("/cancel_task")
@@ -394,7 +308,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                 if task_state.find_active_task_by_video(bv, root=NOTE_OUTPUT_DIR):
                     continue
                 tid = str(uuid.uuid4())
-                NoteGenerator()._update_status(
+                task_state.write_status(
                     tid,
                     TaskStatus.PENDING,
                     extra={
@@ -413,6 +327,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                             "platform": "bilibili",
                         },
                     },
+                    root=NOTE_OUTPUT_DIR,
                 )
                 # 并发提交（2026-10-11）：原来 background_tasks 按注册顺序同步逐条
                 # 跑，上一条全部完成才开始下一条，批量导入实际完全串行（2 个 worker
@@ -514,7 +429,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         # 新提交（含重试/复用）视为对旧停止请求的作废：清掉预取消墓碑，
         # 否则「点停止后马上重试」会被上一次的停止误伤（见 services/task_runs.py）
         task_state.clear_cancel_request(task_id)
-        NoteGenerator()._update_status(
+        task_state.write_status(
             task_id,
             TaskStatus.PENDING,
             extra={
@@ -538,6 +453,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
                     "grid_size": list(data.grid_size or []),
                 },
             },
+            root=NOTE_OUTPUT_DIR,
         )
         # 排队卡片的标题/封面：后台轻量补一次（不阻塞提交）
         _spawn_meta_prefetch(task_id, str(data.video_url), data.platform)

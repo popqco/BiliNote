@@ -362,8 +362,7 @@ class TestCancelQueuedTaskAndEndpoint(unittest.TestCase):
         task_id = "t-endpoint-live"
         run = task_runs.register_run(task_id)
         gen_stub = self._stub_generator_factory()
-        with patch.object(self.router, "NoteGenerator", gen_stub):
-            resp = self.router.cancel_task(self.router.RecordRequest(task_id=task_id))
+        resp = self.router.cancel_task(self.router.RecordRequest(task_id=task_id))
         self.assertTrue(_body(resp)["cancelled"])
         self.assertTrue(task_runs.is_run_cancelled(run), "live run 必须收到取消信号")
         self.assertEqual(_read_status(self.tmp.name, task_id)["status"], "CANCELLED")
@@ -374,8 +373,7 @@ class TestCancelQueuedTaskAndEndpoint(unittest.TestCase):
             json.dumps({"status": "SUCCESS"}), encoding="utf-8"
         )
         gen_stub = self._stub_generator_factory()
-        with patch.object(self.router, "NoteGenerator", gen_stub):
-            resp = self.router.cancel_task(self.router.RecordRequest(task_id=task_id))
+        resp = self.router.cancel_task(self.router.RecordRequest(task_id=task_id))
         self.assertFalse(_body(resp)["cancelled"])
         # 已结束任务的停止请求不许留下墓碑（否则将来重试会被误伤）
         run = task_runs.register_run(task_id)
@@ -388,22 +386,23 @@ class TestCancelQueuedTaskAndEndpoint(unittest.TestCase):
             json.dumps({"status": "SUMMARIZING"}), encoding="utf-8"
         )
         gen_stub = self._stub_generator_factory()
-        with patch.object(self.router, "NoteGenerator", gen_stub):
-            resp = self.router.cancel_task(self.router.RecordRequest(task_id=task_id))
+        resp = self.router.cancel_task(self.router.RecordRequest(task_id=task_id))
         self.assertTrue(_body(resp)["cancelled"])
         self.assertEqual(_read_status(self.tmp.name, task_id)["status"], "CANCELLED")
 
     def test_queued_task_cancel_aborts_without_touching_media(self):
         """排队中的任务停止：等 worker 取到它时第一个检查点即取消，不下载不调模型。"""
-        old_executor = self.router.task_serial_executor
-        self.router.task_serial_executor = ConcurrentTaskExecutor(max_workers=1)
+        import app.services.note_tasks as note_tasks_mod
+
+        old_executor = note_tasks_mod.task_serial_executor
+        note_tasks_mod.task_serial_executor = ConcurrentTaskExecutor(max_workers=1)
         downloader = _StubDownloader()
         gpt = _BlockingSummarizeGPT()
         try:
             # 用一个占位任务占住唯一的 worker
             blocker_release = threading.Event()
             blocker = threading.Thread(
-                target=lambda: self.router.task_serial_executor.run(
+                target=lambda: note_tasks_mod.task_serial_executor.run(
                     blocker_release.wait, task_id="blocker"
                 ),
                 daemon=True,
@@ -438,7 +437,7 @@ class TestCancelQueuedTaskAndEndpoint(unittest.TestCase):
             # 停止后登记必须清干净：同 task 的重试不被内存门禁拦住
             self.assertFalse(note_svc.is_task_active(task_id))
         finally:
-            self.router.task_serial_executor = old_executor
+            note_tasks_mod.task_serial_executor = old_executor
 
 
 if __name__ == "__main__":
