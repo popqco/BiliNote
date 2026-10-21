@@ -63,28 +63,34 @@ class NoteContentError(RuntimeError):
 
 
 def _strip_global_sections(markdown: str) -> str:
-    """去掉来源链接、目录、AI 总结与 HTML 注释，只留正文。"""
+    """去掉来源链接、目录、AI 总结与 HTML 注释，只留正文。
+
+    目录段不能按「直到同级标题」处理：笔记常见 ``# 目录`` 后直接跟 ``##``
+    正文，同级规则会把整篇正文吞掉（2026-10-21 扫描实拍：5205 字正常笔记
+    被判 0 字）。目录只跳到它的列表结束；AI 总结跳到下一个标题。
+    """
     text = _SOURCE_LINK_RE.sub("", markdown or "")
     text = _HTML_COMMENT_RE.sub("", text)
 
     out = []
-    skip_level: Optional[int] = None
+    mode: Optional[str] = None  # None | "toc" | "summary"
     in_fence = False
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
+            if mode == "toc":
+                mode = None
             in_fence = not in_fence
-            if skip_level is None:
+            if mode != "summary":
                 out.append(line)
             continue
         if in_fence:
-            if skip_level is None:
+            if mode != "summary":
                 out.append(line)
             continue
 
         m = _HEADING_RE.match(line)
         if m:
-            level = len(m.group(1))
             title = (
                 m.group(2).strip().lower()
                 .replace(" ", "")
@@ -92,13 +98,25 @@ def _strip_global_sections(markdown: str) -> str:
                 .replace(":", "")
             )
             if title in _GLOBAL_SECTIONS:
-                skip_level = level if skip_level is None else min(skip_level, level)
+                mode = "toc" if title == "目录" else "summary"
                 continue
-            if skip_level is not None and level <= skip_level:
-                skip_level = None
-            if skip_level is not None:
+            # 普通标题：结束目录/总结段，正文从这里开始
+            mode = None
+            out.append(line)
+            continue
+
+        if mode == "toc":
+            # 目录主体是列表；空行继续跳过，遇到正文段落立即结束
+            if (
+                not stripped
+                or re.match(r"^(?:[-*+]|\d+[.)])\s+", stripped)
+                or re.match(r"^\[.*\]\(.*\)$", stripped)
+            ):
                 continue
-        elif skip_level is not None:
+            mode = None
+            out.append(line)
+            continue
+        if mode == "summary":
             continue
         out.append(line)
     return "\n".join(out)

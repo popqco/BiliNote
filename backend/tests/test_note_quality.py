@@ -51,6 +51,20 @@ def test_valid_long_note_passes():
     ensure_note_content(f"> 来源链接：https://example.com\n\n{body}\n\n## AI 总结\n\n简短总结", "转写" * 5000)
 
 
+def test_h1_toc_does_not_swallow_h2_body():
+    # 真实笔记常见 `# 目录` 后直接接 `##` 正文：目录剥离不能按同级标题规则
+    # 把整篇正文吞掉（2026-10-21 扫描实拍：5205 字正常笔记被判 0 字）。
+    md = (
+        "# 目录\n\n"
+        "- [1. 引言](#1)\n"
+        "- [2. 结论](#2)\n"
+        "- [AI 总结](#ai)\n\n"
+        "## 1. 引言\n\n"
+        + "这部分是正常的视频正文内容，包含观点与事实。" * 30
+    )
+    ensure_note_content(md, "转写" * 5000)
+
+
 def test_short_transcript_allows_short_note():
     md = "## 要点\n\n" + "这是一段短视频的有效内容。" * 5
     ensure_note_content(md, "短转写" * 20)
