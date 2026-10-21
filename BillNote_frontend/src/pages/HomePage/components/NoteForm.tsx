@@ -614,47 +614,65 @@ const NoteForm = () => {
     const label = generating ? '停止生成' : editing ? '重新生成' : '生成笔记'
 
     return (
-      <div className="flex gap-2">
-        {/* 生成中（2026-10-18 误触修复）：主按钮位不再「原地变成停止生成」。
-            旧布局点「重新生成」的同一像素点在成功后毫秒级变成红色停止按钮，
-            用户手还在原位再点一下就把刚启动的新 run 停了（实拍日志两次
-            stop 都紧跟 retry）。现在主位是禁用态的「生成中…」——原地怎么点
-            都不会触发任何操作；停止是右侧独立按钮，且启动 2 秒内未武装
-            （显示「启动中…」并禁用），双击/连点都停不下来。 */}
-        <Button
-          type={generating ? 'button' : 'submit'}
-          variant={generating ? 'outline' : 'default'}
-          className={(generating || editing ? 'flex-1' : 'w-full') + (generating ? '' : ' bg-primary')}
-          disabled={generating}
-        >
-          {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          {generating ? '生成中…' : label}
-        </Button>
+      <div className="space-y-2">
+        <div className="flex gap-2">
+          {/* 生成中（2026-10-18 误触修复）：主按钮位不再「原地变成停止生成」。
+              旧布局点「重新生成」的同一像素点在成功后毫秒级变成红色停止按钮，
+              用户手还在原位再点一下就把刚启动的新 run 停了（实拍日志两次
+              stop 都紧跟 retry）。现在主位是禁用态的「生成中…」——原地怎么点
+              都不会触发任何操作；停止是右侧独立按钮，且启动 2 秒内未武装
+              （显示「启动中…」并禁用），双击/连点都停不下来。 */}
+          <Button
+            type={generating ? 'button' : 'submit'}
+            variant={generating ? 'outline' : 'default'}
+            className={(generating || editing ? 'flex-1' : 'w-full') + (generating ? '' : ' bg-primary')}
+            disabled={generating}
+          >
+            {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {generating ? '生成中…' : label}
+          </Button>
 
-        {generating ? (
+          {generating ? (
+            <Button
+              type="button"
+              variant="outline"
+              className={
+                'flex-1 ' +
+                (stopArmed
+                  ? ' border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10'
+                  : ' text-muted-foreground')
+              }
+              onClick={() => handleStop()}
+              disabled={stopping || !stopArmed}
+              title={stopArmed ? '停止当前生成' : '任务刚刚开始，稍候即可停止'}
+            >
+              {stopArmed && <Square className="mr-2 h-4 w-4 fill-current" />}
+              {stopping ? '正在停止…' : stopArmed ? '停止生成' : '启动中…'}
+            </Button>
+          ) : (
+            editing && (
+              <Button type="button" variant="outline" className="flex-1" onClick={handleCreateNew}>
+                <Plus className="mr-2 h-4 w-4" />
+                新建笔记
+              </Button>
+            )
+          )}
+        </div>
+
+        {/* 生成中也要能开新笔记：长视频转写/总结要几分钟，用户不该被迫盯着
+            当前任务。这里只切走当前任务（setCurrentTask(null)），后台生成
+            不受影响——轮询按任务列表走，历史卡会继续更新到完成/失败。 */}
+        {generating && (
           <Button
             type="button"
             variant="outline"
-            className={
-              'flex-1 ' +
-              (stopArmed
-                ? ' border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10'
-                : ' text-muted-foreground')
-            }
-            onClick={() => handleStop()}
-            disabled={stopping || !stopArmed}
-            title={stopArmed ? '停止当前生成' : '任务刚刚开始，稍候即可停止'}
+            className="w-full border-dashed text-muted-foreground hover:text-foreground"
+            onClick={handleCreateNew}
+            title="当前任务会在后台继续生成，不受影响"
           >
-            {stopArmed && <Square className="mr-2 h-4 w-4 fill-current" />}
-            {stopping ? '正在停止…' : stopArmed ? '停止生成' : '启动中…'}
+            <Plus className="mr-2 h-4 w-4" />
+            开启新笔记
           </Button>
-        ) : (
-          editing && (
-            <Button type="button" variant="outline" className="flex-1" onClick={handleCreateNew}>
-              <Plus className="mr-2 h-4 w-4" />
-              新建笔记
-            </Button>
-          )
         )}
       </div>
     )
