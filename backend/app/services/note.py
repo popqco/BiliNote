@@ -64,6 +64,7 @@ from app.utils.note_helper import (
     prepend_source_link,
     replace_content_markers,
 )
+from app.utils.note_quality import NoteContentError, ensure_note_content
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 from app.utils.screenshot_marker import extract_screenshot_timestamps, strip_screenshot_markers
@@ -374,6 +375,16 @@ class NoteGenerator:
                 )
 
             markdown = prepend_source_link(markdown, str(video_url))
+
+            # 完成前的最后一道闸：_summarize_text 已校验过，这里再兜一次，
+            # 确保任何后处理/未来改动都不会把空壳笔记写成 SUCCESS。
+            ensure_note_content(
+                markdown,
+                getattr(transcript, "full_text", "") or "\n".join(
+                    (getattr(seg, "text", "") or "")
+                    for seg in getattr(transcript, "segments", [])
+                ),
+            )
 
             # 5. 保存记录到数据库
             self._update_status(task_id, TaskStatus.SAVING)
@@ -1050,6 +1061,12 @@ class NoteGenerator:
         """
         task_id = task_id or markdown_cache_file.stem
         self._update_status(task_id, TaskStatus.SUMMARIZING)
+        # 质量闸门用的原始转写：长视频只回几十个字时据此判定空壳。
+        # getattr 兼容测试里的 SimpleNamespace 转写替身（无 full_text 字段）。
+        transcript_text = getattr(transcript, "full_text", "") or "\n".join(
+            (getattr(seg, "text", "") or "")
+            for seg in getattr(transcript, "segments", [])
+        )
 
         def build_source(imgs: List[str], shot: bool) -> GPTSource:
             return GPTSource(
@@ -1126,12 +1143,22 @@ class NoteGenerator:
                 )
             try:
                 markdown = gpt.summarize(build_source(imgs or [], shot))
+                # 上游对敏感内容可能返回 HTTP 200 + 「抱歉，这个问题未找到相关
+                # 结果。」（2026-10-21 实拍）。不校验就会把空壳笔记标成成功。
+                # 拒答属于内容层面的确定性失败，换更小的请求重发同一段内容
+                # 没有意义，直接终止降级阶梯，让用户换模型重试。
+                ensure_note_content(markdown, transcript_text)
                 markdown_cache_file.write_text(markdown, encoding="utf-8")
                 logger.info(f"GPT 总结并缓存成功 ({markdown_cache_file}, 策略={strategy})")
                 return markdown
             except TaskCancelled:
                 # 用户停止：不许被当成「这一级失败」卷进下一级降级
                 raise
+            except NoteContentError as exc:
+                last_exc = exc
+                logger.error(f"GPT 总结内容无效（策略={strategy}）：{exc}")
+                if exc.fatal:
+                    break
             except Exception as exc:
                 last_exc = exc
                 logger.error(f"GPT 总结失败（策略={strategy}）：{type(exc).__name__}: {exc}")

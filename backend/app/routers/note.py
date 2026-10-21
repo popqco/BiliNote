@@ -17,6 +17,7 @@ from app.paths import NOTE_OUTPUT_DIR, UPLOAD_DIR
 from app.services import task_state
 from app.services.note import logger
 from app.services.note_tasks import NoteTaskError, note_task_service
+from app.services.proxy_config_manager import ProxyConfigManager, proxy_reachable
 from app.services.task_serial_executor import task_serial_executor
 from app.services.video_meta import fetch_video_meta
 from app.utils.response import ResponseWrapper as R
@@ -476,6 +477,22 @@ def _store_cached_cover(key: str, content_type: str, content: bytes) -> Optional
         return None
 
 
+def _cover_proxy_url(target: str) -> Optional[str]:
+    """YouTube 封面使用应用里配置的代理；只对 ytimg/youtube 生效。
+
+    2026-10-21 实测：本机直连 i.ytimg.com 20s 超时，经配置的 7892 代理
+    0.8s 返回。不能只依赖进程启动时注入的环境变量——后端常驻运行时用户
+    可能才打开代理，环境变量不会再更新。代理探活失败则退回直连。
+    """
+    if not ("ytimg" in target or "youtube" in target):
+        return None
+    url = ProxyConfigManager().get_proxy_url()
+    if url and not proxy_reachable(url):
+        logger.warning(f"封面代理：YouTube 代理不可达，退回直连：{url}")
+        return None
+    return url
+
+
 @router.get("/image_proxy")
 async def image_proxy(request: Request, url: str):
     target = _normalize_image_url(url)
@@ -516,6 +533,10 @@ async def image_proxy(request: Request, url: str):
         candidates.append("https://" + target[len("http://"):])
 
     is_youtube = "ytimg" in target or "youtube" in target
+    # 显式读取应用代理配置（而非只靠启动时注入的环境变量）；探活在线程里做，
+    # 避免最多 0.5s 的 TCP 连接阻塞事件循环。trust_env=False 同时避免继承
+    # 到已失效的系统代理。
+    proxy_url = await asyncio.to_thread(_cover_proxy_url, target)
     headers = {
         "Referer": "https://www.youtube.com/" if is_youtube else "https://www.bilibili.com/",
         "User-Agent": request.headers.get("User-Agent")
@@ -528,7 +549,12 @@ async def image_proxy(request: Request, url: str):
     for cand in candidates:
         for _ in range(2):
             try:
-                async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    timeout=20.0,
+                    follow_redirects=True,
+                    proxy=proxy_url,
+                    trust_env=False,
+                ) as client:
                     resp = await client.get(cand, headers=headers)
                 if resp.status_code == 200 and resp.content:
                     ctype = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip().lower()

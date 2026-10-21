@@ -25,6 +25,7 @@ from app.services.task_serial_executor import task_serial_executor, video_task_l
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.services.video_meta import fetch_video_meta
 from app.utils.logger import get_logger
+from app.utils.note_quality import NoteContentError, ensure_note_content
 from app.utils.url_parser import extract_video_id
 
 logger = get_logger(__name__)
@@ -65,8 +66,14 @@ class NoteTaskService:
     def save_note_to_file(self, task_id: str, note, output_dir: Optional[Path] = None) -> None:
         root = Path(output_dir) if output_dir is not None else self.output_dir
         os.makedirs(root, exist_ok=True)
-        with open(root / f"{task_id}.json", "w", encoding="utf-8") as f:
+        target = root / f"{task_id}.json"
+        # 原子写：进程被杀/磁盘抖动时不留半截 JSON（读出来就是「已完成但没内容」）
+        tmp = target.with_name(target.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
 
     def persist_prefetched_transcript(
         self,
@@ -432,7 +439,34 @@ class NoteTaskService:
         if not note or not note.markdown:
             logger.warning(f"任务 {task_id} 执行失败，跳过保存")
             return
-        self.save_note_to_file(task_id, note, output_dir=root)
+
+        # 落盘前的最后一道内容闸（generate 已校验过一次，这里防未来旁路）：
+        # 空壳/拒答绝不能以 SUCCESS 的身份出现在历史里。
+        transcript = getattr(note, "transcript", None)
+        transcript_text = ""
+        if transcript is not None:
+            transcript_text = getattr(transcript, "full_text", "") or "\n".join(
+                (getattr(seg, "text", "") or "")
+                for seg in getattr(transcript, "segments", [])
+            )
+        try:
+            ensure_note_content(note.markdown, transcript_text)
+        except NoteContentError as exc:
+            logger.error(f"任务 {task_id} 笔记内容无效，标记失败：{exc}")
+            task_state.write_status(task_id, TaskStatus.FAILED, message=str(exc), root=root)
+            return
+
+        try:
+            self.save_note_to_file(task_id, note, output_dir=root)
+        except Exception as exc:
+            logger.error(f"任务 {task_id} 笔记保存失败：{exc}", exc_info=True)
+            task_state.write_status(
+                task_id,
+                TaskStatus.FAILED,
+                message=f"笔记保存失败：{exc}",
+                root=root,
+            )
+            return
 
         # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
         try:
