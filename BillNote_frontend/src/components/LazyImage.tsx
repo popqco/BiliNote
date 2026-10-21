@@ -1,6 +1,6 @@
 // components/LazyImage.tsx
 import { useInView } from 'react-intersection-observer'
-import { FC, useCallback, useEffect, useRef, useState } from 'react'
+import { FC, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 
 interface LazyImageProps {
@@ -47,15 +47,38 @@ const LazyImage: FC<LazyImageProps> = ({ src, alt, className, placeholder = '/pl
     }, [src])
 
     // 图片可能已经加载完（缓存命中时 onLoad 可能在监听挂上前就触发）：
-    // 渲染后检查 complete，命中就直接显示
-    const syncCompleteState = useCallback(() => {
-        const img = imgRef.current
-        if (img && img.complete && img.naturalWidth > 0) setLoaded(true)
-    }, [])
-
+    // 渲染后检查 complete，命中就直接显示。只查一次不够——YouTube 封面经
+    // 后端代理 4ms 返回，complete 往往落在首次 effect 之后，而 onLoad 已
+    // 被错过，真图会永久停在 opacity-0（2026-10-21 实拍：naturalWidth=1280
+    // 却看不到，用户只看到占位图）。用短轮询兜住这个竞态。
     useEffect(() => {
-        if (inView) syncCompleteState()
-    }, [inView, finalSrc, syncCompleteState])
+        if (!inView || failed) return
+        const img = imgRef.current
+        if (!img) return
+        let stopped = false
+        const settle = () => {
+            if (stopped) return true
+            if (img.complete && img.naturalWidth > 0) {
+                setLoaded(true)
+                stopped = true
+                return true
+            }
+            return false
+        }
+        if (settle()) return
+        const timer = window.setInterval(() => {
+            if (settle()) window.clearInterval(timer)
+        }, 200)
+        const timeout = window.setTimeout(() => {
+            stopped = true
+            window.clearInterval(timer)
+        }, 5000)
+        return () => {
+            stopped = true
+            window.clearInterval(timer)
+            window.clearTimeout(timeout)
+        }
+    }, [inView, finalSrc, failed])
 
     const handleError = () => {
         if (!hasCover) {
@@ -84,7 +107,7 @@ const LazyImage: FC<LazyImageProps> = ({ src, alt, className, placeholder = '/pl
                 <img
                     ref={node => {
                         imgRef.current = node
-                        if (node) syncCompleteState()
+                        if (node && node.complete && node.naturalWidth > 0) setLoaded(true)
                     }}
                     src={finalSrc}
                     alt={alt ?? '封面'}
