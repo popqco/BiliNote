@@ -182,8 +182,11 @@ export const useTasksSync = (interval = 30000) => {
             if (res?.result) {
               // 内容水位线变化时 force 绕过 SUCCESS→SUCCESS 短路，让外部重写落地；
               // 首次见到成功结果时只补正文，不覆盖本地已有版本。
+              // status 必须显式传入：本地可能还停在 SUMMARIZING/SAVING，只合正文
+              // 会把任务永远留在进行中（轮询重复弹成功、笔记打不开）。
               useTaskStore.getState().applyServerResult(bt.task_id, res.result, {
                 force: needsResultPull,
+                status: 'SUCCESS',
               })
             }
           } catch (e) {

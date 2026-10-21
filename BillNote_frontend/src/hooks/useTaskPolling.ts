@@ -67,7 +67,10 @@ export const useTaskPolling = (interval = 3000) => {
 
           if (status === 'SUCCESS') {
             toast.success('笔记生成成功')
-            useTaskStore.getState().applyServerResult(task.id, res.result)
+            // 必须把状态一并落成 SUCCESS：applyServerResult 只负责正文/元信息合并，
+            // 不带 status 时本地会一直停在 SAVING，轮询把同一任务当未完成，
+            // 每 3 秒重复弹「笔记生成成功」且笔记永远打不开（2026-10-21 实拍）。
+            useTaskStore.getState().applyServerResult(task.id, res.result, { status: 'SUCCESS' })
             continue
           }
 

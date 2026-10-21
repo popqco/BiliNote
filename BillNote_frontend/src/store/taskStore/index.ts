@@ -344,7 +344,19 @@ export const useTaskStore = create<TaskStore>()(
 
       applyServerResult: (id, result, options) => {
         const task = get().tasks.find(t => t.id === id)
-        if (!task || !result) return
+        if (!task) return
+        if (!result) {
+          // 后端已是终态但结果文件缺失/读失败时，状态仍要落地：否则任务永远
+          // 停在「保存中」，轮询重复成功提示（2026-10-21 实拍）。
+          if (options?.status !== undefined) {
+            get().updateTaskContent(id, {
+              status: options.status,
+              queuePosition: undefined,
+              ...(options.clearMessage === false ? {} : { message: undefined }),
+            })
+          }
+          return
+        }
         const patch: any = {
           markdown: result.markdown,
           transcript: result.transcript,
