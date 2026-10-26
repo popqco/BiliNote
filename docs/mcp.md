@@ -63,14 +63,15 @@ MCP 服务器跑在另一台机器、连远程 Worker 时，填 Worker 地址 + 
 远控开关关闭时，远程只放行任务类操作白名单（列笔记/读笔记/检索/问答/提交/重试等），
 删除与配置类操作仍需在 Worker 本机执行。
 
-## 工具清单（11 个）
+## 工具清单（13 个）
 
 | 工具 | 作用 | 类型 |
 |---|---|---|
-| `search_notes` | **首选**：语义检索原文块（标题/小节/时间戳/相关度），供 harness 自行推理 | 本地向量，零在线 API |
-| `get_note` | 读整篇笔记 markdown + 元数据；兼查任务状态 | 读 |
-| `get_transcript` | 读视频转写原话（支持时间窗切片） | 读 |
-| `list_notes` | 列笔记（标题/平台/状态/task_id/链接） | 读 |
+| `search_notes` | **首选**：语义检索原文块；默认只回笔记正文（`source="note"`），过滤转写/AI 总结/目录，片段截到 `snippet_chars` | 本地向量，零在线 API |
+| `note_outline` | 看笔记目录（小节标题 + 时间戳 + 字符数），长笔记先看目录再取节 | 读 |
+| `get_note` | 读笔记正文；默认 `format="qa"`（省略截图/AI 总结），`section="对策"` 只取一节，`format="full"` 读整篇 | 读 |
+| `get_transcript` | 读视频转写原话（支持时间窗切片与 `max_chars`） | 读 |
+| `list_notes` | 浏览/发现笔记（默认 10 条、紧凑格式）；已知 task_id 时不要调用 | 读 |
 | `index_status` | 后端健康 + 向量索引覆盖率 + 缺失清单 | 读 |
 | `ask_notes` | 【兜底】BiliNote 内置在线 API 问答（RAG + 内置模型） | 在线 API |
 | `create_note` | 提交视频 URL 生成笔记（异步，配 `get_note` 轮询） | 写 |
@@ -78,14 +79,28 @@ MCP 服务器跑在另一台机器、连远程 Worker 时，填 Worker 地址 + 
 | `export_note` | 导出 PDF / Word 到指定目录 | 写 |
 | `reindex_notes` | 补建缺失向量索引 | 写 |
 | `delete_note` | 删除笔记（**不可恢复**，需 `confirm=true`） | 危险 |
+| `cancel_task` | 停止生成中的任务（落 CANCELLED，可 retry） | 写 |
 
 ## 推荐用法（给 harness 的提示）
 
-1. 回答与笔记相关的问题：先 `search_notes` → 不够再 `get_note` / `get_transcript`
-   → **用 harness 自己的模型推理作答**，引用注明出自哪篇笔记。
-2. `ask_notes` 只在用户明确要求"用 BiliNote 自带问答"时使用。
-3. 生成新笔记用 `create_note`，之后用 `get_note(task_id)` 轮询（通常几分钟）。
-4. 检索结果异常时先 `index_status` 看覆盖率，缺的用 `reindex_notes` 补。
+1. 回答与笔记相关的问题：先 `search_notes`；命中即可回答，不要为了确认再 `list_notes`。
+2. 片段不够时，**换更具体的关键词再 search 一次**（“对策/案例/结论/原因”很有效）；
+   仍不够再用 `note_outline` 看目录、`get_note(section="...")` 取指定小节。
+   只有跨章节总结、导出、或用户明确要“整篇”时才 `get_note(format="full")`。
+3. `ask_notes` 只在用户明确要求"用 BiliNote 自带问答"时使用。
+4. 生成新笔记用 `create_note`，之后用 `get_note(task_id)` 轮询（通常几分钟）。
+5. 检索结果异常时先 `index_status` 看覆盖率，缺的用 `reindex_notes` 补。
+
+## 上下文与结果大小
+
+- 所有工具都关闭了 MCP SDK 的 structured output 自动包装，避免同一段文本在
+  `content` 和 `structuredContent` 里各回一遍（ZCode 等客户端会同时显示）。
+- `search_notes` 默认 `top_k=5`、`snippet_chars=600`、`source="note"`；要原片用
+  `source="transcript"`，要 AI 总结/目录用 `include_synthetic=true`。
+- `get_note` 默认 `format="qa"`：去掉截图链接与 AI 总结；`section=` 只回一节；
+  `max_chars=` 可按行边界截断并提示下一步。
+- 需要量化每次结果大小时设 `BILINOTE_MCP_DEBUG=1`，server 会把
+  `[bilinote-mcp] <tool>: N chars` 打到 stderr，不污染 stdio 协议。
 
 ## 故障排查
 
@@ -97,6 +112,9 @@ MCP 服务器跑在另一台机器、连远程 Worker 时，填 Worker 地址 + 
 | 「被拒绝（403）」 | Worker 关闭了远端配置，该操作需在本机执行 |
 | 「尚未配置任何 LLM 供应商」 | 内置问答/生成笔记前需在设置页配好模型 |
 | 检索结果偏少 | 相关性闸门宁缺勿噪；换关键词、调大 `top_k`（≤30） |
+| 默认看不到截图 / AI 总结 | `get_note(format="full")`，或 `search_notes(include_synthetic=true)` |
+| 检索看不到原片转写 | `search_notes(source="transcript")` 或 `source="all"` |
+| 片段末尾有 `…` | 被 `snippet_chars` 截断；用 `get_note(section="小节标题")` 取该节全文 |
 
 ## 实现说明
 

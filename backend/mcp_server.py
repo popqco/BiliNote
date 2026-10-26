@@ -24,7 +24,8 @@ import json
 import os
 import re
 import sys
-from typing import Optional
+from datetime import datetime
+from typing import Literal, Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -39,10 +40,12 @@ _TIMEOUT = httpx.Timeout(180.0, connect=5.0)
 mcp = FastMCP(
     "bilinote",
     instructions=(
-        "BiliNote 视频笔记库（B站/YouTube 等视频的 AI 笔记）。"
-        "回答与笔记内容相关的问题时：优先 search_notes 检索原文块 → 需要更多上下文再 "
-        "get_note / get_transcript，用你自己的能力推理作答并注明出自哪篇笔记；"
-        "ask_notes 是软件内置的在线 API 问答，仅在用户明确要求时作兜底使用。"
+        "BiliNote 视频笔记库（B站/YouTube/公众号等视频的 AI 笔记）。"
+        "回答笔记相关问题时：优先 search_notes 检索原文；命中即可回答，不要为了确认再 list_notes。"
+        "需要更多上下文时，先用更具体的关键词再 search 一次；仍不够再用 "
+        "get_note(section=\"小节标题关键词\") 精确取节。"
+        "get_note 默认 qa 模式（省略截图与 AI 总结），整篇阅读或导出时用 format=\"full\"；"
+        "长笔记先 note_outline。ask_notes 是软件内置在线问答，仅在用户明确要求时作兜底。"
     ),
 )
 
@@ -152,6 +155,260 @@ def _fmt_ts(seconds) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+# ---------------------------------------------------------------- 输出整形
+
+_IMG_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_AI_SUMMARY_RE = re.compile(r"(?im)^##\s+AI\s*总结\s*$")
+_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$")
+_DEBUG = os.environ.get("BILINOTE_MCP_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ret(tool: str, text: str) -> str:
+    """统一返回；BILINOTE_MCP_DEBUG=1 时把结果字符数打到 stderr（不污染 stdio 协议）。"""
+    if _DEBUG:
+        print(f"[bilinote-mcp] {tool}: {len(text)} chars", file=sys.stderr, flush=True)
+    return text
+
+
+def _strip_images(md: str) -> str:
+    """去掉 markdown 图片链接；问答时截图链接对模型是噪音，UI 仍保留原文。"""
+    cleaned = _IMG_RE.sub("", md)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _strip_ai_summary(md: str) -> str:
+    """去掉结尾的 AI 总结小节；它是正文的二次压缩，问答时冗余。"""
+    return _AI_SUMMARY_RE.split(md, maxsplit=1)[0].rstrip()
+
+
+def _split_sections(md: str) -> list[tuple[str, str]]:
+    """按二级标题切分，返回 [(标题, 含标题的整节文本)]。"""
+    sections: list[tuple[str, str]] = []
+    heading: Optional[str] = None
+    buf: list[str] = []
+    for line in md.splitlines():
+        m = _SECTION_RE.match(line)
+        if m:
+            if heading is not None:
+                sections.append((heading, "\n".join(buf).strip()))
+            heading = m.group(1).strip()
+            buf = [line]
+        elif heading is not None:
+            buf.append(line)
+    if heading is not None:
+        sections.append((heading, "\n".join(buf).strip()))
+    return sections
+
+
+def _normalize_match(text: str) -> str:
+    """标题匹配用：忽略空白、标点、引号和 markdown 装饰符。"""
+    text = (text or "").lower()
+    return re.sub(
+        r"[\s*_`~\"'“”‘’：:，,。.、；;！!？?（）()\[\]【】<>《》\-—–/\\]+", "", text
+    )
+
+
+def _is_synthetic_section(title: str) -> bool:
+    n = _normalize_match(title)
+    return any(k in n for k in ("ai总结", "目录", "tableofcontents", "toc"))
+
+
+def _find_section(
+    md: str, query: str
+) -> tuple[Optional[tuple[str, str]], list[tuple[str, str]], int]:
+    """返回 (命中的小节, 全部小节, 命中数)；未命中时第一项为 None。"""
+    sections = _split_sections(md)
+    q = _normalize_match(query)
+    if not q:
+        return None, sections, 0
+    exact = [s for s in sections if _normalize_match(s[0]) == q]
+    if exact:
+        return exact[0], sections, len(exact)
+    partial = [s for s in sections if q in _normalize_match(s[0])]
+    if partial:
+        return partial[0], sections, len(partial)
+    return None, sections, 0
+
+
+def _section_titles(sections: list[tuple[str, str]], limit: int = 20) -> str:
+    lines = [f"- {title}" for title, _ in sections[:limit]]
+    if len(sections) > limit:
+        lines.append(f"- …其余 {len(sections) - limit} 节")
+    return "\n".join(lines)
+
+
+def _truncate(text: str, max_chars: int, hint: str = "") -> str:
+    if not max_chars or len(text) <= max_chars:
+        return text
+    original_len = len(text)
+    cut = text[: max(1, max_chars)]
+    nl = cut.rfind("\n")
+    if nl > max_chars * 0.6:
+        cut = cut[:nl]
+    marker = f"\n\n…（已截断，原长 {original_len} 字符"
+    if hint:
+        marker += f"；{hint}"
+    marker += "）"
+    return cut.rstrip() + marker
+
+
+def _fmt_datetime(value) -> str:
+    """把 Unix 秒/毫秒时间戳转成本地可读时间；非法值原样返回。"""
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return str(value or "-")
+    if ts > 1e12:
+        ts /= 1000.0
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return str(value or "-")
+
+
+def _status_text(task_id: str, data: dict) -> str:
+    return (
+        f"任务 {task_id} 尚未完成：status={data.get('status', 'UNKNOWN')}，"
+        f"message={data.get('message') or '-'}。"
+        "进行中可稍后重试本工具轮询；FAILED 可用 retry_task 重试。"
+    )
+
+
+def _render_note(
+    data: dict,
+    task_id: str,
+    *,
+    section: Optional[str] = None,
+    fmt: str = "qa",
+    include_screenshots: bool = False,
+    include_ai_summary: bool = False,
+    max_chars: Optional[int] = None,
+) -> str:
+    result = data.get("result", {}) or {}
+    meta = result.get("audio_meta", {}) or {}
+    raw = meta.get("raw_info", {}) or {}
+    md = _note_markdown(result)
+    if not md:
+        return f"任务 {task_id} 状态为 SUCCESS 但笔记内容为空。"
+
+    header = (
+        f"# {meta.get('title') or '(无标题)'}\n\n"
+        f"- 平台：{meta.get('platform', '-')} | 时长：{_fmt_duration(meta.get('duration'))}\n"
+        f"- 作者：{raw.get('uploader', '-')} | 链接：{raw.get('webpage_url') or '-'}\n"
+        f"- task_id：`{task_id}`\n\n---\n\n"
+    )
+
+    body = md
+    notes: list[str] = []
+    section_title = ""
+    if section:
+        found, sections, matches = _find_section(body, section)
+        if not found:
+            return header + "未找到匹配小节。可用小节：\n" + _section_titles(sections)
+        section_title = found[0]
+        body = found[1]
+        notes.append(f"仅显示小节：{section_title}；需要全文用 format=\"full\"。")
+        if matches > 1:
+            notes.append(
+                f"匹配到 {matches} 节，已返回第一节；可用更具体的 section 精确取节。"
+            )
+
+    is_ai_section = bool(section_title) and "ai总结" in _normalize_match(section_title)
+    had_images = bool(_IMG_RE.search(body))
+    had_ai_summary = bool(_AI_SUMMARY_RE.search(body)) and not is_ai_section
+    if fmt == "qa":
+        if not include_ai_summary and not is_ai_section:
+            body = _strip_ai_summary(body)
+        if not include_screenshots:
+            body = _strip_images(body)
+        stripped = []
+        if had_images and not include_screenshots:
+            stripped.append("截图")
+        if had_ai_summary and not include_ai_summary:
+            stripped.append("AI 总结")
+        if stripped:
+            notes.append(
+                f"qa 模式：已省略{'、'.join(stripped)}；需要全文用 format=\"full\"。"
+            )
+
+    prefix = "".join(f"> {n}\n>\n" for n in notes)
+    content = header + prefix + body
+    return _truncate(
+        content,
+        max_chars or 0,
+        hint='需要指定小节用 section="标题关键词"',
+    )
+
+
+def _render_outline(data: dict, task_id: str) -> str:
+    result = data.get("result", {}) or {}
+    meta = result.get("audio_meta", {}) or {}
+    md = _note_markdown(result)
+    if not md:
+        return f"任务 {task_id} 状态为 SUCCESS 但笔记内容为空。"
+
+    sections = _split_sections(md)
+    visible = [
+        (title, body)
+        for title, body in sections
+        if _normalize_match(title) not in ("目录", "tableofcontents", "toc")
+    ]
+    lines = [
+        f"# {meta.get('title') or '(无标题)'}",
+        (
+            f"- 平台：{meta.get('platform', '-')} | 时长：{_fmt_duration(meta.get('duration'))}"
+            f" | task_id：`{task_id}`"
+        ),
+        f"- 正文长度：{len(md)} 字符 | 小节数：{len(visible)}",
+        "",
+        "小节：",
+    ]
+    for i, (title, body) in enumerate(visible, 1):
+        ts = ""
+        m = re.search(r"[（(](\d{1,2}:\d{2})[）)]", title)
+        if m:
+            ts = f"[{m.group(1)}] "
+        clean = title.rstrip("* ").strip()
+        tag = "[合成] " if "ai总结" in _normalize_match(title) else ""
+        content_only = body.split("\n", 1)[1] if "\n" in body else ""
+        lines.append(f"{i}. {ts}{tag}{clean} — {len(content_only)} 字符")
+    lines.append("")
+    lines.append(
+        "提示：用 get_note(task_id, section=\"小节标题关键词\") 取指定小节；"
+        "需要全文用 format=\"full\"。"
+    )
+    return "\n".join(lines)
+
+
+def _search_keep(
+    r: dict, source: str, include_synthetic: bool, section: Optional[str]
+) -> bool:
+    st = (r.get("source_type") or "").lower()
+    if source == "note" and st != "markdown":
+        return False
+    if source == "transcript" and st != "transcript":
+        return False
+    title = r.get("section_title") or ""
+    if not include_synthetic and _is_synthetic_section(title):
+        return False
+    if section and _normalize_match(section) not in _normalize_match(title):
+        return False
+    return True
+
+
+def _search_empty_message(query: str, source: str, top_k: int) -> str:
+    if source == "note":
+        extra = '已只查笔记正文并过滤 "AI 总结"/"目录"；可试 source="all" 或 include_synthetic=true。'
+    elif source == "transcript":
+        extra = '已只查转写原片；笔记正文可改回 source="note"。'
+    else:
+        extra = "可换更具体的关键词，或调大 top_k（≤30）。"
+    return (
+        f"「{query}」没有命中（source={source}，top_k={top_k}）。{extra}"
+        "若笔记未建索引，用 index_status 查看、reindex_notes 补建。"
+    )
+
+
 def _detect_platform(url: str) -> str:
     u = url.lower()
     if "bilibili.com" in u or "b23.tv" in u:
@@ -234,79 +491,101 @@ def _get_note_or_raise(task_id: str) -> dict:
 # ---------------------------------------------------------------- 工具定义
 
 
-@mcp.tool()
-def list_notes(limit: int = 30, status: str = "all") -> str:
-    """列出 BiliNote 笔记库中的笔记任务（按最近更新排序）。
+@mcp.tool(structured_output=False)
+def list_notes(limit: int = 10, status: str = "all", compact: bool = True) -> str:
+    """浏览/发现笔记（按最近更新排序）。已知 task_id 时不要调用本工具。
 
     Args:
-        limit: 最多返回条数（1-300，默认 30）。
+        limit: 最多返回条数（1-300，默认 10）。
         status: 过滤状态：all / SUCCESS / FAILED 或进行中状态（默认 all）。
+        compact: 默认 True，省略视频链接，只保留标题/平台/状态/时间/task_id。
 
     Returns:
-        每行一条：标题、平台、状态、更新时间、task_id、视频链接。
-        task_id 用于后续 get_note / search_notes(scope=current) / export_note 等调用。
+        每行一条：标题、平台、状态、更新时间、task_id。
     """
     tasks = _recent_tasks(limit=300)
     if status and status != "all":
         tasks = [t for t in tasks if t.get("status") == status]
     tasks = tasks[: max(1, min(limit, 300))]
     if not tasks:
-        return "笔记库为空（或没有匹配状态的笔记）。"
+        return _ret("list_notes", "笔记库为空（或没有匹配状态的笔记）。")
 
     lines = []
     for t in tasks:
         title = t.get("title") or "(无标题)"
-        lines.append(
+        line = (
             f"- {title} | {t.get('platform', '-')} | {t.get('status')} "
-            f"| {t.get('updated_at', '')} | task_id=`{t.get('task_id')}` "
-            f"| {t.get('video_url', '')}"
+            f"| {_fmt_datetime(t.get('updated_at'))} | task_id=`{t.get('task_id')}`"
         )
-    header = f"共 {len(tasks)} 条笔记："
+        if not compact:
+            line += f" | {t.get('video_url', '')}"
+        lines.append(line)
+    header = f"最近 {len(tasks)} 条笔记（按更新排序）："
     if any(t.get("status") == "FAILED" for t in tasks):
         header += "（含失败任务，可用 retry_task 重试）"
-    return header + "\n" + "\n".join(lines)
+    return _ret("list_notes", header + "\n" + "\n".join(lines))
 
 
-@mcp.tool()
-def get_note(task_id: str) -> str:
-    """读取一篇笔记的完整 markdown 正文与元数据；也可用于查询任务状态。
+@mcp.tool(structured_output=False)
+def get_note(
+    task_id: str,
+    section: Optional[str] = None,
+    format: Literal["qa", "full"] = "qa",
+    include_screenshots: bool = False,
+    include_ai_summary: bool = False,
+    max_chars: Optional[int] = None,
+) -> str:
+    """读取笔记正文；默认 qa 模式，只给模型真正需要的正文。
 
     Args:
-        task_id: 笔记任务 ID（list_notes 返回的 task_id）。
+        task_id: 笔记任务 ID（list_notes / search_notes 返回的 task_id）。
+        section: 只取标题匹配的小节；支持关键词或时间戳（如 "对策"、"02:46"）。
+        format: "qa"（默认）省略截图链接与 AI 总结；"full" 返回完整原文。
+        include_screenshots: qa 模式下也保留截图链接（默认 False）。
+        include_ai_summary: qa 模式下也保留 AI 总结（默认 False）。
+        max_chars: 截断到约这么多字符（按行边界），默认不截断。
 
     Returns:
-        SUCCESS：元数据（标题/平台/时长/链接）+ 完整 markdown 笔记正文。
+        SUCCESS：元数据 + 笔记正文（或指定小节）。
         未完成/失败：当前状态、进度消息（可据此轮询或 retry_task）。
     """
     data = _get_note_or_raise(task_id)
-    status = data.get("status", "UNKNOWN")
-
-    if status != "SUCCESS":
-        return (
-            f"任务 {task_id} 尚未完成：status={status}，"
-            f"message={data.get('message') or '-'}。"
-            "进行中可稍后重试本工具轮询；FAILED 可用 retry_task 重试。"
-        )
-
-    result = data.get("result", {}) or {}
-    meta = result.get("audio_meta", {}) or {}
-    raw = meta.get("raw_info", {}) or {}
-    md = _note_markdown(result)
-    if not md:
-        return f"任务 {task_id} 状态为 SUCCESS 但笔记内容为空。"
-
-    header = (
-        f"# {meta.get('title') or '(无标题)'}\n\n"
-        f"- 平台：{meta.get('platform', '-')} | 时长：{_fmt_duration(meta.get('duration'))}\n"
-        f"- 作者：{raw.get('uploader', '-')} | 链接：{raw.get('webpage_url') or '-'}\n"
-        f"- task_id：`{task_id}`\n\n---\n\n"
+    if data.get("status", "UNKNOWN") != "SUCCESS":
+        return _ret("get_note", _status_text(task_id, data))
+    text = _render_note(
+        data,
+        task_id,
+        section=section,
+        fmt=format,
+        include_screenshots=include_screenshots,
+        include_ai_summary=include_ai_summary,
+        max_chars=max_chars,
     )
-    return header + md
+    return _ret("get_note", text)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
+def note_outline(task_id: str) -> str:
+    """返回笔记目录（小节标题 + 时间戳 + 字符数），长笔记先看目录再取节。
+
+    Args:
+        task_id: 笔记任务 ID。
+
+    Returns:
+        小节列表；配合 get_note(task_id, section="...") 精确读取。
+    """
+    data = _get_note_or_raise(task_id)
+    if data.get("status", "UNKNOWN") != "SUCCESS":
+        return _ret("note_outline", _status_text(task_id, data))
+    return _ret("note_outline", _render_outline(data, task_id))
+
+
+@mcp.tool(structured_output=False)
 def get_transcript(
-    task_id: str, start_sec: float = 0, end_sec: Optional[float] = None
+    task_id: str,
+    start_sec: float = 0,
+    end_sec: Optional[float] = None,
+    max_chars: Optional[int] = None,
 ) -> str:
     """读取一篇笔记对应的视频转写文本（按时间排序的分段原话）。
 
@@ -314,6 +593,7 @@ def get_transcript(
         task_id: 笔记任务 ID。
         start_sec: 起始秒（默认 0）。
         end_sec: 结束秒（默认到结尾）。
+        max_chars: 截断到约这么多字符（默认不截断；优先用时间窗收窄）。
 
     Returns:
         `[mm:ss] 原话` 逐行文本。适合核对视频里的原始表述、引用原话。
@@ -323,7 +603,7 @@ def get_transcript(
     transcript = result.get("transcript", {}) or {}
     segments = transcript.get("segments", []) or []
     if not segments:
-        return f"任务 {task_id} 没有可用的转写内容。"
+        return _ret("get_transcript", f"任务 {task_id} 没有可用的转写内容。")
 
     out = []
     for seg in segments:
@@ -334,28 +614,37 @@ def get_transcript(
             continue
         out.append(f"[{_fmt_ts(start)}] {seg.get('text', '')}")
     if not out:
-        return f"时间窗 [{start_sec}, {end_sec}] 内没有转写片段。"
-    if len(out) > 500:
-        out = out[:500] + [f"…（超出 500 行已截断，共 {len(out)} 行，可缩小时间窗）"]
+        return _ret(
+            "get_transcript", f"时间窗 [{start_sec}, {end_sec}] 内没有转写片段。"
+        )
+    total = len(out)
+    if total > 500:
+        out = out[:500] + [f"…（超出 500 行已截断，共 {total} 行，可缩小时间窗）"]
     lang = transcript.get("language") or ""
-    header = f"转写（{lang or '语言未知'}，{len(out)} 段）：\n"
-    return header + "\n".join(out)
+    header = f"转写（{lang or '语言未知'}，{total} 段）：\n"
+    text = header + "\n".join(out)
+    return _ret(
+        "get_transcript",
+        _truncate(text, max_chars or 0, hint="用 start_sec/end_sec 收窄时间窗"),
+    )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def search_notes(
     query: str,
     scope: str = "all",
     task_id: Optional[str] = None,
     task_ids: Optional[list[str]] = None,
-    top_k: int = 8,
+    top_k: int = 5,
+    source: Literal["note", "transcript", "all"] = "note",
+    include_synthetic: bool = False,
+    section: Optional[str] = None,
+    snippet_chars: int = 600,
 ) -> str:
-    """语义检索笔记库，返回原文片段（这是回答笔记相关问题时的首选工具）。
+    """语义检索笔记原文（回答笔记问题时的首选工具）。
 
-    纯本地向量检索（chromadb），不调用任何在线 API、不消耗 token。
-    片段按相关性排序，带来源（笔记标题/小节/时间戳），可直接作为引用依据。
-    检索结果偏少时：换更具体的关键词、调大 top_k（≤30），或改用
-    get_note 读整篇。需要某篇笔记的完整内容时不要反复 search，直接 get_note。
+    默认只返回笔记正文块（source="note"），过滤转写/AI 总结/目录，片段截到
+    snippet_chars 字符；命中即可回答，不要为了确认再 list_notes。
 
     Args:
         query: 检索问题或关键词（支持中文自然语言）。
@@ -363,26 +652,45 @@ def search_notes(
                也可直接传单个 task_id。
         task_id: scope="current" 时必填。
         task_ids: 限定检索范围到这几篇笔记（可选）。
-        top_k: 最多返回条数（1-30，默认 8；实际可能因相关性闸门少于该值）。
+        top_k: 最终最多返回条数（1-30，默认 5）。
+        source: "note" 只要笔记正文（默认）/ "transcript" 只要转写原片 / "all"。
+        include_synthetic: 是否保留 "AI 总结"/"目录" 这类合成小节（默认 False）。
+        section: 只保留小节标题匹配该关键词的结果（如 "对策"）。
+        snippet_chars: 每个片段最多字符数（默认 600；0 表示不截断）。
 
     Returns:
-        编号片段列表：来源笔记《标题》· 小节 · [时间] + 原文块 + 距离。
+        编号片段列表：来源笔记《标题》· 小节 · 相关度 + task_id + 原文片段。
     """
-    payload: dict = {"query": query, "scope": scope, "top_k": top_k}
+    try:
+        top_k = max(1, min(int(top_k), 30))
+    except (TypeError, ValueError):
+        top_k = 5
+    filtered_request = source != "all" or not include_synthetic or bool(section)
+    request_k = min(30, top_k * 2) if filtered_request else top_k
+    payload: dict = {"query": query, "scope": scope, "top_k": request_k}
     if task_id:
         payload["task_id"] = task_id
     if task_ids:
         payload["task_ids"] = task_ids
     data = _data("POST", "/api/chat/search", payload) or {}
     results = data.get("results", []) or []
-    if not results:
-        return (
-            f"「{query}」没有检索到相关片段。可能原因：关键词太生僻（换表述）、"
-            "笔记未建索引（用 index_status 查看，reindex_notes 补建）、或笔记库为空。"
-        )
+    kept = [
+        r
+        for r in results
+        if _search_keep(r, source, include_synthetic, section)
+    ][:top_k]
+    if not kept:
+        return _ret("search_notes", _search_empty_message(query, source, top_k))
 
-    lines = [f"「{query}」检索到 {len(results)} 个片段（本地向量检索，未调用在线 API）：\n"]
-    for i, r in enumerate(results, 1):
+    filters = [f"source={source}"]
+    if not include_synthetic:
+        filters.append("已过滤 AI 总结/目录")
+    if section:
+        filters.append(f"section≈{section}")
+    lines = [
+        f"「{query}」检索到 {len(kept)} 个片段（本地向量，{'，'.join(filters)}）：\n"
+    ]
+    for i, r in enumerate(kept, 1):
         src = f"《{r.get('note_title') or '未知笔记'}》"
         if r.get("section_title"):
             src += f" · {r['section_title']}"
@@ -390,17 +698,20 @@ def search_notes(
         if stype == "transcript" and r.get("start_time") is not None:
             src += f" · 原片 {_fmt_ts(r.get('start_time'))}"
         dist = r.get("distance")
-        dist_txt = f"（相关度 {1 - dist:.2f}）" if isinstance(dist, (int, float)) else ""
+        dist_txt = f" · 相关度 {1 - dist:.2f}" if isinstance(dist, (int, float)) else ""
         tid = r.get("task_id") or ""
-        lines.append(f"### {i}. {src} {dist_txt}\ntask_id: `{tid}`\n\n{r.get('text', '')}\n")
+        text = _strip_images(r.get("text", "") or "")
+        if snippet_chars and len(text) > snippet_chars:
+            text = text[:snippet_chars].rstrip() + "…"
+        lines.append(f"### {i}. {src}{dist_txt}\ntask_id: `{tid}`\n\n{text}\n")
     lines.append(
-        "\n提示：引用时注明出自哪篇笔记；片段不够用时可用 get_note(task_id) 读整篇，"
-        "或 get_transcript(task_id) 看视频原话。"
+        "\n提示：引用时注明笔记来源；片段被截断或需要该节全文时，"
+        "用 get_note(task_id=..., section=\"小节标题\")。"
     )
-    return "\n".join(lines)
+    return _ret("search_notes", "\n".join(lines))
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def ask_notes(
     question: str,
     scope: str = "all",
@@ -457,7 +768,7 @@ def ask_notes(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def create_note(
     video_url: str,
     platform: Optional[str] = None,
@@ -523,7 +834,7 @@ def create_note(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def cancel_task(task_id: str) -> str:
     """停止正在生成（或排队中）的笔记任务。
 
@@ -543,7 +854,7 @@ def cancel_task(task_id: str) -> str:
     return f"已停止任务 {task_id}。如需换模型重跑，用 retry_task 或重新 create_note。"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def retry_task(task_id: str) -> str:
     """重试一个失败的笔记生成任务（沿用原视频与原模型配置）。
 
@@ -576,7 +887,7 @@ def retry_task(task_id: str) -> str:
     return f"任务 {task_id} 已重新提交，用 get_note(task_id) 轮询。"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def export_note(task_id: str, output_format: str = "pdf", save_dir: Optional[str] = None) -> str:
     """把一篇笔记导出为 PDF 或 Word 文档并保存到本机。
 
@@ -623,7 +934,7 @@ def export_note(task_id: str, output_format: str = "pdf", save_dir: Optional[str
     return f"已导出：{path}"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def delete_note(
     task_id: Optional[str] = None,
     video_id: Optional[str] = None,
@@ -665,7 +976,7 @@ def delete_note(
     return f"已删除笔记任务：{target}。"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def index_status() -> str:
     """查看笔记库健康状态：后端是否在线、向量索引覆盖率、缺失索引的笔记清单。
 
@@ -699,7 +1010,7 @@ def index_status() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def reindex_notes(task_ids: Optional[list[str]] = None) -> str:
     """为缺失索引的笔记补建向量索引（后台执行）。
 
