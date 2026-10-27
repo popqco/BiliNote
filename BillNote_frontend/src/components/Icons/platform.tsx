@@ -195,3 +195,44 @@ export const XiaohongshuLogo = () => {
     </svg>
   )
 }
+
+export const WechatArticleLogo = () => {
+  return (
+    <svg viewBox="0 0 1024 1024" width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+      <path
+        d="M0 0m184.32 0l655.36 0q184.32 0 184.32 184.32l0 655.36q0 184.32-184.32 184.32l-655.36 0q-184.32 0-184.32-184.32l0-655.36q0-184.32 184.32-184.32Z"
+        fill="#07C160"
+      />
+      <path
+        d="M423 300c-132 0-239 89-239 199 0 63 36 119 92 156l-23 70 82-42c28 8 58 13 88 13 132 0 239-89 239-199S555 300 423 300z"
+        fill="#FFFFFF"
+      />
+      <path
+        d="M641 448c-105 0-190 71-190 159 0 51 29 96 74 126l-19 56 66-34c22 6 46 10 69 10 105 0 190-71 190-158S746 448 641 448z"
+        fill="#FFFFFF"
+        opacity="0.92"
+      />
+      <circle cx="358" cy="493" r="25" fill="#07C160" />
+      <circle cx="488" cy="493" r="25" fill="#07C160" />
+      <circle cx="594" cy="607" r="21" fill="#07C160" />
+      <circle cx="688" cy="607" r="21" fill="#07C160" />
+    </svg>
+  )
+}
+
+export const WechatChannelsLogo = () => {
+  return (
+    <svg viewBox="0 0 1024 1024" width="200" height="200" xmlns="http://www.w3.org/2000/svg">
+      <path
+        d="M0 0m184.32 0l655.36 0q184.32 0 184.32 184.32l0 655.36q0 184.32-184.32 184.32l-655.36 0q-184.32 0-184.32-184.32l0-655.36q0-184.32 184.32-184.32Z"
+        fill="#07C160"
+      />
+      <path
+        d="M512 252c-144 0-260 116-260 260s116 260 260 260 260-116 260-260S656 252 512 252z"
+        fill="#FFFFFF"
+        opacity="0.95"
+      />
+      <path d="M452 392l232 120-232 120z" fill="#07C160" />
+    </svg>
+  )
+}

@@ -17,6 +17,7 @@ import {
 import type { PosterData } from '@/pages/HomePage/components/PosterCard.tsx'
 import { normalizeMathDelimiters } from '@/lib/utils'
 import { setScreenshotExportMode } from '@/utils/screenshotLoadPolicy'
+import { buildImageProxyUrl } from '@/utils/workerConnection'
 import type { Task } from '@/store/taskStore'
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -25,6 +26,8 @@ const PLATFORM_LABELS: Record<string, string> = {
   douyin: '抖音',
   kuaishou: '快手',
   xiaohongshu: '小红书',
+  wechat_article: '微信公众号',
+  wechat_channels: '微信视频号',
   local: '本地文件',
 }
 
@@ -110,16 +113,21 @@ export const useNoteExport = ({
   const buildPosterData = (): PosterData | null => {
     if (!task) return null
     const rawCover = task.audioMeta?.cover_url || ''
-    const apiBase = String(import.meta.env.VITE_API_BASE_URL || 'api').replace(/\/$/, '')
     return {
       title: task.audioMeta?.title || '视频笔记',
-      coverUrl: rawCover ? `${apiBase}/image_proxy?url=${encodeURIComponent(rawCover)}` : '',
+      // 走统一 helper：远端 Worker 地址 + pairing token 都能带上，
+      // 同时让后端缩到 600px（海报封面不需要原图）。
+      coverUrl: rawCover ? buildImageProxyUrl(rawCover, 600) : '',
       platform: PLATFORM_LABELS[task.audioMeta?.platform] || task.audioMeta?.platform || '',
-      uploader: task.audioMeta?.raw_info?.uploader || '',
+      uploader: task.audioMeta?.uploader || task.audioMeta?.raw_info?.uploader || '',
       duration: formatDuration(task.audioMeta?.duration),
       createdAt: formatPosterDate(createTime),
       summary: extractPosterSummary(normalizeMathDelimiters(content)),
-      videoUrl: task.formData?.video_url || task.audioMeta?.raw_info?.webpage_url || '',
+      videoUrl:
+        task.formData?.video_url ||
+        task.audioMeta?.webpage_url ||
+        task.audioMeta?.raw_info?.webpage_url ||
+        '',
     }
   }
 

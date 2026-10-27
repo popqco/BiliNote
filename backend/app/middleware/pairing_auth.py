@@ -22,9 +22,12 @@ _PUBLIC_PATHS = (
 _REMOTE_TASK_PREFIXES = (
     "/api/generate_note",
     "/api/task_status/",
+    "/api/task_transcript/",
+    "/api/task_versions/",
     "/api/tasks/recent",
     "/api/video_meta",
     "/api/image_proxy",
+    "/api/img_thumb",
     "/api/chat/ask",
     "/api/chat/status",
     "/api/chat/search",
@@ -36,6 +39,8 @@ _REMOTE_TASK_PREFIXES = (
 )
 _REMOTE_TASK_EXACT = frozenset({
     "/api/model_list",
+    "/api/wechat/yuanbao_login/status",
+    "/api/wechat/channels/resolve",
 })
 
 

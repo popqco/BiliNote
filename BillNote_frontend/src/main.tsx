@@ -11,6 +11,9 @@ import ErrorBoundary, { installGlobalErrorCapture } from '@/components/ErrorBoun
 // 但往往是崩溃前兆（2026-10-17 白屏排查需要）。渲染期崩溃由下面的边界兜。
 installGlobalErrorCapture()
 
+// React 接管前移除 index.html 里的启动占位（避免和首屏 UI 重叠）
+document.getElementById('bn-boot')?.remove()
+
 createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>
     <StrictMode>

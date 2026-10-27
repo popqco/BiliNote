@@ -1,6 +1,7 @@
 "use client"
 
 import { useTaskStore } from "@/store/taskStore"
+import { get_task_transcript } from "@/services/note.ts"
 import { useEffect, useState, useRef, useCallback } from "react"
 import { Play } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -24,6 +25,8 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
   const getCurrentTask = useTaskStore((state) => state.getCurrentTask)
   const currentTaskId = useTaskStore((state) => state.currentTaskId)
   const [task, setTask] = useState<Task | null>(null)
+  const [transcriptLoading, setTranscriptLoading] = useState(false)
+  const fetchedForRef = useRef<string | null>(null)
   const [activeSegment, setActiveSegment] = useState<number | null>(null)
   const segmentRefs = useRef<(HTMLDivElement | null)[]>([])
   // 原文面板与笔记正文同为长文阅读场景，滚轮惯性平滑与正文同款（设置页开关+档位）
@@ -35,6 +38,38 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
 
   useEffect(() => {
     setTask(getCurrentTask())
+  }, [currentTaskId, getCurrentTask])
+
+  // 阅读首屏不带 transcript（省 30%+ 响应体积）：只有打开本面板时才拉。
+  useEffect(() => {
+    const id = currentTaskId
+    if (!id) return
+    const current: any = getCurrentTask()
+    if (current?.transcript?.segments?.length) {
+      setTask(current)
+      return
+    }
+    if (fetchedForRef.current === id) return
+    fetchedForRef.current = id
+    let cancelled = false
+    setTranscriptLoading(true)
+    ;(async () => {
+      try {
+        const res: any = await get_task_transcript(id)
+        if (cancelled) return
+        if (res?.transcript) {
+          useTaskStore.getState().applyTranscript(id, res.transcript)
+          setTask(getCurrentTask())
+        }
+      } catch {
+        /* 老笔记没有转录文件：面板保持空态 */
+      } finally {
+        if (!cancelled) setTranscriptLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [currentTaskId, getCurrentTask])
 
   // 问答来源跳转：按时间定位到最接近的转录片段并高亮滚动。
@@ -98,7 +133,9 @@ const TranscriptViewer = ({ focusTime }: { focusTime?: number | null }) => {
       <div className="transcript-viewer flex h-full w-full flex-col  rounded-md border bg-card p-4 shadow-sm">
         <h2 className="mb-4 text-lg font-medium">转写结果</h2>
         {!task?.transcript?.segments?.length ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">暂无转写内容</div>
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              {transcriptLoading ? '正在加载字幕…' : '暂无转写内容'}
+            </div>
         ) : (
             <>
 

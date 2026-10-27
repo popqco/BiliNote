@@ -49,7 +49,10 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks: {
-            markdown: ['react-markdown', 'react-syntax-highlighter', 'remark-gfm', 'remark-math', 'rehype-katex'],
+            // 不再给 markdown 系列单独建 manualChunk：manualChunks 会让
+            // Vite 在 index.html 里 modulepreload 这个共享块（实测 358KB
+            // gzip），而它只被懒加载的 MarkdownViewer/ChatPanel 使用。
+            // 交给 Rollup 自然分包，首屏只加载表单/历史需要的代码。
             markmap: ['markmap-lib', 'markmap-view', 'markmap-toolbar', 'markmap-common'],
             vendor: ['react', 'react-dom', 'react-router-dom'],
           },

@@ -11,9 +11,11 @@ export const generateNote = async (data: {
   format: Array<string>
   style: string
   extras?: string
-  video_understand?: boolean
+  video_understanding?: boolean
   video_interval?: number
   grid_size: Array<number>
+  /** 原片截图密度：sparse/normal/rich（不传走后端全局配置） */
+  screenshot_density?: 'sparse' | 'normal' | 'rich'
 }) => {
   try {
     console.log('generateNote', data)
@@ -57,10 +59,29 @@ export const delete_task = async (payload: {
   return await request.post('/delete_task', payload, { suppressToast: true })
 }
 
-export const get_task_status = async (task_id: string) => {
-  // 轮询专用：抑制全局 toast，失败语义由轮询层统一消化
-  // （区分「后端明确失败（有错误信息）」与「网络抖动（保留状态继续轮询）」）
-  return await request.get('/task_status/' + task_id, { suppressToast: true })
+export const get_task_status = async (
+  task_id: string,
+  options?: { view?: 'full' | 'note'; signal?: AbortSignal },
+) => {
+  // 轮询/阅读专用：抑制全局 toast，失败语义由调用层统一消化
+  // （区分「后端明确失败（有错误信息）」与「网络抖动（保留状态继续轮询）」）。
+  // view=note 只取正文+轻量元信息，不含 transcript / audio_meta.raw_info；
+  // 默认 full 保持 MCP/导出/旧客户端行为。
+  return await request.get('/task_status/' + task_id, {
+    params: options?.view ? { view: options.view } : undefined,
+    signal: options?.signal,
+    suppressToast: true,
+  })
+}
+
+/** 打开「原文」面板时按需取字幕：阅读首屏不再携带 transcript。 */
+export const get_task_transcript = async (task_id: string) => {
+  return await request.get('/task_transcript/' + task_id, { suppressToast: true })
+}
+
+/** 同一视频的历史笔记版本（生成中也能取到上一版）。 */
+export const get_task_versions = async (task_id: string) => {
+  return await request.get('/task_versions/' + task_id, { suppressToast: true })
 }
 
 /**
@@ -89,13 +110,30 @@ export const get_video_meta = async (url: string, platform = 'bilibili') => {
 }
 
 // 后端最近任务列表：生成历史增量同步（自动化任务可见性 / 重启后状态恢复）
-export const get_recent_tasks = async (limit = 80) => {
+// version 是后端状态文件集合的指纹；带上一次的值，未变化时后端只回
+// { unchanged: true }（几百字节），不再每 30s 传整包列表。
+let recentVersion: string | null = null
+
+export const get_recent_tasks = async (
+  limit = 80,
+  options?: { force?: boolean },
+) => {
   try {
-    return await request.get('/tasks/recent', {
-      params: { limit },
+    const res: any = await request.get('/tasks/recent', {
+      params: {
+        limit,
+        ...(options?.force || !recentVersion ? {} : { since: recentVersion }),
+      },
       suppressToast: true,
     })
+    if (res?.version) recentVersion = res.version
+    return res
   } catch {
     return null
   }
+}
+
+/** 重新配对/切 Worker 后指纹失效，下一次同步强制拉整包。 */
+export const resetRecentVersion = () => {
+  recentVersion = null
 }

@@ -4,6 +4,8 @@ import {
   DouyinLogo,
   KuaishouLogo,
   LocalLogo,
+  WechatArticleLogo,
+  WechatChannelsLogo,
   XiaohongshuLogo,
   YoutubeLogo,
 } from '@/components/Icons/platform.tsx'
@@ -13,6 +15,13 @@ export const noteFormats = [
   { label: '原片跳转', value: 'link' },
   { label: '原片截图', value: 'screenshot' },
   { label: 'AI总结', value: 'summary' },
+] as const
+
+/** 原片截图密度：数值是「平均每多少秒最多 1 张」，与后端 screenshot_interval 对应。 */
+export const screenshotDensities = [
+  { label: '精简（约 3 分钟 1 张）', short: '精简', value: 'sparse', seconds: 180 },
+  { label: '标准（约 1.5 分钟 1 张）', short: '标准', value: 'normal', seconds: 90 },
+  { label: '丰富（约 45 秒 1 张）', short: '丰富', value: 'rich', seconds: 45 },
 ] as const
 
 export const noteStyles = [
@@ -33,5 +42,7 @@ export const videoPlatforms = [
   { label: '抖音', value: 'douyin', logo: DouyinLogo },
   { label: '快手', value: 'kuaishou', logo: KuaishouLogo },
   { label: '小红书', value: 'xiaohongshu', logo: XiaohongshuLogo },
+  { label: '公众号', value: 'wechat_article', logo: WechatArticleLogo },
+  { label: '视频号', value: 'wechat_channels', logo: WechatChannelsLogo },
   { label: '本地视频', value: 'local', logo: LocalLogo },
 ] as const

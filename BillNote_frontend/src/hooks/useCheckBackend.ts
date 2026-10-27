@@ -2,14 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiFetch } from '@/utils/apiFetch.ts'
 import { isBackendAlive } from '@/utils/backendAliveProbe.ts'
 
-// 后端就绪检测的几个时间常量
-// - 总等待上限 60s：超过这个时间没就绪就切「启动失败」UI，
-//   不再像旧实现 while(true) 无限转
-// - 轮询间隔 2s：比旧的 10s 更敏感，桌面端 sidecar 5-15s 解压期内能尽快感知就绪
-// - 单次请求超时 5s，避免连接 hang 拖到下一轮
-const TOTAL_TIMEOUT_MS = 60_000
-const POLL_INTERVAL_MS = 2_000
-const PROBE_TIMEOUT_MS = 5_000
+// 后端就绪检测的时间常量
+// - 单次探测超时 10s：远端手机经 Tailscale 首包可能慢，5s 会在资源下载
+//   抢占连接时误杀（表现为「刷很多次才连上」）。
+// - 失败后退避 2→3→5→8→10s，永不终态：Tailscale 路由晚几秒就绪也能
+//   自动连上，不需要用户刷新页面。
+// - 60s 后仍没连上只切「连接失败/仍在重试」UI，轮询继续；真正进程退出
+//   由 Tauri 事件处理。
+const PROBE_TIMEOUT_MS = 10_000
+const DEGRADED_AFTER_MS = 60_000
+const BACKOFF_MS = [2_000, 3_000, 5_000, 8_000, 10_000]
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
@@ -52,12 +54,12 @@ const initialStatus: Status = {
  * 后端就绪检测。
  *
  * 三路信号汇聚：
- *  1. HTTP 轮询 /sys_check —— 所有平台通用
+ *  1. HTTP 轮询 /sys_check —— 所有平台通用；失败只退避，不终态
  *  2. Tauri 'backend-ready' 事件 —— 桌面端 sidecar 探测器先于 HTTP 一步触达
- *  3. Tauri 'backend-terminated' / 'backend-startup-timeout' 事件 —— sidecar 死了或超时
- *     立即进失败态，不再继续轮询（旧实现的 while(true) 就是死在这里）
+ *  3. Tauri 'backend-terminated' / 'backend-startup-timeout' 事件 —— sidecar
+ *     真死了才终态，避免「本轮超时 = 永远失败，只能刷新」
  *
- * 任何一路报「ready」即成功；任何一路报「失败」立即停掉所有轮询。
+ * 任何一路报「ready」即成功；只有 Tauri 确认进程退出才停止轮询。
  */
 export const useCheckBackend = (): BackendCheck => {
   const [status, setStatus] = useState<Status>(initialStatus)
@@ -73,10 +75,11 @@ export const useCheckBackend = (): BackendCheck => {
   }, [])
 
   useEffect(() => {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null
     let pollTimerId: ReturnType<typeof setTimeout> | null = null
     let cancelled = false
     const tauriUnsubs: Array<() => void> = []
+    const startedAt = Date.now()
+    let attempt = 0
 
     const markReady = () => {
       if (cancelled || settledRef.current) return
@@ -98,15 +101,22 @@ export const useCheckBackend = (): BackendCheck => {
         markReady()
         return
       }
-      // 单次失败不报 toast、不抛错，继续轮询
-      setStatus((s) => ({ ...s, lastError: '后端尚未响应' }))
-      pollTimerId = setTimeout(poll, POLL_INTERVAL_MS)
+      // 单次失败不报 toast、不抛错，继续轮询；60s 后只换提示，仍继续。
+      const elapsed = Date.now() - startedAt
+      if (elapsed >= DEGRADED_AFTER_MS) {
+        setStatus({
+          loading: false,
+          initialized: false,
+          failed: true,
+          lastError: `后端连接较慢，正在自动重试（已等待 ${Math.round(elapsed / 1000)}s）`,
+        })
+      } else {
+        setStatus((s) => ({ ...s, lastError: '后端尚未响应，正在重试…' }))
+      }
+      const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)]
+      attempt += 1
+      pollTimerId = setTimeout(poll, delay)
     }
-
-    // 总超时兜底
-    timeoutId = setTimeout(() => {
-      markFailed(`后端 ${TOTAL_TIMEOUT_MS / 1000}s 内未就绪，请检查后端日志或重启`)
-    }, TOTAL_TIMEOUT_MS)
 
     // 桌面端订阅 Tauri 事件（动态 import 避免 web 端打包报错）
     if (isTauri) {
@@ -139,7 +149,6 @@ export const useCheckBackend = (): BackendCheck => {
 
     return () => {
       cancelled = true
-      if (timeoutId) clearTimeout(timeoutId)
       if (pollTimerId) clearTimeout(pollTimerId)
       tauriUnsubs.forEach((off) => {
         try {

@@ -15,6 +15,14 @@ BACKEND_PORT= os.getenv("BACKEND_PORT", 8483)
 BACKEND_BASE_URL = f"{api_path}:{BACKEND_PORT}"
 
 from typing import Optional
+# 原片截图的落盘宽度上限（2026-10-27）：源视频常见 2560/3840 宽，实测单张
+# 4K JPEG 约 180KB、全库 3.5 万张占 6.7GB；阅读端最大只用到 1600px 缩略
+#（放大看细节也用不到 4K）。压到 1920 宽 + q3，单张降到约 85KB，缩放后
+# 仍比展示缩略更清晰。只缩不放：1280 宽的源视频保持原样。
+SCREENSHOT_MAX_WIDTH = 1920
+_SCALE_FILTER = f"scale=min({SCREENSHOT_MAX_WIDTH}\\,iw):-2"
+
+
 def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index: int) -> str:
     """
     使用 ffmpeg 生成截图，返回生成图片路径
@@ -30,7 +38,8 @@ def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index:
         "-ss", str(timestamp),
         "-i", str(video_path),
         "-frames:v", "1",
-        "-q:v", "2",
+        "-vf", _SCALE_FILTER,
+        "-q:v", "3",
         str(output_path),
         "-y"
     ]

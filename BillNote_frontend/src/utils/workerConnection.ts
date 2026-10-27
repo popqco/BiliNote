@@ -86,8 +86,12 @@ export function withPairingToken(url: string): string {
 
 /**
  * 拼 image_proxy 图片地址：走 withPairingToken 统一补 token。
+ * width > 0 时后端按宽缩放并单独缓存（历史卡 320 / 详情 800 / 海报 600）。
  */
-export function buildImageProxyUrl(rawUrl: string): string {
+export function buildImageProxyUrl(rawUrl: string, width?: number): string {
   const apiBase = resolveApiBaseUrl().replace(/\/$/, '')
-  return withPairingToken(`${apiBase}/image_proxy?url=${encodeURIComponent(rawUrl)}`)
+  const w = width && width > 0 ? `&w=${Math.round(width)}` : ''
+  return withPairingToken(
+    `${apiBase}/image_proxy?url=${encodeURIComponent(rawUrl)}${w}`,
+  )
 }

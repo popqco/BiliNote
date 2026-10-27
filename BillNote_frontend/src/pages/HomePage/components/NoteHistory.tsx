@@ -109,6 +109,13 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const filteredTasks = search.trim()
       ? fuse.search(search).map(result => result.item)
       : tasks
+  // 首屏只渲染 40 条：300 张卡常驻会把手机主线程占满（每张两个 TooltipProvider），
+  // 且历史 pane 在笔记 Tab 下仍然挂载。搜索/筛选变化时重置页数。
+  const [visibleCount, setVisibleCount] = useState(40)
+  useEffect(() => {
+    setVisibleCount(40)
+  }, [search])
+  const visibleTasks = filteredTasks.slice(0, visibleCount)
   if (filteredTasks.length === 0) {
     return (
         <>
@@ -142,7 +149,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
         />
       </div>
       <div className="flex flex-col gap-2 overflow-hidden">
-        {filteredTasks.map(task => {
+        {visibleTasks.map(task => {
           const meta = STATUS_META[task.status] || { label: '等待中', cls: 'bg-neutral-200 text-neutral-700 dark:bg-neutral-500/20 dark:text-neutral-200' }
           const statusLabel =
             task.status === 'PENDING' && task.queuePosition
@@ -174,7 +181,7 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
 
                       src={
                         task.audioMeta.cover_url
-                            ? buildImageProxyUrl(task.audioMeta.cover_url)
+                            ? buildImageProxyUrl(task.audioMeta.cover_url, 320)
                             : '/placeholder.png'
                       }
                       alt="封面"
@@ -253,6 +260,16 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
           </div>
           )
         })}
+        {filteredTasks.length > visibleCount && (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            onClick={() => setVisibleCount(c => c + 40)}
+          >
+            加载更多（还有 {filteredTasks.length - visibleCount} 条）
+          </Button>
+        )}
       </div>
     </>
   )

@@ -24,6 +24,7 @@ from app.services.task_state.store import (
     read_result,
     read_status,
     reap_interrupted_tasks,
+    recent_fingerprint,
     write_status,
 )
 
@@ -46,6 +47,7 @@ __all__ = [
     "read_result",
     "read_status",
     "reap_interrupted_tasks",
+    "recent_fingerprint",
     "register_run",
     "release_stale_active_task",
     "request_cancel_task",

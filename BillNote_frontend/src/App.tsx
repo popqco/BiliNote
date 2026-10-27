@@ -52,13 +52,17 @@ function RouteErrorBoundary({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
-  useTaskPolling(3000) // 每 3 秒轮询一次
+  const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  const { loading, initialized, failed, lastError, retry } = useCheckBackend()
+  // 未就绪前不发任何任务请求：旧实现会在 /sys_check 还没通过时同时发
+  // /tasks/recent?limit=300 和 ?limit=120，并顺序补拉最多 120 篇正文，
+  // 和首屏 JS/健康探测抢同源连接，正是「刷很多次才连上」的主因之一。
+  // 手机轮询放宽到 5s（Tailscale + 省电），桌面端保持 3s。
+  useTaskPolling(isDesktopApp ? 3000 : 5000, initialized)
   // 与后端任务列表增量同步：桌面端 5 秒一次——外部（API / 自动化 / MCP 工具）
   // 触发的新任务、重跑与结果更新必须立刻反映到界面，不能等用户手动刷新；
   // 浏览器/手机 Viewer（经 Tailscale）保持 30 秒，省流量与电量。
-  const isDesktopApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-  useTasksSync(isDesktopApp ? 5000 : 30000)
-  const { loading, initialized, failed, lastError, retry } = useCheckBackend()
+  useTasksSync(isDesktopApp ? 5000 : 30000, initialized)
 
   // 渲染进程崩溃自愈重载的落地（Rust 侧重载时带 ?bn_crash=1）：不自动打开
   // 上一篇笔记，停在列表页——避免「重载→又落在重笔记→再崩」的死循环

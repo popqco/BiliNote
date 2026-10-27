@@ -21,7 +21,15 @@ note_styles = [
 
 
 # 生成 BASE_PROMPT 函数
-def generate_base_prompt(title, segment_text, tags, _format=None, style=None, extras=None):
+def generate_base_prompt(
+    title,
+    segment_text,
+    tags,
+    _format=None,
+    style=None,
+    extras=None,
+    screenshot_quota=None,
+):
     # 生成 Base Prompt 开头部分（render_base_prompt 对模板内花括号免疫，
     # LaTeX 示例再添多少 `{...}` 都不会触发 str.format 崩溃，见 prompt.py 注释）
     prompt = render_base_prompt(
@@ -32,7 +40,9 @@ def generate_base_prompt(title, segment_text, tags, _format=None, style=None, ex
 
     # 添加用户选择的格式
     if _format:
-        prompt += "\n" + "\n".join([get_format_function(f) for f in _format])
+        prompt += "\n" + "\n".join(
+            [get_format_function(f, screenshot_quota=screenshot_quota) for f in _format]
+        )
 
     # 根据用户选择的笔记风格添加描述（未知风格返回空串时不追加兜底，
     # 避免无风格任务的 prompt 凭空多一句）
@@ -48,11 +58,11 @@ def generate_base_prompt(title, segment_text, tags, _format=None, style=None, ex
 
 
 # 获取格式函数
-def get_format_function(format_type):
+def get_format_function(format_type, screenshot_quota=None):
     format_map = {
         'toc': get_toc_format,
         'link': get_link_format,
-        'screenshot': get_screenshot_format,
+        'screenshot': lambda: get_screenshot_format(screenshot_quota),
         'summary': get_summary_format
     }
     return format_map.get(format_type, lambda: '')()
@@ -118,10 +128,32 @@ def get_link_format():
     '''
 
 
-def get_screenshot_format():
-    return '''
-11. **原片截图**:你收到的截图一般是一个网格，网格的每张图片就是一个时间点，左上角会包含时间mm:ss的格式，请你结合我发你的图片插入截图提示，请你帮助用户更好的理解视频内容，请你认真的分析每个图片和对应的转写文案，插入最合适的内容来备注用户理解，请一定按照这个格式 返回否则系统无法解析：
-- 格式：`*Screenshot-[mm:ss]`
+def get_screenshot_format(quota=None):
+    """原片截图格式说明（2026-10-27 重写）。
+
+    旧版只有「认真分析每个图片…插入最合适的内容」——模型把网格里每一格都
+    当成必须交代的时间点，实测单篇最多 790 张截图（图片语法占正文 64%）。
+    新版给出明确的取舍标准与数量配额；后端 screenshot_policy 还会做确定性
+    兜底，模型不配合也不会失控。
+    """
+    quota_line = ""
+    if quota:
+        quota_line = (
+            f"\n- **数量配额**：本段最多 {int(quota)} 张截图。宁可少截，也不要为了凑数"
+            "把口播画面、重复画面塞进来；没有值得截的画面就一张都不要插。"
+        )
+    return f'''
+11. **原片截图**：你收到的图片是网格，每格是视频里一个时间点（左上角有 mm:ss）。
+网格只是候选画面，**不是每格都要截**。只有画面本身承载了转写没讲到的信息时才插入：
+- **值得截**：PPT/板书、代码、图表曲线、参数表、软件界面与操作步骤、实物细节、演示结果。
+- **不要截**：说话人头像/纯口播画面、空镜、转场、纯字幕卡、与上下文无关的画面、
+  同一画面换个角度或停留几秒的重复帧。
+- 同一张画面只截一次；前后几格是同一场景时，只保留信息最全的一张。
+- 每个二级章节通常 1~2 张；只有逐步演示类内容（教程/操作）才适当多截。{quota_line}
+- 格式必须逐字遵守，否则系统无法解析：标记单独一行，紧接下一行写一句不超过 20 字的图注。
+  示例：
+  `*Screenshot-[03:24]*`
+  `图注：三相电流的相位关系`
 
     '''
 

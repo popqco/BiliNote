@@ -50,6 +50,19 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
         match = re.search(r"(?:/explore/|/discovery/item/)([\da-fA-F]{24})", candidate)
         return match.group(1).lower() if match else None
 
+    elif platform == "wechat_article":
+        # mp.weixin.qq.com/s/<short_id> 或 /s?__biz=...&sn=...
+        m = re.search(r"/s/([A-Za-z0-9_~-]{10,})", url)
+        if m:
+            return m.group(1).replace("~", "_")
+        m = re.search(r"[?&]sn=([A-Za-z0-9]+)", url)
+        return m.group(1) if m else None
+
+    elif platform == "wechat_channels":
+        # weixin.qq.com/sph/<id> 或 channels.weixin.qq.com/mobile/sf/<id>
+        m = re.search(r"/(?:sph|mobile/sf)/([A-Za-z0-9_-]+)", url)
+        return m.group(1) if m else None
+
     return None
 
 

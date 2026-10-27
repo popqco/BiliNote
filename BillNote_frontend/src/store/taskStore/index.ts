@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
-import { cancel_task, delete_task, generateNote } from '@/services/note.ts'
+import { cancel_task, delete_task, generateNote, get_task_status, get_task_versions } from '@/services/note.ts'
+import { beginForegroundTask, endForegroundTask } from '@/utils/backgroundPriority.ts'
 import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
@@ -28,6 +29,9 @@ export interface AudioMeta {
   raw_info: any
   title: string
   video_id: string
+  /** 轻量笔记视图从 raw_info 里抽出的两个字段（不再整包下发 raw_info） */
+  uploader?: string
+  webpage_url?: string
 }
 
 export interface Segment {
@@ -58,6 +62,12 @@ export interface Task {
   audioMeta: AudioMeta
   /** 进行中提示 / 失败原因（后端 status 文件的 message） */
   message?: string
+  /** 当前笔记正文正在加载（历史概要卡点开后按需拉取） */
+  contentLoading?: boolean
+  /** 当前笔记正文加载失败（已有正文时不清空，仅提示） */
+  contentError?: string
+  /** 后端结果已更新，本地正文是旧的：下次打开时强制刷新（先显示旧内容） */
+  contentStale?: boolean
   /** 排队位次：PENDING 时由后端返回，展示「排队中 · 第 N 位」 */
   queuePosition?: number
   /** 任务来源：manual=界面提交，auto=自动化检查轮创建 */
@@ -117,6 +127,14 @@ interface TaskStore {
   removeTask: (id: string) => void
   clearTasks: () => void
   setCurrentTask: (taskId: string | null) => void
+  /** 点开历史卡：切当前任务并在点击处理器里立刻取正文（不干活的后台同步会暂停）。 */
+  openTask: (taskId: string) => void
+  /** 确保某篇笔记有正文：无正文才拉轻量视图；force 用于失败重试。 */
+  ensureTaskContent: (id: string, options?: { force?: boolean }) => Promise<void>
+  /** 按需加载的转录文本（打开「原文」面板时调用）。 */
+  applyTranscript: (id: string, transcript: Transcript) => void
+  /** 合并后端历史版本（归档旧笔记 + 同视频旧任务），按正文去重。 */
+  mergeServerVersions: (id: string, versions: any[]) => void
   getCurrentTask: () => Task | null
   retryTask: (id: string) => void
   /** 停止正在生成/排队中的任务（后端 /cancel_task）：状态落 CANCELLED，
@@ -155,6 +173,48 @@ const hasMarkdownContent = (md: any): boolean =>
   typeof md === 'string'
     ? !!md.trim()
     : !!(Array.isArray(md) && md.some((v: any) => !!v?.content?.trim()))
+
+const EMPTY_TRANSCRIPT: Transcript = {
+  full_text: '',
+  language: '',
+  raw: null,
+  segments: [],
+}
+
+// 当前笔记正文请求：新的点开会让旧的 abort/失效，旧响应绝不覆盖新笔记。
+let contentAbort: AbortController | null = null
+let contentSeq = 0
+let contentInFlight: string | null = null
+/** 本会话已拉过版本列表的任务：即使本地已有正文（例如轮询先写入当前版），
+ *  也要再拉一次归档版本，否则同一视频的旧版本下拉永远只有一条。 */
+const versionsLoaded = new Set<string>()
+
+/**
+ * 持久化瘦身：只留历史卡需要的概要。
+ *
+ * zustand persist 每次 set 都会同步 JSON.stringify 整个 state——旧实现把
+ * 所有 markdown/transcript/raw_info 一起写，手机上点一下历史卡要先卡住
+ * 序列化几 MB。正文改成点开时按需拉取（view=note，约 8KB gzip）。
+ */
+const stripTaskForPersist = (t: Task): Task => {
+  const audio = t.audioMeta
+    ? ({
+        ...t.audioMeta,
+        raw_info: null,
+        file_path: '',
+        video_path: '',
+      } as any)
+    : t.audioMeta
+  return {
+    ...t,
+    markdown: '',
+    transcript: EMPTY_TRANSCRIPT,
+    audioMeta: audio,
+    contentLoading: false,
+    contentError: undefined,
+    contentStale: false,
+  }
+}
 
 /**
  * 结果文件 audio_meta 落地前的合并：空字段不覆盖本地已有值。
@@ -359,7 +419,9 @@ export const useTaskStore = create<TaskStore>()(
         }
         const patch: any = {
           markdown: result.markdown,
-          transcript: result.transcript,
+          // 轻量视图不带 transcript；只有结果里真有才覆盖，避免把已经
+          // 按需加载好的字幕清空（打开笔记/后台同步都走这条合并入口）。
+          ...(result.transcript ? { transcript: result.transcript } : {}),
           // 空字段不覆盖本地（老结果文件缺封面/标题，整包替换会清掉卡片元数据）
           audioMeta: mergeAudioMeta(task.audioMeta, result.audio_meta),
           queuePosition: undefined,
@@ -383,9 +445,18 @@ export const useTaskStore = create<TaskStore>()(
 
       mergeTaskAudioMeta: (id, meta) =>
         set(state => ({
-          tasks: state.tasks.map(task =>
-            task.id === id ? { ...task, audioMeta: { ...task.audioMeta, ...meta } } : task
-          ),
+          tasks: state.tasks.map(task => {
+            if (task.id !== id) return task
+            // 每 3s 轮询都会带同一份 audio_meta；值没变就别 set——
+            // 旧实现每次 set 都会触发整库持久化，白白卡主线程。
+            const changed = Object.entries(meta || {}).some(([k, v]) => {
+              if (v === undefined || v === null) return false
+              const cur = (task.audioMeta as any)?.[k]
+              if (typeof v === 'object') return JSON.stringify(cur) !== JSON.stringify(v)
+              return cur !== v
+            })
+            return changed ? { ...task, audioMeta: { ...task.audioMeta, ...meta } } : task
+          }),
         })),
 
       addBackendTask: (bt: any, result?: any) =>
@@ -620,6 +691,132 @@ export const useTaskStore = create<TaskStore>()(
       },
 
       setCurrentTask: taskId => set({ currentTaskId: taskId }),
+
+      openTask: taskId => {
+        set({ currentTaskId: taskId })
+        // 在点击处理器里就发请求，不等 Home 的 effect / 下一次 React 提交；
+        // 已有正文会直接命中缓存，不会有网络往返。
+        void get().ensureTaskContent(taskId)
+      },
+
+      ensureTaskContent: async (id, options) => {
+        const task = get().tasks.find(t => t.id === id)
+        if (!task) return
+        const isActive = ACTIVE_STATUSES.includes(task.status)
+        // 生成中也要取正文/历史版本：后端复用 task_id 时旧结果文件还在，
+        // 新版本跑完前用户应当能继续看上一版（2026-10-25 用户反馈）。
+        // 失败/停止但留有旧结果的任务同样要能打开历史版本。
+        const canHaveHistory =
+          isActive ||
+          task.status === 'SUCCESS' ||
+          task.status === 'FAILED' ||
+          task.status === 'FAILD' ||
+          task.status === 'CANCELLED'
+        if (!canHaveHistory) return
+        const hasContent = hasMarkdownContent(task.markdown)
+        // 已有正文也可能只是「当前版」：本会话第一次打开时仍要拉一次版本列表，
+        // 否则同一视频的旧版本（归档文件/旧 task）永远不会出现在下拉里。
+        const needsVersions = !versionsLoaded.has(id)
+        if (hasContent && !options?.force && !task.contentStale && !needsVersions) {
+          if (task.contentLoading || task.contentError) {
+            get().updateTaskContent(id, { contentLoading: false, contentError: undefined })
+          }
+          return
+        }
+        if (contentInFlight === id) return
+
+        // 切笔记：旧请求立刻作废，旧响应不允许写进新笔记。
+        contentAbort?.abort()
+        const ctrl = new AbortController()
+        contentAbort = ctrl
+        const seq = ++contentSeq
+        contentInFlight = id
+        beginForegroundTask()
+        get().updateTaskContent(id, { contentLoading: true, contentError: undefined })
+        try {
+          const [statusResult, versionsResult] = await Promise.allSettled([
+            isActive
+              ? Promise.resolve(null)
+              : get_task_status(id, { view: 'note', signal: ctrl.signal }),
+            get_task_versions(id),
+          ])
+          if (seq !== contentSeq || ctrl.signal.aborted) return
+          const res: any = statusResult.status === 'fulfilled' ? statusResult.value : null
+          const versions: any[] =
+            versionsResult.status === 'fulfilled' && Array.isArray((versionsResult.value as any)?.versions)
+              ? (versionsResult.value as any).versions
+              : []
+          if (versionsResult.status === 'fulfilled') versionsLoaded.add(id)
+          if (res?.result) {
+            // 已有正文时（显式重试/外部更新）必须 force 才能绕过 SUCCESS→SUCCESS 短路。
+            get().applyServerResult(id, res.result, {
+              status: 'SUCCESS',
+              force: hasContent || !!options?.force || !!task.contentStale,
+            })
+          }
+          // 归档版本 / 同视频旧任务：放在当前结果之后合并，后端元信息优先。
+          if (versions.length) get().mergeServerVersions(id, versions)
+          if (!res?.result && !versions.length && !hasContent) {
+            // 首次生成且还没有任何历史版本：保持进度页；失败/停止的任务
+            // 保持各自终态页，不要用「结果不可用」覆盖失败原因。
+            if (isActive || task.status !== 'SUCCESS') return
+            const msg =
+              statusResult.status === 'rejected' && typeof (statusResult.reason as any)?.msg === 'string'
+                ? (statusResult.reason as any).msg
+                : '笔记结果暂不可用，请稍后重试'
+            get().updateTaskContent(id, { contentLoading: false, contentError: msg })
+            return
+          }
+          get().updateTaskContent(id, { contentStale: false })
+        } catch (e: any) {
+          if (seq !== contentSeq || ctrl.signal.aborted) return
+          // 取消请求不是失败；已有正文时保留，不把整篇变成错误页。
+          if (hasContent) return
+          // 生成中/失败/停止的终态视图由各自分支负责，不在这里改成加载失败。
+          if (isActive || task.status !== 'SUCCESS') return
+          const msg = typeof e?.msg === 'string' ? e.msg : '笔记加载失败，请检查网络后重试'
+          get().updateTaskContent(id, { contentLoading: false, contentError: msg })
+        } finally {
+          endForegroundTask()
+          if (seq === contentSeq) {
+            contentInFlight = null
+            // 成功时正文已经写入；这里只负责收掉加载态（不会覆盖正文）。
+            get().updateTaskContent(id, { contentLoading: false })
+          }
+        }
+      },
+
+      mergeServerVersions: (id, versions) => {
+        const task = get().tasks.find(t => t.id === id)
+        if (!task || !Array.isArray(versions) || versions.length === 0) return
+        // 以正文为去重键：同一篇内容可能同时存在于「当前结果 / 归档文件 /
+        // 同视频旧 task」，后端条目覆盖本地条目（它有稳定的 ver_id 和归档时间）。
+        const byContent = new Map<string, Markdown>()
+        const add = (v: any) => {
+          const content = String(v?.content || '').trim()
+          if (!content) return
+          byContent.set(content, {
+            ver_id: String(v?.ver_id || `${id}-server-${byContent.size}`),
+            content,
+            style: String(v?.style || ''),
+            model_name: String(v?.model_name || ''),
+            created_at: String(v?.created_at || ''),
+          })
+        }
+        const prev = task.markdown
+        if (Array.isArray(prev)) prev.forEach(add)
+        else if (typeof prev === 'string' && prev.trim()) {
+          add({ content: prev, created_at: task.createdAt })
+        }
+        versions.forEach(add)
+        const merged = [...byContent.values()].sort(
+          (a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0),
+        )
+        if (merged.length) get().updateTaskContent(id, { markdown: merged })
+      },
+
+      applyTranscript: (id, transcript) =>
+        get().updateTaskContent(id, { transcript }),
     }),
     {
       name: 'task-storage',
@@ -635,6 +832,21 @@ export const useTaskStore = create<TaskStore>()(
           await del(name)
         },
       })),
+      // 只持久化卡片概要：正文/转录/raw_info 点开时按需拉取，避免每次
+      // set 都同步 stringify 整个笔记库（手机上点一下历史卡就卡顿的根因）。
+      partialize: state =>
+        ({
+          tasks: state.tasks.map(stripTaskForPersist),
+          currentTaskId: state.currentTaskId,
+        }) as any,
+      version: 2,
+      migrate: (persisted: any) => {
+        if (!persisted || !Array.isArray(persisted.tasks)) return persisted as any
+        return {
+          ...persisted,
+          tasks: persisted.tasks.map(stripTaskForPersist),
+        } as any
+      },
     }
   )
 )

@@ -38,6 +38,13 @@ const TABS: Array<{ id: MobileTab; label: string; icon: ReactNode }> = [
  */
 const MobileLayout: FC<IProps> = ({ NewForm, HistoryList, NoteView, defaultTab = 'new' }) => {
   const [active, setActive] = useState<MobileTab>(() => readTab(defaultTab))
+  // 历史/笔记 pane 首次访问才挂载，之后保活：看笔记时不再让 300 张历史卡
+  // 和 MarkdownViewer 一起常驻（手机上两者同时挂载会明显拖慢点开速度）。
+  // 新建 pane 始终挂载，避免填到一半的链接/选项被切走清空。
+  const [mountedTabs, setMountedTabs] = useState<Set<MobileTab>>(() => new Set([active]))
+  useEffect(() => {
+    setMountedTabs(prev => (prev.has(active) ? prev : new Set(prev).add(active)))
+  }, [active])
   // 配对状态要响应变化（配对页保存后回首页横幅应消失）：用 state 存，
   // 配对/断开事件里刷新，而非每次渲染重读 localStorage。
   const [hasUnpaired, setHasUnpaired] = useState(() => !loadWorkerConnection())
@@ -90,8 +97,14 @@ const MobileLayout: FC<IProps> = ({ NewForm, HistoryList, NoteView, defaultTab =
           是真·固定，不随内容滑动。 */}
       <main className="min-h-0 flex-1 overflow-hidden">
         <div className={active === 'new' ? 'h-full overflow-y-auto p-4 pb-8' : 'hidden'}>{NewForm}</div>
-        <div className={active === 'history' ? 'h-full overflow-y-auto p-4 pb-8' : 'hidden'}>{HistoryList}</div>
-        <div className={active === 'note' ? 'h-full overflow-hidden' : 'hidden'}>{NoteView}</div>
+        {mountedTabs.has('history') && (
+          <div className={active === 'history' ? 'h-full overflow-y-auto p-4 pb-8' : 'hidden'}>
+            {HistoryList}
+          </div>
+        )}
+        {mountedTabs.has('note') && (
+          <div className={active === 'note' ? 'h-full overflow-hidden' : 'hidden'}>{NoteView}</div>
+        )}
       </main>
 
       <nav className="border-border bg-card grid shrink-0 grid-cols-4 border-t pb-[env(safe-area-inset-bottom)]">

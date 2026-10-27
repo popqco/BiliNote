@@ -2,6 +2,7 @@ import toast from 'react-hot-toast'
 import { useEffect, useRef, useState } from 'react'
 import { Switch } from '@/components/ui/switch.tsx'
 import { Input } from '@/components/ui/input.tsx'
+import { Button } from '@/components/ui/button.tsx'
 import {
   Select,
   SelectContent,
@@ -11,6 +12,12 @@ import {
 } from '@/components/ui/select.tsx'
 import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
 import { get_task_config, save_task_config, type TaskConfig } from '@/services/taskConfig.ts'
+import {
+  get_screenshot_stats,
+  slim_screenshots,
+  type ScreenshotStats,
+  type SlimResult,
+} from '@/services/maintenance.ts'
 
 /**
  * 「通用」设置：放不属于模型/转写/下载/自动化/外观的全局开关。
@@ -33,6 +40,8 @@ const TASK_CFG_LIMITS: Record<keyof TaskConfig, [number, number]> = {
   frame_budget: [100, 200000],
   image_budget: [10, 50000],
   summarize_batch_concurrency: [1, 4],
+  screenshot_interval: [20, 900],
+  screenshot_max_count: [3, 200],
 }
 
 const TASK_CFG_META: Array<{
@@ -65,6 +74,18 @@ const TASK_CFG_META: Array<{
     desc: '长视频分批总结时同时发几批。调大提速明显，但上游并发限流时会多失败重试；1 = 旧的逐批串行。',
     suffix: '批',
   },
+  {
+    key: 'screenshot_interval',
+    label: '截图平均间隔',
+    desc: '原片截图平均每多少秒最多 1 张（越小越密）。生成时同时约束模型配额与后处理，超出的标记直接丢弃，不再逐帧截图。',
+    suffix: '秒',
+  },
+  {
+    key: 'screenshot_max_count',
+    label: '单篇截图上限',
+    desc: '一篇笔记最多保留多少张原片截图（还会受视频时长约束）。默认 60；调小更清爽，调大保留更多画面细节。',
+    suffix: '张',
+  },
 ]
 const General = () => {
   const pollEnabled = useSystemStore(s => s.clipboardPollEnabled)
@@ -81,6 +102,14 @@ const General = () => {
   const setDragScroll = useSystemStore(s => s.setDragScrollEnabled)
 
   const [taskCfg, setTaskCfg] = useState<TaskConfig | null>(null)
+  // 原片截图维护（2026-10-27）：体检结果、预览、执行结果
+  const [shotStats, setShotStats] = useState<ScreenshotStats | null>(null)
+  const [shotStatsLoading, setShotStatsLoading] = useState(false)
+  const [slimBusy, setSlimBusy] = useState(false)
+  const [slimMin, setSlimMin] = useState('100')
+  const [slimPreview, setSlimPreview] = useState<SlimResult | null>(null)
+  const [slimConfirm, setSlimConfirm] = useState(false)
+  const [slimDone, setSlimDone] = useState<SlimResult | null>(null)
   // 服务器确认过的基线。注意不能拿 taskCfg 当比较基准：onChange 打字过程
   // 已把输入值同步进 taskCfg，失焦时 v !== taskCfg[key] 恒为 false，POST 永远
   // 发不出去（2026-10-11 的"设置不保存"bug 根因）。savedRef 只被
@@ -147,6 +176,49 @@ const General = () => {
       return
     }
     setPollIntervalSec(n)
+  }
+
+  /* ---------------- 原片截图维护 ---------------- */
+
+  const loadShotStats = async () => {
+    setShotStatsLoading(true)
+    try {
+      setShotStats(await get_screenshot_stats())
+    } catch (e: any) {
+      toast.error(e?.msg || '截图体检失败（后端可能未更新）')
+    } finally {
+      setShotStatsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadShotStats()
+  }, [])
+
+  const runSlim = async (dryRun: boolean) => {
+    setSlimBusy(true)
+    try {
+      const result = await slim_screenshots({
+        dry_run: dryRun,
+        min_images: Number(slimMin) || 0,
+      })
+      if (dryRun) {
+        setSlimPreview(result)
+        setSlimConfirm(false)
+      } else {
+        setSlimDone(result)
+        setSlimPreview(null)
+        setSlimConfirm(false)
+        toast.success(
+          `已瘦身 ${result.notes_changed} 篇：${result.images_before} → ${result.images_after} 张`,
+        )
+        void loadShotStats()
+      }
+    } catch (e: any) {
+      toast.error(e?.msg || (dryRun ? '预览失败' : '瘦身失败'))
+    } finally {
+      setSlimBusy(false)
+    }
   }
 
   return (
@@ -320,6 +392,100 @@ const General = () => {
             </div>
           </div>
         ))}
+      </div>
+
+      <div className="border-border mt-4 max-w-3xl rounded-lg border p-4">
+        <div className="text-sm font-medium">原片截图维护</div>
+        <div className="text-muted-foreground mt-1 text-xs">
+          检查现有笔记的截图数量，并按当前密度（每 {shotStats?.interval ?? 90} 秒最多 1 张、
+          单篇上限 {shotStats?.max_count ?? 60} 张）一次性瘦身。执行前会把旧正文自动归档为一个版本，
+          可在笔记右上角的版本下拉里切回；只改正文引用，不删除图片文件。
+        </div>
+
+        {shotStats ? (
+          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-5">
+            <div>笔记 {shotStats.notes}</div>
+            <div>带图 {shotStats.notes_with_shots}</div>
+            <div>截图 {shotStats.images.toLocaleString()}</div>
+            <div>超限 {shotStats.over_limit}</div>
+            <div>磁盘 {(shotStats.disk.bytes / 1024 ** 3).toFixed(1)} GB</div>
+          </div>
+        ) : (
+          <div className="text-muted-foreground mt-3 text-xs">
+            {shotStatsLoading ? '正在体检…' : '暂无数据'}
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void loadShotStats()}
+            disabled={shotStatsLoading || slimBusy}
+          >
+            {shotStatsLoading ? '体检中…' : '重新体检'}
+          </Button>
+          <Select value={slimMin} onValueChange={setSlimMin} disabled={slimBusy}>
+            <SelectTrigger className="w-40">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="50">仅 ≥50 张</SelectItem>
+              <SelectItem value="100">仅 ≥100 张</SelectItem>
+              <SelectItem value="200">仅 ≥200 张</SelectItem>
+              <SelectItem value="0">全部超限笔记</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void runSlim(true)}
+            disabled={slimBusy}
+          >
+            {slimBusy ? '处理中…' : '预览瘦身'}
+          </Button>
+          {slimConfirm ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => void runSlim(false)}
+              disabled={slimBusy}
+            >
+              {slimBusy ? '执行中…' : '确认执行（旧版本自动归档）'}
+            </Button>
+          ) : (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setSlimConfirm(true)}
+              disabled={slimBusy}
+            >
+              执行瘦身
+            </Button>
+          )}
+        </div>
+
+        {slimPreview && (
+          <div className="text-muted-foreground border-border mt-3 rounded-md border p-2 text-xs">
+            预览：影响 {slimPreview.notes_scanned} 篇中的 {slimPreview.notes_changed} 篇，
+            {slimPreview.images_before.toLocaleString()} →{' '}
+            {slimPreview.images_after.toLocaleString()} 张
+            {slimPreview.skipped_active > 0 &&
+              `（${slimPreview.skipped_active} 篇生成中已跳过）`}
+            {slimPreview.details.slice(0, 5).map(item => (
+              <div key={item.task_id} className="mt-1 truncate">
+                · {item.title || item.task_id.slice(0, 8)}：{item.before} → {item.after}
+              </div>
+            ))}
+          </div>
+        )}
+        {slimDone && (
+          <div className="text-muted-foreground mt-3 text-xs">
+            已完成：{slimDone.notes_changed} 篇，
+            {slimDone.images_before.toLocaleString()} →{' '}
+            {slimDone.images_after.toLocaleString()} 张。
+          </div>
+        )}
       </div>
     </div>
   )

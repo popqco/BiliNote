@@ -13,18 +13,22 @@ const platformLabel: Record<string, string> = {
   youtube: 'YouTube',
   douyin: '抖音',
   xiaohongshu: '小红书',
+  wechat_article: '微信公众号',
+  wechat_channels: '微信视频号',
 }
 
 export default function VideoBanner({ audioMeta, videoUrl }: VideoBannerProps) {
   if (!audioMeta) return null
 
   const rawCover = audioMeta.cover_url
-  // 通过后端代理加载封面，避免跨域/Referrer 限制（已配对 Viewer 自动带 token）
-  const coverUrl = rawCover ? buildImageProxyUrl(rawCover) : ''
+  // 通过后端代理加载封面，避免跨域/Referrer 限制（已配对 Viewer 自动带 token）。
+  // w=800：手机整宽/桌面 112px 缩略都够清晰，体积约为原图的 1/4。
+  const coverUrl = rawCover ? buildImageProxyUrl(rawCover, 800) : ''
   const title = audioMeta.title
-  const uploader = audioMeta.raw_info?.uploader || ''
+  // 轻量笔记视图把 raw_info 里的两个字段拍平了；老数据仍回退 raw_info。
+  const uploader = audioMeta.uploader || audioMeta.raw_info?.uploader || ''
   const platform = platformLabel[audioMeta.platform] || audioMeta.platform || ''
-  const originalUrl = videoUrl || audioMeta.raw_info?.webpage_url || ''
+  const originalUrl = videoUrl || audioMeta.webpage_url || audioMeta.raw_info?.webpage_url || ''
 
   return (
     <div className="bg-slate-800 relative mb-4 overflow-hidden rounded-lg">

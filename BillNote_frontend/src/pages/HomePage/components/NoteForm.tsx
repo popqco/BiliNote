@@ -46,7 +46,7 @@ import {
 } from '@/components/ui/select.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx' // ExtrasPresetBlock 内备注框用（方案 C 下拉附着）
-import { noteStyles, noteFormats, videoPlatforms } from '@/constant/note.ts'
+import { noteStyles, noteFormats, videoPlatforms, screenshotDensities } from '@/constant/note.ts'
 import { fetchModels } from '@/services/model.ts'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
@@ -79,6 +79,8 @@ const formSchema = z
       .tuple([z.coerce.number().min(1).max(10), z.coerce.number().min(1).max(10)])
       .default([2, 2])
       .optional(),
+    // 原片截图密度：控制模型与后处理的截图预算（2026-10-27）
+    screenshot_density: z.enum(['sparse', 'normal', 'rich']).default('normal').optional(),
   })
   .superRefine(({ video_url, platform }, ctx) => {
     if (platform === 'local') {
@@ -346,6 +348,7 @@ const NoteForm = () => {
       video_understanding: lastOptions?.video_understanding ?? false,
       video_interval: lastOptions?.video_interval ?? 6,
       grid_size: lastOptions?.grid_size ?? [2, 2],
+      screenshot_density: lastOptions?.screenshot_density ?? 'normal',
       format: lastOptions?.format ?? [],
     },
   })
@@ -354,6 +357,9 @@ const NoteForm = () => {
   /* ---- 派生状态（只 watch 一次，提高性能） ---- */
   const platform = useWatch({ control: form.control, name: 'platform' }) as string
   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
+  // 截图密度只在勾了「原片截图」格式时才有意义（否则后端不会插一张图）
+  const selectedFormats = useWatch({ control: form.control, name: 'format' }) as string[] | undefined
+  const screenshotFormatEnabled = !!selectedFormats?.includes('screenshot')
   const editing = currentTask && currentTask.id
 
   const goModelAdd = () => {
@@ -418,6 +424,8 @@ const NoteForm = () => {
         formData.video_understanding ?? last?.video_understanding ?? false,
       video_interval: formData.video_interval ?? last?.video_interval ?? 6,
       grid_size: formData.grid_size ?? last?.grid_size ?? [2, 2],
+      screenshot_density:
+        (formData as any).screenshot_density ?? last?.screenshot_density ?? 'normal',
       format: formData.format ?? last?.format ?? [],
     })
   }, [
@@ -687,7 +695,7 @@ const NoteForm = () => {
           <FormButton></FormButton>
 
           {/* 视频链接 & 平台 */}
-          <SectionHeader title="视频链接" tip="支持 B 站、YouTube、抖音、快手、小红书等平台" />
+          <SectionHeader title="视频链接" tip="支持 B 站、YouTube、抖音、快手、小红书、公众号、视频号等平台" />
           <div className="flex gap-2">
             {/* 平台选择 */}
 
@@ -735,7 +743,15 @@ const NoteForm = () => {
                   ) : (
                     <Input
                       disabled={!!editing}
-                      placeholder={platform === 'xiaohongshu' ? '请输入小红书视频笔记链接（暂不支持图文笔记）' : '请输入视频网站链接'}
+                      placeholder={
+                        platform === 'xiaohongshu'
+                          ? '请输入小红书视频笔记链接（暂不支持图文笔记）'
+                          : platform === 'wechat_article'
+                            ? '粘贴公众号文章链接（mp.weixin.qq.com/s/...）'
+                            : platform === 'wechat_channels'
+                              ? '粘贴视频号分享链接（weixin.qq.com/sph/...）'
+                              : '请输入视频网站链接'
+                      }
                       {...field}
                     />
                   )}
@@ -747,6 +763,17 @@ const NoteForm = () => {
           {platform === 'xiaohongshu' && (
             <p className="text-xs text-muted-foreground">
               小红书仅支持视频笔记（图文笔记无音频，无法生成）；首次使用请先到「设置 → 下载器配置 → 小红书」填入已登录 Cookie。
+            </p>
+          )}
+          {platform === 'wechat_article' && (
+            <p className="text-xs text-muted-foreground">
+              公众号：抓取文章内嵌视频，无需 Cookie。下载时会自动调用本机 Edge 打开文章，约多花 10 秒。
+              若文章内嵌的是视频号内容，请改用「视频号」平台。
+            </p>
+          )}
+          {platform === 'wechat_channels' && (
+            <p className="text-xs text-muted-foreground">
+              视频号：首次使用请先到「设置 → 下载器配置 → 视频号」点击「扫码登录元宝」，获取解析所需登录态。
             </p>
           )}
 
@@ -945,6 +972,35 @@ const NoteForm = () => {
                         className="w-16"
                       />
                     </div>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              {/* 截图密度：给模型和后处理一个明确的截图预算 */}
+              <FormField
+                control={form.control}
+                name="screenshot_density"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>截图密度</FormLabel>
+                    <Select
+                      disabled={!videoUnderstandingEnabled || !screenshotFormatEnabled}
+                      value={field.value || 'normal'}
+                      onValueChange={field.onChange}
+                    >
+                      <FormControl>
+                        <SelectTrigger className="w-full min-w-0">
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {screenshotDensities.map(item => (
+                          <SelectItem key={item.value} value={item.value}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <FormMessage />
                   </FormItem>
                 )}

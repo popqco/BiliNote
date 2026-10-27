@@ -5,7 +5,10 @@
 - 并行：max_workers（同时生成的笔记数，改动热生效）；
 - 视频理解预算：frame_budget（单任务抽帧总数上限）/ image_budget（喂给模型的
   拼图数量上限），见 note._adapt_frame_budget；
-- 总结：summarize_batch_concurrency（分批总结时的并发批次数）。
+- 总结：summarize_batch_concurrency（分批总结时的并发批次数）；
+- 原片截图密度：screenshot_interval（平均每多少秒最多 1 张）/
+  screenshot_max_count（单篇上限），见 note._insert_screenshots 与
+  utils/screenshot_policy.py。
 
 取值优先级：配置文件 > 环境变量 > 内置默认。默认 4800/1000 是 2026-10-11
 用户定版的激进档（旧档 2400/500）；环境变量保留作部署侧逃生口——一旦在 UI
@@ -24,6 +27,8 @@ DEFAULT_CONFIG: Dict[str, int] = {
     "frame_budget": 4800,              # 单任务抽帧总数上限（旧档 2400）
     "image_budget": 1000,              # 喂给模型的拼图数量上限（旧档 500）
     "summarize_batch_concurrency": 2,  # 分批总结的并发批次数
+    "screenshot_interval": 90,         # 原片截图平均间隔（秒）；越小越密
+    "screenshot_max_count": 60,        # 单篇原片截图上限
 }
 
 # key -> (环境变量名, 下限, 上限)
@@ -32,6 +37,8 @@ _LIMITS: Dict[str, tuple] = {
     "frame_budget": ("FRAME_BUDGET", 100, 200_000),
     "image_budget": ("IMAGE_BUDGET", 10, 50_000),
     "summarize_batch_concurrency": ("SUMMARIZE_BATCH_CONCURRENCY", 1, 8),
+    "screenshot_interval": ("SCREENSHOT_INTERVAL", 20, 900),
+    "screenshot_max_count": ("SCREENSHOT_MAX_COUNT", 3, 200),
 }
 
 

@@ -22,6 +22,10 @@ import {
   startBilibiliQrLogin,
   pollBilibiliQrLogin,
   refreshBilibiliCookie,
+  getYuanbaoLoginStatus,
+  startYuanbaoLogin,
+  cancelYuanbaoLogin,
+  clearYuanbaoCookie,
 } from '@/services/downloader' // 你自定义的请求
 import { useParams } from 'react-router-dom'
 import { videoPlatforms } from '@/constant/note.ts'
@@ -41,11 +45,27 @@ const DownloaderForm = () => {
   const { id } = useParams()
   const isBilibili = id === 'bilibili'
   const isYoutube = id === 'youtube'
+  const isWechatChannels = id === 'wechat_channels'
+  const isWechatArticle = id === 'wechat_article'
 
   const [loading, setLoading] = useState(true)
   const [authStatus, setAuthStatus] = useState<any>(null)
   const [qr, setQr] = useState<{ qr_url: string; qrcode_key: string } | null>(null)
   const [qrStatus, setQrStatus] = useState('')
+  const [yb, setYb] = useState<any>({ status: 'idle', message: '', has_cookie: false })
+
+  const loadCookie = async () => {
+    setLoading(true) // 🔁 切换平台时显示 loading
+    try {
+      const res = await getDownloaderCookie(id)
+      form.reset({ cookie: res?.cookie || '' }) // ✅ 正确重置表单值
+    } catch (e) {
+      toast.error('加载 Cookie 失败: ' + e)
+      form.reset({ cookie: '' }) // ❗失败时也要清空旧值
+    } finally {
+      setLoading(false)
+    }
+  }
 
   const loadAuthStatus = async () => {
     if (!isBilibili) return
@@ -56,36 +76,32 @@ const DownloaderForm = () => {
     }
   }
 
-  useEffect(() => {
-    const loadCookie = async () => {
-      setLoading(true) // 🔁 切换平台时显示 loading
-      try {
-        const res = await getDownloaderCookie(id)
-        const cookie = res?.cookie || ''
-        form.reset({ cookie }) // ✅ 正确重置表单值
-      } catch (e) {
-        toast.error('加载 Cookie 失败: ' + e)
-        form.reset({ cookie: '' }) // ❗失败时也要清空旧值
-      } finally {
-        setLoading(false)
-      }
+  const loadYuanbaoStatus = async () => {
+    if (!isWechatChannels) return
+    try {
+      setYb(await getYuanbaoLoginStatus())
+    } catch {
+      // 静默：状态查询失败不影响手动粘贴 Cookie
     }
+  }
 
+  useEffect(() => {
     if (id) {
       loadCookie()
       loadAuthStatus()
+      loadYuanbaoStatus()
       setQr(null)
       setQrStatus('')
     }
   }, [id]) // 🔁 每当 id 变化时触发
 
-  // 扫码状态轮询：confirmed / expired 时停止
+  // B 站扫码状态轮询：confirmed / expired 时停止
   useEffect(() => {
     if (!qr || qrStatus === 'confirmed' || qrStatus === 'expired') return
     const timer = setInterval(async () => {
       try {
-        const res = await pollBilibiliQrLogin(qr.qrcode_key)
-        const st = res?.status || 'waiting'
+        const res: any = await pollBilibiliQrLogin(qr.qrcode_key)
+        const st: any = res?.status || 'waiting'
         setQrStatus(st)
         if (st === 'confirmed') {
           toast.success('扫码登录成功，该账号的 Cookie 此后会自动续期')
@@ -100,6 +116,27 @@ const DownloaderForm = () => {
     return () => clearInterval(timer)
   }, [qr, qrStatus])
 
+  // 元宝扫码状态轮询：后端窗口关闭/成功/失败即停止
+  useEffect(() => {
+    if (!isWechatChannels || yb?.status !== 'running') return
+    const timer = setInterval(async () => {
+      try {
+        const st: any = await getYuanbaoLoginStatus()
+        setYb(st)
+        if (st?.status === 'success') {
+          toast.success('元宝登录成功，视频号解析已可用')
+          loadCookie()
+        }
+        if (['success', 'failed', 'cancelled'].includes(st?.status)) {
+          clearInterval(timer)
+        }
+      } catch {
+        // 静默：下个周期重试
+      }
+    }, 2000)
+    return () => clearInterval(timer)
+  }, [isWechatChannels, yb?.status])
+
   const onStartQr = async () => {
     try {
       const res = await startBilibiliQrLogin()
@@ -112,9 +149,40 @@ const DownloaderForm = () => {
 
   const onRefreshCookie = async () => {
     try {
-      const res = await refreshBilibiliCookie()
-      toast.success(res?.msg || '检查完成')
+      await refreshBilibiliCookie()
+      toast.success('检查完成')
       loadAuthStatus()
+    } catch {
+      // 拦截器已 toast 具体原因
+    }
+  }
+
+  const onStartYuanbao = async () => {
+    try {
+      const res = await startYuanbaoLogin()
+      setYb(res || { status: 'running' })
+      toast.success('已打开登录窗口：请用微信扫码登录腾讯元宝')
+    } catch {
+      // 拦截器已 toast 具体原因
+    }
+  }
+
+  const onCancelYuanbao = async () => {
+    try {
+      const res = await cancelYuanbaoLogin()
+      setYb(res || { ...yb, status: 'cancelled' })
+      toast('已取消扫码登录')
+    } catch {
+      // 拦截器已 toast 具体原因
+    }
+  }
+
+  const onClearYuanbao = async () => {
+    try {
+      const res = await clearYuanbaoCookie()
+      setYb(res || { status: 'idle', message: '', has_cookie: false })
+      form.reset({ cookie: '' })
+      toast.success('已清除元宝登录态')
     } catch {
       // 拦截器已 toast 具体原因
     }
@@ -128,12 +196,31 @@ const DownloaderForm = () => {
       })
       toast.success('保存成功')
       loadAuthStatus()
+      loadYuanbaoStatus()
     } catch (e) {
       toast.error('保存失败')
     }
   }
 
   if (loading) return <div className="p-4">加载中...</div>
+
+  // 公众号视频不需要登录态，也不该让用户误以为要填 Cookie
+  if (isWechatArticle) {
+    return (
+      <div className="flex max-w-xl flex-col gap-3 p-4">
+        <div className="text-lg font-bold">微信公众号</div>
+        <p className="text-sm text-muted-foreground">
+          公众号文章视频使用本机 Microsoft Edge / Google Chrome 的真实浏览器会话抓取，无需 Cookie。
+        </p>
+        <p className="text-sm text-muted-foreground">
+          生成笔记时会自动打开一次无头浏览器（约多花 10 秒）；请在 Worker 本机安装 Edge 或 Chrome。
+        </p>
+        <p className="text-sm text-muted-foreground">
+          如果文章里嵌入的是视频号内容，请改用「视频号」平台并粘贴视频号分享链接。
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="max-w-xl p-4">
@@ -180,12 +267,54 @@ const DownloaderForm = () => {
             </div>
           )}
 
+          {isWechatChannels && (
+            <div className="flex flex-col gap-2 rounded-md border p-3">
+              <div className="text-sm font-semibold">腾讯元宝扫码登录（视频号解析必需）</div>
+              <div className="text-xs text-muted-foreground">
+                微信视频号不提供匿名播放地址，官方开源方案都依赖腾讯元宝的登录态。
+                点击下方按钮会在 Worker 本机打开一个浏览器窗口，用微信扫码登录元宝即可；
+                登录态只保存在本机 config/downloader.json，不会上传。
+                <br />
+                当前状态：
+                <span className={yb?.has_cookie ? 'text-green-600' : 'text-amber-600'}>
+                  {yb?.has_cookie ? '已登录元宝' : '未登录'}
+                </span>
+                {yb?.message ? `（${yb.message}）` : ''}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={onStartYuanbao}
+                  disabled={yb?.status === 'running'}
+                >
+                  {yb?.status === 'running' ? '等待扫码…' : yb?.has_cookie ? '重新扫码登录' : '扫码登录元宝'}
+                </Button>
+                {yb?.status === 'running' && (
+                  <Button type="button" variant="outline" onClick={onCancelYuanbao}>
+                    取消
+                  </Button>
+                )}
+                {yb?.has_cookie && (
+                  <Button type="button" variant="outline" onClick={onClearYuanbao}>
+                    清除登录态
+                  </Button>
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                扫码登录需要在 Worker 本机操作；远端手机端可让本机先登录，之后直接解析。
+              </div>
+            </div>
+          )}
+
           <FormField
             control={form.control}
             name="cookie"
             render={({ field }) => (
               <FormItem className="flex flex-col gap-2">
-                <FormLabel>Cookie</FormLabel>
+                <FormLabel>
+                  Cookie{isWechatChannels ? '（扫码失败时可手动粘贴元宝 Cookie）' : ''}
+                </FormLabel>
                 <FormControl>
                   {isYoutube ? (
                     <Textarea
@@ -198,6 +327,13 @@ const DownloaderForm = () => {
                         '也可以仅粘贴一行 Cookie 串（k=v; k=v; …）。\n' +
                         '年龄限制视频（提示 Sign in to confirm your age）必须填写。'
                       }
+                    />
+                  ) : isWechatChannels ? (
+                    <Textarea
+                      {...field}
+                      rows={6}
+                      className="font-mono text-xs"
+                      placeholder="粘贴 yuanbao.tencent.com 的完整 Cookie（需包含 hy_token）"
                     />
                   ) : (
                     <Input {...field} placeholder="输入 Cookie（也可粘贴完整 Cookie 串）" />

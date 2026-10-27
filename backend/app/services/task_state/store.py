@@ -15,6 +15,7 @@
 进程内的 run 身份、取消墓碑与活跃登记在 ``runs.py``；本模块不反向 import 它，
 只有 reap 需要判断活跃任务时做一次惰性 import。
 """
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, List, Optional, Union
@@ -34,6 +35,8 @@ _TASK_ARTIFACT_SUFFIXES = (
     "_markdown.md",
     "_markdown.status.json",
     "_markdown.gpt.checkpoint.json",
+    # 同视频重新生成时归档的旧笔记版本（note_versions.py）
+    "_versions.json",
 )
 
 
@@ -107,7 +110,12 @@ def merge_status_meta(
     run: Any = None,
     root: Optional[Path] = None,
 ) -> None:
-    """只并附加字段，不改变当前 status。"""
+    """只并附加字段，不改变当前 status。
+
+    元信息抓取失败时调用方会带着 title/cover_url=None、duration=0 来合并；
+    直接 update 会把排队阶段已经拿到的标题/封面覆盖成空（历史卡片变回
+    「未命名笔记」）。这里对 None/空值做「不覆盖已有非空值」处理。
+    """
     if not task_id:
         return
     if run is not None and getattr(run, "task_id", None) == task_id and getattr(run, "superseded", False):
@@ -115,7 +123,21 @@ def merge_status_meta(
     store = _status_store(task_id, root)
     data = store.read()
     data.setdefault("status", TaskStatus.PENDING.value)
-    data.update(extra or {})
+    incoming = dict(extra or {})
+    audio_extra = incoming.pop("audio_meta", None)
+    empty = (None, "", 0, [], {})
+    for key, value in incoming.items():
+        if value in empty and data.get(key) not in empty:
+            continue
+        data[key] = value
+    if isinstance(audio_extra, dict):
+        current = data.get("audio_meta")
+        merged = dict(current) if isinstance(current, dict) else {}
+        for key, value in audio_extra.items():
+            if value in empty and merged.get(key) not in empty:
+                continue
+            merged[key] = value
+        data["audio_meta"] = merged
     store.write(data)
 
 
@@ -165,6 +187,34 @@ def find_active_task_by_video(video_id: str, root: Optional[Path] = None) -> Opt
             continue
         return {"task_id": stem, "status": data.get("status")}
     return None
+
+
+def recent_fingerprint(root: Optional[Path] = None) -> str:
+    """状态文件集合的轻量指纹：只 stat，不解析。
+
+    /tasks/recent 原本每次都要 glob + 逐文件 parse（实测 130ms），手机每
+    30s 轮询一次、并发时线性变慢。前端带上一次拿到的 version，指纹没变
+    就直接返回 unchanged，省掉解析和整包传输。mtime_ns + size 覆盖
+    原子写（tmp+replace）产生的任何内容变化。
+    """
+    base = _resolve_root(root)
+    h = hashlib.sha1()
+    try:
+        paths = sorted(base.glob("*.status.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        h.update(path.name.encode("utf-8", "ignore"))
+        h.update(b"|")
+        h.update(str(st.st_mtime_ns).encode())
+        h.update(b"|")
+        h.update(str(st.st_size).encode())
+        h.update(b"\n")
+    return h.hexdigest()[:16]
 
 
 def list_recent_tasks(limit: int = 80, root: Optional[Path] = None) -> List[dict]:

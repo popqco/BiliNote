@@ -1,13 +1,16 @@
-import { FC, useEffect, useRef, useState } from 'react'
+import { FC, Suspense, lazy, useEffect, useState } from 'react'
 import HomeLayout from '@/layouts/HomeLayout.tsx'
 import MobileLayout from '@/layouts/MobileLayout.tsx'
 import NoteForm from '@/pages/HomePage/components/NoteForm.tsx'
-import MarkdownViewer from '@/pages/HomePage/components/MarkdownViewer.tsx'
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, ACTIVE_STATUSES } from '@/store/taskStore'
 import { useIsMobile } from '@/hooks/useIsMobile.ts'
 import History from '@/pages/HomePage/components/History.tsx'
 import ErrorBoundary from '@/components/ErrorBoundary.tsx'
-import { get_task_status } from '@/services/note.ts'
+
+// 首屏不预载 markdown/markmap 两个大分包（gzip 合计约 600KB）：
+// 远端手机先拿到表单/历史，真正打开笔记时再按需下载阅读器。
+const MarkdownViewer = lazy(() => import('@/pages/HomePage/components/MarkdownViewer.tsx'))
+
 type ViewStatus = 'idle' | 'loading' | 'success' | 'failed' | 'stopped'
 export const HomePage: FC = () => {
   const tasks = useTaskStore(state => state.tasks)
@@ -16,8 +19,7 @@ export const HomePage: FC = () => {
   const currentTask = tasks.find(t => t.id === currentTaskId)
 
   const [status, setStatus] = useState<ViewStatus>('idle')
-
-  const content = currentTask?.markdown || ''
+  const ensureTaskContent = useTaskStore(state => state.ensureTaskContent)
 
   // 剪贴板监听已移到全局 <GlobalClipboardWatcher />（App 内 Router 下挂载），
   // 切到设置页时轮询不中断；这里不再重复挂载，避免双跑弹两次。
@@ -39,28 +41,32 @@ export const HomePage: FC = () => {
     }
   }, [currentTask, currentTask?.status])
 
-  // 历史全量回填的任务只有概要（无正文）：点开后这里补拉一次结果。
-  // 回填不批量拉正文（几十篇一次灌进 IndexedDB 太重），按需取这一篇。
-  const lazyLoadingRef = useRef<Set<string>>(new Set())
+  // 历史概要卡只有标题/状态，没有正文：进入当前笔记时确保正文就位。
+  // 有正文（含刷新后从其它路径写入的缓存）直接显示；没有才拉轻量视图。
+  // contentStale 表示后端结果被外部重写过，本次打开时静默换成新内容。
   useEffect(() => {
-    if (!currentTask || currentTask.status !== 'SUCCESS') return
+    if (!currentTask) return
     const md: any = currentTask.markdown
-    if (typeof md === 'string' ? md.trim() : md?.[0]?.content) return
-    const id = currentTask.id
-    if (lazyLoadingRef.current.has(id)) return
-    lazyLoadingRef.current.add(id)
-    ;(async () => {
-      try {
-        const res: any = await get_task_status(id)
-        if (!res?.result) return
-        useTaskStore.getState().applyServerResult(id, res.result)
-      } catch {
-        // 概要仍在；重新点开这条笔记会再次尝试
-      } finally {
-        lazyLoadingRef.current.delete(id)
+    const hasContent = typeof md === 'string' ? !!md.trim() : !!md?.[0]?.content
+    // 生成中也要尝试加载历史版本：后端在覆盖结果前保留旧 <task_id>.json，
+    // /task_versions 能取到上一版；这样新版本跑着时仍可继续阅读旧笔记。
+    if (ACTIVE_STATUSES.includes(currentTask.status)) {
+      if (!hasContent && !currentTask.contentLoading) {
+        void ensureTaskContent(currentTask.id)
       }
-    })()
-  }, [currentTask])
+      return
+    }
+    // 失败/停止也可能留着上一版成功结果：打开时拉一次版本列表，
+    // 让用户还能读历史版本（没有版本则保持原来的终态页）。
+    if (currentTask.status !== 'SUCCESS') {
+      if (!hasContent && !currentTask.contentLoading) {
+        void ensureTaskContent(currentTask.id)
+      }
+      return
+    }
+    if (hasContent && !currentTask.contentStale) return
+    void ensureTaskContent(currentTask.id)
+  }, [currentTaskId, currentTask?.status, currentTask?.contentStale, ensureTaskContent])
 
   // useEffect( () => {
   //     get_task_status('d4e87938-c066-48a0-bbd5-9bec40d53354').then(res=>{
@@ -77,7 +83,15 @@ export const HomePage: FC = () => {
   // resetKey=当前笔记 id，换笔记自动清错误状态。
   const previewPane = (
     <ErrorBoundary variant="inline" resetKey={currentTaskId || ''}>
-      <MarkdownViewer status={status} />
+      <Suspense
+        fallback={
+          <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+            正在加载笔记阅读器…
+          </div>
+        }
+      >
+        <MarkdownViewer status={status} />
+      </Suspense>
     </ErrorBoundary>
   )
   if (isMobile) {

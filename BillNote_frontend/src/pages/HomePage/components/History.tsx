@@ -2,7 +2,7 @@ import NoteHistory from '@/pages/HomePage/components/NoteHistory.tsx'
 import { useTaskStore } from '@/store/taskStore'
 const History = () => {
   const currentTaskId = useTaskStore(state => state.currentTaskId)
-  const setCurrentTask = useTaskStore(state => state.setCurrentTask)
+  const openTask = useTaskStore(state => state.openTask)
   return (
     <>
       {/* 标题只用 HomeLayout 中间栏 header 那一个：这里曾经自带一个
@@ -14,7 +14,7 @@ const History = () => {
             滚轮事件在两层之间链式触发——滚历史列表会带着正文一起动，
             体感就是「笔记之间的滚动条互相干扰」。删掉内层，只留一层滚动。 */}
         <div className="min-h-0 flex-1">
-          <NoteHistory onSelect={setCurrentTask} selectedId={currentTaskId} />
+          <NoteHistory onSelect={openTask} selectedId={currentTaskId} />
         </div>
       </div>
     </>

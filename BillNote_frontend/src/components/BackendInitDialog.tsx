@@ -64,13 +64,19 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-600">
               <AlertTriangle className="w-5 h-5" />
-              后端启动失败
+              {isTauri ? '后端启动失败' : 'Worker 连接失败'}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 mt-2 text-sm">
             <p className="text-muted-foreground">
               {lastError || '后端在预计时间内未就绪。'}
             </p>
+            {!isTauri && (
+              <p className="text-xs text-muted-foreground">
+                页面会自动持续重试，不需要反复刷新。请确认手机 Tailscale 已连接、Worker
+                地址正确（地址在「设置 → 连接 Worker」里）。
+              </p>
+            )}
             {stderrPreview.length > 0 && (
               <div className="space-y-1">
                 <p className="text-xs font-medium text-muted-foreground">
@@ -104,6 +110,24 @@ function BackendInitDialog({ open, failed = false, lastError = null, onRetry }: 
                 )}
                 {isTauri ? (restarting ? '重启中…' : '重启后端') : '重试'}
               </Button>
+              {!isTauri && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    // 地址填错时页面本身能打开、探活却永远失败：清掉旧配对，
+                    // 回到同源 /api 重新走配对页，不必等用户手动清浏览器存储。
+                    try {
+                      localStorage.removeItem('bilinote-worker-connection')
+                    } catch {
+                      /* 隐私模式忽略 */
+                    }
+                    location.reload()
+                  }}
+                >
+                  清除配对并重新加载
+                </Button>
+              )}
               {isTauri && (
                 <Button size="sm" variant="outline" onClick={handleCopy} className="gap-1.5">
                   <Clipboard className="w-4 h-4" />

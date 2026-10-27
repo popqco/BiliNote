@@ -7,6 +7,10 @@ export interface TaskConfig {
   frame_budget: number
   image_budget: number
   summarize_batch_concurrency: number
+  /** 原片截图平均间隔（秒/张）：越小越密 */
+  screenshot_interval: number
+  /** 单篇原片截图上限 */
+  screenshot_max_count: number
 }
 
 export const get_task_config = async (): Promise<TaskConfig> => {

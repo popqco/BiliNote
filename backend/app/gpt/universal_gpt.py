@@ -2,6 +2,7 @@ from app.gpt.base import GPT
 from app.gpt.prompt_builder import generate_base_prompt
 from app.models.gpt_model import GPTSource
 import logging
+import math
 import os
 import hashlib
 import json
@@ -107,6 +108,7 @@ class UniversalGPT(GPT):
             _format=kwargs.get('_format'),
             style=kwargs.get('style'),
             extras=kwargs.get('extras'),
+            screenshot_quota=kwargs.get('screenshot_quota'),
         )
         # 分批喂图（chunk_time_aligned）时给每批注入「第 i/N 段」说明，
         # 让模型知道这只是整条视频的一部分，输出本段笔记待合并
@@ -498,6 +500,25 @@ class UniversalGPT(GPT):
             return "?"
         return f"{s // 60}:{s % 60:02d}"
 
+    def _chunk_screenshot_quota(self, meta: Optional[dict], total_chunks: int) -> Optional[int]:
+        """本批可以插多少张原片截图（2026-10-27）。
+
+        有批次时间窗时按窗口长度算（窗口 18 分钟 / 90 秒 ≈ 12 张）；没有时间
+        信息（旧字节分块/单批）时把整篇配额平均摊到各批，避免每批都拿全篇额度。
+        """
+        interval = max(1, int(self._screenshot_interval or 90))
+        if meta:
+            try:
+                window = float(meta.get("time_end")) - float(meta.get("time_start"))
+                if window > 0:
+                    return max(1, math.ceil(window / interval))
+            except (TypeError, ValueError):
+                pass
+        if self._duration > 0:
+            whole = max(1, math.ceil(self._duration / interval))
+            return max(1, math.ceil(whole / max(1, total_chunks)))
+        return None
+
     def _batch_note(self, meta: Optional[dict]) -> str:
         """把分批元信息转成注入每批 prompt 的说明文字（旧路径 meta 为 None）。"""
         if not meta:
@@ -600,6 +621,10 @@ class UniversalGPT(GPT):
         # 记下用户勾选的格式（toc/link/screenshot/summary）——合并阶段要用它决定
         # 是否在最终笔记里保留/补上「AI 总结」段落
         self._format = list(source._format or [])
+        # 截图配额（2026-10-27）：按「本批时间窗 ÷ 截图间隔」给模型一个硬数字。
+        # 旧 prompt 没有上限，模型把网格每格都插一遍，实测单篇最多 790 张。
+        self._screenshot_interval = int(getattr(source, "screenshot_interval", 0) or 0)
+        self._duration = float(getattr(source, "duration", 0) or 0)
         source.segment = self.ensure_segments_type(source.segment)
         checkpoint_key = source.checkpoint_key
         source_signature = self._build_source_signature(source) if checkpoint_key else None
@@ -699,6 +724,9 @@ class UniversalGPT(GPT):
                 style=source.style,
                 extras=source.extras,
                 chunk_note=self._batch_note(getattr(chunk, "meta", None)),
+                screenshot_quota=self._chunk_screenshot_quota(
+                    getattr(chunk, "meta", None), len(chunks)
+                ),
             )
             response = self._chat_completion_create(messages)
             return response.choices[0].message.content.strip()

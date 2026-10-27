@@ -16,6 +16,7 @@ from app.middleware.pairing_auth import (
     PairingAuthMiddleware,
     _client_is_loopback,
     _is_public_path,
+    _is_remote_task_path,
 )
 from app.services.pairing_manager import PairingManager
 from app.utils.response import ResponseWrapper as R
@@ -112,6 +113,21 @@ class TestPairingAuth(unittest.TestCase):
         # CORS 预检不带自定义头，必须放行（否则手机浏览器连预检都发不出去）
         r = self.client.options("/api/tasks/recent")
         self.assertNotEqual(r.status_code, 401)
+
+    def test_note_assets_in_remote_whitelist(self):
+        # 远控关闭时，已配对手机仍要能看笔记截图和按需字幕，否则阅读体验
+        # 会被 403 打断（截图回退 4K 原图、原文面板打不开）。
+        for path in (
+            "/api/img_thumb",
+            "/api/task_transcript/t-1",
+            "/api/task_status/t-1",
+            "/api/image_proxy",
+            "/api/wechat/yuanbao_login/status",
+            "/api/wechat/channels/resolve",
+        ):
+            self.assertTrue(_is_remote_task_path(path), path)
+        self.assertFalse(_is_remote_task_path("/api/sys_health"))
+        self.assertFalse(_is_remote_task_path("/api/wechat/yuanbao_login/start"))
 
 
 if __name__ == "__main__":

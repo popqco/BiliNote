@@ -1,7 +1,10 @@
 # app/routers/note.py
+import io
 import json
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -12,6 +15,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TERMINAL_STATUSES, TaskStatus
+from app.db.video_task_dao import upsert_task_video_id
 from app.exceptions.note import NoteError
 from app.paths import NOTE_OUTPUT_DIR, UPLOAD_DIR
 from app.services import task_state
@@ -34,6 +38,12 @@ from PIL import Image, ImageOps
 # from app.services.whisperer import transcribe_audio
 
 router = APIRouter()
+
+# /tasks/recent 的进程内缓存：key = (状态目录, limit, 指纹)。
+# 解析整目录实测 ~130ms；手机每 30s 轮询一次，指纹没变时直接复用结果，
+# 并发请求也不会各自把目录再解析一遍（缓存条目只在指纹变化时新增）。
+_recent_cache: dict = {}
+_recent_cache_lock = threading.Lock()
 
 
 class RecordRequest(BaseModel):
@@ -64,6 +74,8 @@ class VideoRequest(BaseModel):
     video_understanding: Optional[bool] = False
     video_interval: Optional[int] = 0
     grid_size: Optional[list] = []
+    # 原片截图密度（2026-10-27）：sparse/normal/rich；不传走全局配置。
+    screenshot_density: Optional[str] = None
     # 客户端（如浏览器插件）已经在用户浏览器里抓到字幕，直接传给后端复用，
     # 跳过 download_subtitles 和音频转写。形如：
     #   {"language": "zh", "full_text": "...", "segments": [{"start","end","text"}, ...]}
@@ -233,6 +245,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             video_understanding=data.video_understanding,
             video_interval=data.video_interval,
             grid_size=data.grid_size,
+            screenshot_density=data.screenshot_density,
             task_id=data.task_id,
             prefetched_transcript=data.prefetched_transcript,
             schedule=background_tasks.add_task,
@@ -284,8 +297,135 @@ def refinalize_note(data: RefinalizeRequest):
     })
 
 
+@router.post("/task_refresh_meta/{task_id}")
+def refresh_task_meta(task_id: str):
+    """重新抓取并回填存量任务的标题/封面/时长/video_id。
+
+    2026-10-24 的「未命名笔记」：提交时 DNS 瞬时失败，audio_meta 全 null 被
+    写进 _audio.json，之后重试复用缓存，标题/封面永远缺失。这个接口只做一次
+    轻量元信息请求并同步状态文件/结果文件/数据库，不重跑下载与转写。
+    """
+    status_path = NOTE_OUTPUT_DIR / f"{task_id}.status.json"
+    if not status_path.exists():
+        return R.error(msg="任务不存在", code=404)
+    try:
+        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return R.error(msg=f"读取任务状态失败：{e}", code=500)
+
+    video_url = status_data.get("video_url")
+    platform = status_data.get("platform") or "bilibili"
+    if not video_url:
+        return R.error(msg="任务缺少视频链接，无法刷新元信息", code=400)
+
+    meta = fetch_video_meta(str(video_url), platform)
+    if not meta or not meta.get("title"):
+        return R.error(msg="未能获取到标题/封面（视频可能已删除、受限，或网络暂不可达），请稍后重试", code=502)
+
+    meta_fields = {
+        k: meta.get(k)
+        for k in ("title", "cover_url", "duration", "video_id")
+        if meta.get(k) not in (None, "")
+    }
+    if meta.get("platform"):
+        meta_fields["platform"] = meta.get("platform")
+
+    # 1) 状态文件（历史卡片/阅读页优先读这里）
+    audio_meta = status_data.get("audio_meta")
+    audio_meta = dict(audio_meta) if isinstance(audio_meta, dict) else {}
+    audio_meta.update(meta_fields)
+    audio_meta.setdefault("platform", platform)
+    status_data["audio_meta"] = audio_meta
+    if not status_data.get("video_id") and meta_fields.get("video_id"):
+        status_data["video_id"] = meta_fields["video_id"]
+    status_path.write_text(json.dumps(status_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 2) 完整结果文件
+    result_path = NOTE_OUTPUT_DIR / f"{task_id}.json"
+    if result_path.exists():
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            result_audio = result.get("audio_meta")
+            result_audio = dict(result_audio) if isinstance(result_audio, dict) else {}
+            result_audio.update(meta_fields)
+            result_audio.setdefault("platform", platform)
+            result["audio_meta"] = result_audio
+            result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"刷新元信息时更新结果文件失败 (task_id={task_id}): {e}")
+
+    # 3) 音频缓存（重试命中缓存时会读取；不刷新会再次把空值带回来）
+    audio_path = NOTE_OUTPUT_DIR / f"{task_id}_audio.json"
+    if audio_path.exists():
+        try:
+            audio_data = json.loads(audio_path.read_text(encoding="utf-8"))
+            if isinstance(audio_data, dict):
+                audio_data.update(meta_fields)
+                audio_data.setdefault("platform", platform)
+                audio_path.write_text(json.dumps(audio_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"刷新元信息时更新音频缓存失败 (task_id={task_id}): {e}")
+
+    # 4) 数据库任务记录（自动化去重依赖 video_id）
+    final_video_id = status_data.get("video_id") or meta_fields.get("video_id")
+    if final_video_id:
+        upsert_task_video_id(task_id, str(final_video_id), platform)
+
+    logger.info(f"已刷新任务元信息 (task_id={task_id}, title={meta_fields.get('title')})")
+    return R.success({
+        "task_id": task_id,
+        "audio_meta": audio_meta,
+        "video_id": final_video_id,
+    })
+
+
+_NOTE_RESULT_KEYS = (
+    "markdown",
+    "model_name",
+    "provider_id",
+    "style",
+    "quality",
+    "format",
+    "link",
+    "screenshot",
+    "extras",
+    "video_understanding",
+    "video_interval",
+    "grid_size",
+    "video_url",
+)
+_LIGHT_AUDIO_KEYS = ("title", "cover_url", "duration", "platform", "video_id")
+
+
+def _project_note_result(result: dict) -> dict:
+    """笔记阅读视图：只留正文和轻量元信息。
+
+    `task_status` 默认仍返回完整结果（MCP / 导出 / 旧客户端依赖 transcript、
+    audio_meta.raw_info）。远端手机打开笔记时只要 markdown：实测整包里
+    transcript 占 39%、raw_info 占 30%，这两块在阅读首屏完全用不到，却要
+    多传十几到几百 KB。`view=note` 就返回这个投影。
+    """
+    if not isinstance(result, dict):
+        return result
+    out = {k: result.get(k) for k in _NOTE_RESULT_KEYS if k in result}
+    audio = result.get("audio_meta") or {}
+    if isinstance(audio, dict):
+        light = {k: audio.get(k) for k in _LIGHT_AUDIO_KEYS if audio.get(k) not in (None, "")}
+        raw = audio.get("raw_info") or {}
+        if isinstance(raw, dict):
+            # VideoBanner / 导出海报要的上传者与原视频地址，从 51 键 raw_info
+            # 里只抽这两个，别把整包再带回去。
+            for k in ("uploader", "webpage_url"):
+                if raw.get(k):
+                    light[k] = raw[k]
+        if light:
+            out["audio_meta"] = light
+    return out
+
+
 @router.get("/task_status/{task_id}")
-def get_task_status(task_id: str):
+def get_task_status(task_id: str, view: str = "full"):
+    note_view = str(view or "").lower() == "note"
     # 优先读状态文件
     status_content = task_state.read_status(task_id, root=NOTE_OUTPUT_DIR)
     if status_content is not None:
@@ -297,6 +437,8 @@ def get_task_status(task_id: str):
             # 成功状态的话，继续读取最终笔记内容
             result_content = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
             if result_content is not None:
+                if note_view:
+                    result_content = _project_note_result(result_content)
                 return R.success({
                     "status": status,
                     "result": result_content,
@@ -317,6 +459,8 @@ def get_task_status(task_id: str):
             # 结果附在 data.result 里，前端失败卡片可展示。
             result_content = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
             if result_content is not None:
+                if note_view:
+                    result_content = _project_note_result(result_content)
                 return R.error(message or "任务失败", code=500, data={
                     "task_id": task_id,
                     "status": status,
@@ -354,6 +498,8 @@ def get_task_status(task_id: str):
     # 没有状态文件，但有结果
     result_content = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
     if result_content is not None:
+        if note_view:
+            result_content = _project_note_result(result_content)
         return R.success({
             "status": TaskStatus.SUCCESS.value,
             "result": result_content,
@@ -366,6 +512,43 @@ def get_task_status(task_id: str):
         "message": "任务排队中",
         "task_id": task_id
     })
+
+
+@router.get("/task_versions/{task_id}")
+def get_task_versions(task_id: str):
+    """同一视频的历史版本（归档旧笔记 + 当前结果 + 同视频旧任务）。
+
+    生成中也可以调用：当前结果文件还是上一版，因此新版本跑完前用户就能
+    先看历史版本；跑完后新结果会出现在列表首位。
+    """
+    from app.services.note_versions import list_task_versions
+    try:
+        versions = list_task_versions(task_id, NOTE_OUTPUT_DIR)
+    except Exception as e:
+        logger.warning(f"读取笔记版本失败 (task_id={task_id}): {e}")
+        versions = []
+    return R.success({"versions": versions})
+
+
+@router.get("/task_transcript/{task_id}")
+def get_task_transcript(task_id: str):
+    """按需取字幕：笔记阅读首屏不带 transcript，打开「原文」面板再拉这一份。
+
+    transcript.raw 是转写器原始响应（Groq 会重复一遍全文+全部分段），前端
+    从不用它，这里直接剔除，只返回 full_text/language/segments。
+    """
+    result = task_state.read_result(task_id, root=NOTE_OUTPUT_DIR)
+    if result is None:
+        return R.error("笔记结果不存在", code=404)
+    transcript = result.get("transcript")
+    if not isinstance(transcript, dict):
+        transcript = {"full_text": "", "language": "", "segments": []}
+    transcript = {
+        k: transcript.get(k)
+        for k in ("full_text", "language", "segments")
+        if transcript.get(k) is not None
+    }
+    return R.success({"transcript": transcript})
 
 
 @router.get("/video_meta")
@@ -384,13 +567,31 @@ def get_video_meta(url: str, platform: str = "bilibili"):
 
 
 @router.get("/tasks/recent")
-def get_recent_tasks(limit: int = 80):
-    """后端最近任务列表（扫描状态文件），供前端历史增量同步与自动化任务可见性。"""
+def get_recent_tasks(limit: int = 80, since: Optional[str] = None):
+    """后端最近任务列表（扫描状态文件），供前端历史增量同步与自动化任务可见性。
+
+    `since` 是上一次响应的 `version`：指纹未变时只回 `unchanged`，30s 轮询
+    从约 45KB gzip 降到几百字节，也免掉整目录重新解析。
+    """
     try:
         limit = max(1, min(int(limit), 300))
     except Exception:
         limit = 80
-    return R.success({"tasks": task_state.list_recent_tasks(limit=limit, root=NOTE_OUTPUT_DIR)})
+    version = task_state.recent_fingerprint(root=NOTE_OUTPUT_DIR)
+    if since and since == version:
+        return R.success({"tasks": [], "unchanged": True, "version": version})
+
+    key = (str(NOTE_OUTPUT_DIR), limit, version)
+    with _recent_cache_lock:
+        cached = _recent_cache.get(key)
+    if cached is None:
+        cached = task_state.list_recent_tasks(limit=limit, root=NOTE_OUTPUT_DIR)
+        with _recent_cache_lock:
+            # 只留最近 16 个指纹快照，避免长期运行时随状态写入无限堆积
+            if len(_recent_cache) >= 16:
+                _recent_cache.clear()
+            _recent_cache[key] = cached
+    return R.success({"tasks": cached, "version": version})
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +624,31 @@ _COVER_EXT_BY_TYPE = {
     "image/gif": ".gif",
     "image/avif": ".avif",
 }
+
+# 图片缩放（封面缩略/笔记截图缩略）共用的独立线程池：PIL 解码 4K JPEG
+# 是 CPU 密集操作，丢进 Starlette 默认线程池会和 /sys_check、状态读取抢
+# 线程；固定 4 个 worker 既能把并发压住，又不阻塞事件循环。
+_IMAGE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="img-resize")
+_COVER_THUMB_MAX_WIDTH = 1600
+
+
+def _resize_cover_bytes(content: bytes, width: int) -> Optional[bytes]:
+    """把封面缩到指定宽度；原图本来更小或解码失败时返回 None（调用方回退原图）。"""
+    try:
+        with Image.open(io.BytesIO(content)) as im:
+            im = ImageOps.exif_transpose(im) or im
+            if im.width <= width:
+                return None
+            ratio = width / float(im.width)
+            out = im.convert("RGB").resize(
+                (width, max(1, round(im.height * ratio))), Image.LANCZOS
+            )
+        buf = io.BytesIO()
+        out.save(buf, format="JPEG", quality=82, optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning(f"封面缩放失败，回退原图（w={width}）: {e}")
+        return None
 
 
 def _normalize_image_url(url: str) -> str:
@@ -494,7 +720,7 @@ def _cover_proxy_url(target: str) -> Optional[str]:
 
 
 @router.get("/image_proxy")
-async def image_proxy(request: Request, url: str):
+async def image_proxy(request: Request, url: str, w: int = 0):
     target = _normalize_image_url(url)
     if not target.startswith(("http://", "https://")):
         return JSONResponse(
@@ -502,8 +728,15 @@ async def image_proxy(request: Request, url: str):
             content={"code": 400, "msg": "无效的图片地址"},
             headers={"Cache-Control": "no-store"},
         )
+    try:
+        width = int(w)
+    except (TypeError, ValueError):
+        width = 0
+    width = max(0, min(width, _COVER_THUMB_MAX_WIDTH))
 
-    key = hashlib.sha1(target.encode("utf-8")).hexdigest()
+    # 宽度参与缓存键：历史卡 320 / 详情 800 / 海报 600 各存一份，互不覆盖。
+    cache_key = target if width <= 0 else f"{target}|w={width}"
+    key = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()
     cached = _cached_cover_path(key)
     if cached is not None:
         ctype = next(
@@ -560,7 +793,14 @@ async def image_proxy(request: Request, url: str):
                     ctype = (resp.headers.get("Content-Type") or "image/jpeg").split(";")[0].strip().lower()
                     if not ctype.startswith("image/"):
                         ctype = "image/jpeg"
-                    p = _store_cached_cover(key, ctype, resp.content)
+                    body = resp.content
+                    if width > 0:
+                        resized = await asyncio.get_running_loop().run_in_executor(
+                            _IMAGE_EXECUTOR, _resize_cover_bytes, body, width
+                        )
+                        if resized:
+                            body, ctype = resized, "image/jpeg"
+                    p = _store_cached_cover(key, ctype, body)
                     if p is not None:
                         return FileResponse(
                             str(p),
@@ -568,7 +808,7 @@ async def image_proxy(request: Request, url: str):
                             headers={"Cache-Control": "public, max-age=86400"},
                         )
                     return Response(
-                        content=resp.content,
+                        content=body,
                         media_type=ctype,
                         headers={"Cache-Control": "public, max-age=86400"},
                     )
@@ -619,14 +859,13 @@ def _resolve_local_screenshot(url: str) -> Optional[Path]:
     """笔记图片地址 → 本地截图文件，非本机截图返回 None。
 
     笔记里存的是相对路径（/static/screenshots/xxx.jpg），桌面端经 baseURL
-    展开成 http://127.0.0.1:8483/... 两种形态都收敛到文件名解析；外链
-    （http 图床）不走缩略，调用方原样返回 404 让前端回退原图。
+    展开成 http://127.0.0.1:8483/...，远端手机可能是 http://<Worker-IP>:8483/...
+    这些形态都只认 path 段、收敛到本地截图文件名；外链（没有该 path 的
+    图床地址）不走缩略，调用方 404 让前端回退原图。host 不参与解析，因为
+    最终只读 static/screenshots 下的直接文件名，任意 host 都越不出这个目录。
     """
     u = _normalize_image_url(url)
     parsed = urlparse(u)
-    host = (parsed.hostname or "").lower()
-    if host not in ("", "127.0.0.1", "localhost"):
-        return None
     path = unquote(parsed.path or "")
     prefix = "/static/screenshots/"
     if not path.startswith(prefix):
@@ -702,9 +941,7 @@ def _build_thumb(src: Path, width: int) -> Optional[Path]:
 
 
 @router.get("/img_thumb")
-def img_thumb(url: str, w: int = _THUMB_DEFAULT_WIDTH):
-    # 同步 def：PIL 缩放是 CPU 密集操作，FastAPI 会自动丢线程池执行，
-    # 不阻塞事件循环（与其他 async 端点互不影响）
+async def img_thumb(url: str, w: int = _THUMB_DEFAULT_WIDTH):
     src = _resolve_local_screenshot(url)
     if src is None:
         return JSONResponse(
@@ -718,10 +955,15 @@ def img_thumb(url: str, w: int = _THUMB_DEFAULT_WIDTH):
         width = _THUMB_DEFAULT_WIDTH
     width = max(240, min(width, 4096))
 
-    path = _build_thumb(src, width) or src
+    # PIL 解码/缩放放到独立线程池：不占用 Starlette 默认线程池，也不阻塞
+    # 事件循环；并发上限 4，避免一屏几十张 4K 同时解码把 CPU 打满。
+    path = await asyncio.get_running_loop().run_in_executor(
+        _IMAGE_EXECUTOR, _build_thumb, src, width
+    )
+    path = path or src
     media = _THUMB_MEDIA_BY_SUFFIX.get(path.suffix.lower(), "image/jpeg")
     return FileResponse(
         str(path),
         media_type=media,
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )

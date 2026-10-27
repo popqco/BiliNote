@@ -26,3 +26,21 @@ export const pollBilibiliQrLogin = async (qrcode_key: string) => {
 export const refreshBilibiliCookie = async () => {
   return await request.post('/bilibili/cookie/refresh')
 }
+
+// ---- 视频号：腾讯元宝扫码登录（2026-10-24）----
+
+export const getYuanbaoLoginStatus = async () => {
+  return await request.get('/wechat/yuanbao_login/status')
+}
+
+export const startYuanbaoLogin = async () => {
+  return await request.post('/wechat/yuanbao_login/start')
+}
+
+export const cancelYuanbaoLogin = async () => {
+  return await request.post('/wechat/yuanbao_login/cancel')
+}
+
+export const clearYuanbaoCookie = async () => {
+  return await request.post('/wechat/yuanbao_login/clear')
+}

@@ -18,9 +18,33 @@
         } catch (e) {}
       })()
     </script>
+    <style>
+      /* JS 分包下载前先给一屏启动占位：远端手机首包 1MB+ gzip 时不再全黑 */
+      html, body { height: 100%; margin: 0; background: #f8f8f7; }
+      html.dark, html.dark body { background: #0d0d0f; }
+      #bn-boot {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px;
+        color: #6b7280; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      html.dark #bn-boot { color: #9ca3af; }
+      #bn-boot img { width: 56px; height: 56px; border-radius: 14px; }
+      #bn-boot .bn-spinner {
+        width: 22px; height: 22px; border-radius: 50%;
+        border: 2px solid rgba(127,127,127,.25); border-top-color: #7c8cf8;
+        animation: bn-spin .8s linear infinite;
+      }
+      @keyframes bn-spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="bn-boot">
+        <img src="/icon.svg" alt="" />
+        <div>BiliNote 正在加载…</div>
+        <div class="bn-spinner"></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

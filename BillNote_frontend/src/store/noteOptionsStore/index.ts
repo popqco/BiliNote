@@ -11,6 +11,8 @@ import { persist } from 'zustand/middleware'
  *
  * 只存「设置」不存「内容」：视频链接、平台、备注不进这里。
  */
+export type ScreenshotDensity = 'sparse' | 'normal' | 'rich'
+
 export interface LastNoteOptions {
   model_name: string
   style: string
@@ -19,6 +21,8 @@ export interface LastNoteOptions {
   video_understanding: boolean
   video_interval: number
   grid_size: [number, number]
+  /** 原片截图密度：sparse 精简 / normal 标准 / rich 丰富 */
+  screenshot_density: ScreenshotDensity
 }
 
 interface NoteOptionsState {
@@ -47,7 +51,14 @@ export function pickLastNoteOptions(v: {
   video_understanding?: boolean
   video_interval?: number
   grid_size?: [number, number]
+  screenshot_density?: string
 }): LastNoteOptions {
+  const density: ScreenshotDensity =
+    v.screenshot_density === 'sparse' ||
+    v.screenshot_density === 'rich' ||
+    v.screenshot_density === 'normal'
+      ? v.screenshot_density
+      : 'normal'
   return {
     model_name: v.model_name || '',
     style: v.style || 'minimal',
@@ -56,5 +67,6 @@ export function pickLastNoteOptions(v: {
     video_understanding: !!v.video_understanding,
     video_interval: Number(v.video_interval) || 6,
     grid_size: [Number(v.grid_size?.[0]) || 2, Number(v.grid_size?.[1]) || 2],
+    screenshot_density: density,
   }
 }

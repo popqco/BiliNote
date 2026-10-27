@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useMemo, memo, useCallback, FC } from 'react'
+import { useState, useEffect, useRef, useMemo, memo, useCallback, lazy, Suspense, FC, Children, isValidElement } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Button } from '@/components/ui/button.tsx'
-import { Copy, ArrowRight, Play, ExternalLink, Square } from 'lucide-react'
+import { Copy, ArrowRight, Play, ExternalLink, Square, Loader2 } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Error from '@/components/Lottie/error.tsx'
 import Loading from '@/components/Lottie/Loading.tsx'
@@ -28,7 +28,7 @@ import {
   isTopSection,
   normalizeSectionTitle,
 } from '@/lib/sectionLocator'
-import { useTaskStore } from '@/store/taskStore'
+import { useTaskStore, ACTIVE_STATUSES } from '@/store/taskStore'
 import { useChatJumpStore, type SourceJumpTarget } from '@/store/chatStore'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
@@ -36,7 +36,8 @@ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import { useSmoothScroll } from '@/hooks/useSmoothScroll'
 import { useStopArmed } from '@/hooks/useStopArmed'
 import NoteImage from '@/components/NoteImage'
-import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
+import { withPairingToken } from '@/utils/workerConnection.ts'
+import { buildVideoUrlAt, parseShotTime } from '@/utils/videoUrl.ts'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import TocPanel from '@/pages/HomePage/components/TocPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
@@ -52,9 +53,14 @@ interface VersionNote {
 }
 
 interface MarkdownViewerProps {
-  content: string | VersionNote[]
+  content?: string | VersionNote[]
   status: 'idle' | 'loading' | 'success' | 'failed' | 'stopped'
 }
+
+// 导图组件只在使用「导图」视图时加载：首屏/普通阅读不需要 markmap 大分包。
+const MarkmapEditor = lazy(
+  () => import('@/pages/HomePage/components/MarkmapComponent.tsx'),
+)
 
 const steps = [
   { label: '解析链接', key: 'PARSING' },
@@ -78,7 +84,9 @@ const rehypePlugins = [rehypeKatex, rehypeSlug]
 function createMarkdownComponents(
   baseURL: string,
   scrollRoot: HTMLElement | null,
+  thumbWidth: number,
   noteKey?: string,
+  videoAt?: (seconds: number) => string | undefined,
 ) {
   return {
     h1: ({ children, ...props }: any) => (
@@ -113,11 +121,36 @@ function createMarkdownComponents(
         {children}
       </h4>
     ),
-    p: ({ children, ...props }: any) => (
-      <p className="leading-7 [&:not(:first-child)]:mt-6" {...props}>
-        {children}
-      </p>
-    ),
+    // 连续多张原片截图（模型刷屏或存量笔记）排成紧凑网格：旧实现每张都是
+    // 整行大图，10 张连排就是一面图墙（2026-10-27 用户反馈「像流水账」）。
+    // 只处理「整段只有截图」的段落；图文混排保持原样，避免破坏排版。
+    p: ({ children, ...props }: any) => {
+      const meaningful = Children.toArray(children).filter(
+        (child: any) => !(typeof child === 'string' && child.trim() === ''),
+      )
+      const shots = meaningful.filter(
+        (child: any) =>
+          isValidElement(child) &&
+          typeof (child as any).props?.src === 'string' &&
+          (child as any).props.src.includes('/static/screenshots/'),
+      )
+      if (shots.length >= 2 && shots.length === meaningful.length) {
+        return (
+          <div
+            className={`my-5 grid gap-2 [&>div]:my-0 ${
+              shots.length >= 3 ? 'grid-cols-2 sm:grid-cols-3' : 'grid-cols-2'
+            }`}
+          >
+            {children}
+          </div>
+        )
+      }
+      return (
+        <p className="leading-7 [&:not(:first-child)]:mt-6" {...props}>
+          {children}
+        </p>
+      )
+    },
     a: ({ href, children, ...props }: any) => {
       const isOriginLink =
         typeof children[0] === 'string' &&
@@ -212,12 +245,24 @@ function createMarkdownComponents(
       // aspect-ratio 才有稳定的计算基准。
       const isScreenshot =
         typeof src === 'string' && src.includes('/static/screenshots/')
+      // <img> 发不出 X-Pairing-Token：远端手机必须把 token 拼进 query，
+      // 否则 /api/img_thumb 401 → NoteImage 回退 4K 原图，一篇 100+ 张
+      // 截图就是多传十几 MB（2026-10-23 实测）。宽度按视口取，手机 1200px。
       const displaySrc = isScreenshot
-        ? `${baseURL}/api/img_thumb?url=${encodeURIComponent(src)}&w=1600`
+        ? withPairingToken(
+            `${baseURL}/api/img_thumb?url=${encodeURIComponent(src)}&w=${thumbWidth}`,
+          )
         : src
 
+      // 2026-10-27：新笔记的截图 alt 里存了时间（`![12:20](…)`），
+      // 据此渲染「▶ 12:20」徽章，点击直接打开原片对应时间点；
+      // 老笔记 alt 为空则保持原样，不显示徽章。
+      const shotSeconds = isScreenshot ? parseShotTime(props.alt) : null
+      const shotHref = shotSeconds !== null && videoAt ? videoAt(shotSeconds) : undefined
+      const shotLabel = shotSeconds !== null ? String(props.alt).trim() : ''
+
       return (
-        <div className="my-8 w-full">
+        <div className="relative my-6 w-full">
           <Zoom {...(isScreenshot ? { zoomImg: { src, alt: props.alt } } : {})}>
             {isScreenshot ? (
               <NoteImage
@@ -241,6 +286,24 @@ function createMarkdownComponents(
               />
             )}
           </Zoom>
+          {shotSeconds !== null &&
+            (shotHref ? (
+              <a
+                href={shotHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`打开原片 ${shotLabel}`}
+                className="absolute bottom-2 left-2 z-10 inline-flex items-center gap-1 rounded-full bg-black/65 px-2 py-0.5 text-[11px] font-medium text-white shadow-sm backdrop-blur-sm transition-colors hover:bg-black/85"
+              >
+                <Play className="h-3 w-3" />
+                <span>{shotLabel}</span>
+              </a>
+            ) : (
+              <span className="absolute bottom-2 left-2 z-10 inline-flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[11px] font-medium text-white backdrop-blur-sm">
+                <Play className="h-3 w-3" />
+                <span>{shotLabel}</span>
+              </span>
+            ))}
         </div>
       )
     },
@@ -375,7 +438,17 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   const currentTask = useTaskStore(state => state.getCurrentTask())
   const taskStatus = currentTask?.status || 'PENDING'
   const retryTask = useTaskStore.getState().retryTask
+  const ensureTaskContent = useTaskStore(state => state.ensureTaskContent)
   const isMultiVersion = Array.isArray(currentTask?.markdown)
+  const hasVersions =
+    Array.isArray(currentTask?.markdown) &&
+    currentTask.markdown.some(v => !!v?.content?.trim())
+  // 正在生成新版本、但本地已有历史版本：不要用全屏进度页盖掉阅读器，
+  // 改为顶部进度条 + 正常阅读历史版本（2026-10-25 用户反馈）。
+  const showHistoryDuringGeneration = status === 'loading' && hasVersions
+  const taskHasBody = Array.isArray(currentTask?.markdown)
+    ? currentTask.markdown.length > 0
+    : !!(currentTask?.markdown as string | undefined)?.trim()
   const [showTranscribe, setShowTranscribe] = useState(false)
   const [showChat, setShowChat] = useState<false | 'half' | 'full'>(false)
   // 手机窄视口（<768px，与 useIsMobile 同断点）：问答/原文走全屏浮层，
@@ -395,6 +468,8 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
   }, [])
+  // 手机屏幕物理宽度有限，1200px 缩略足够清晰，体积约为 1600px 的 60%。
+  const thumbWidth = isNarrow ? 1200 : 1600
   const [viewMode, setViewMode] = useState<'map' | 'preview'>('preview')
   // 阅读区真正滚动的 Viewport 元素。切换笔记/版本时把它拉回顶部
   // （见下面的回顶 effect）。
@@ -420,6 +495,9 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
   )
   // 「停止生成」请求进行中：按钮转「正在停止…」并防连点
   const [stopping, setStopping] = useState(false)
+  // 上一拍任务状态：只在「生成中 → 成功」时自动切到最新版本，
+  // 不能每次阶段推进（下载→转写→总结）都把用户手动选中的历史版本弹回最新。
+  const prevTaskStatusRef = useRef<string>(taskStatus)
   // 「停止」防误触武装（2026-10-18）：点完「重新生成/重试」后这块加载面板
   // 会立刻顶替刚才的「重新生成」按钮，第二下点击会停在刚变出的停止按钮上
   // （用户实拍：stop 紧跟 retry 到达）。启动后的 STOP_ARM_MS 内不渲染
@@ -459,10 +537,28 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       return next
     })
 
+  // 截图时间徽章的跳转地址：B 站/YouTube 拼时间点，其余平台退回原视频。
+  const audioMeta = currentTask?.audioMeta
+  const videoAt = useCallback(
+    (seconds: number) =>
+      buildVideoUrlAt({
+        platform: audioMeta?.platform,
+        videoId: audioMeta?.video_id,
+        webpageUrl: audioMeta?.webpage_url || currentTask?.formData?.video_url,
+        seconds,
+      }),
+    [
+      audioMeta?.platform,
+      audioMeta?.video_id,
+      audioMeta?.webpage_url,
+      currentTask?.formData?.video_url,
+    ],
+  )
+
   // 缓存 ReactMarkdown components，仅在 baseURL / 滚动容器 / 当前笔记变化时重建
   const markdownComponents = useMemo(
-    () => createMarkdownComponents(baseURL, scrollRoot, currentTask?.id),
-    [baseURL, scrollRoot, currentTask?.id],
+    () => createMarkdownComponents(baseURL, scrollRoot, thumbWidth, currentTask?.id, videoAt),
+    [baseURL, scrollRoot, thumbWidth, currentTask?.id, videoAt],
   )
 
   // 正文预处理：隐藏截图时在 markdown 层摘掉截图标记（只靠 CSS 隐藏会留下
@@ -484,7 +580,10 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   // 多版本内容处理
   useEffect(() => {
-    if (!currentTask) return
+    if (!currentTask) {
+      prevTaskStatusRef.current = taskStatus
+      return
+    }
 
     if (!isMultiVersion) {
       setCurrentVerId('') // 清空旧版本 ID
@@ -492,12 +591,21 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       setStyle(currentTask.formData.style)
       setCreateTime(currentTask.createdAt)
       setSelectedContent(currentTask?.markdown)
+      prevTaskStatusRef.current = taskStatus
     } else {
-      const latestVersion = [...currentTask.markdown].sort(
+      const versions = [...currentTask.markdown].sort(
         (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-      )[0]
-
-      if (latestVersion) {
+      )
+      const latestVersion = versions[0]
+      const previousStatus = prevTaskStatusRef.current
+      prevTaskStatusRef.current = taskStatus
+      if (!latestVersion) return
+      const currentStillExists = versions.some(v => v.ver_id === currentVerId)
+      // 生成中阶段推进时不打断用户查看历史版本；只有新版本刚成功（生成中→成功）
+      // 或当前选中的版本已不存在时才自动切到最新版。
+      const justFinished =
+        ACTIVE_STATUSES.includes(previousStatus as any) && taskStatus === 'SUCCESS'
+      if (!currentStillExists || justFinished) {
         setCurrentVerId(latestVersion.ver_id)
       }
     }
@@ -505,7 +613,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     // 正文由 Home 懒加载后写入 store（string→版本数组形态会变），
     // id/taskStatus 都不变，不监听 markdown 就永远显示旧的空态
     // （2026-10-04 手机实机：老笔记点开一片空白，新笔记正常）。
-  }, [currentTask?.id, taskStatus, currentTask?.markdown, isMultiVersion])
+  }, [currentTask?.id, taskStatus, currentTask?.markdown, isMultiVersion, currentVerId])
   useEffect(() => {
     if (!currentTask || !isMultiVersion) return
 
@@ -774,7 +882,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     }
   }
 
-  if (status === 'loading') {
+  if (status === 'loading' && !showHistoryDuringGeneration) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center space-y-4 text-muted-foreground">
         <StepBar steps={steps} currentStep={taskStatus} />
@@ -818,7 +926,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
     )
   }
 
-  if (status === 'failed' && !isMultiVersion) {
+  if (status === 'failed' && !hasVersions) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
         <Error />
@@ -838,7 +946,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   // 已停止（用户点了「停止生成」）：中性色而非失败红——停止是主动操作，
   // 不是错误。重试按钮沿用补模型逻辑，改完模型直接重跑。
-  if (status === 'stopped' && !isMultiVersion) {
+  if (status === 'stopped' && !hasVersions) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center gap-4 space-y-3">
         <Square className="text-muted-foreground h-10 w-10" fill="currentColor" />
@@ -867,6 +975,58 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
+      {showHistoryDuringGeneration && (
+        // 生成新版本时不再全屏盖住阅读器：顶部显示进度/停止，下面继续看历史版本。
+        <div className="shrink-0 border-b border-amber-200/80 bg-amber-50 dark:border-amber-500/25 dark:bg-amber-500/10">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2 sm:px-4">
+            <span className="flex items-center gap-1.5 text-sm font-medium text-amber-800 dark:text-amber-200">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              正在生成新版本…
+            </span>
+            <span className="text-xs text-muted-foreground">
+              当前查看历史版本，完成后自动切到最新版
+            </span>
+            {currentTask?.message && (
+              <span className="text-xs text-muted-foreground">{currentTask.message}</span>
+            )}
+            {currentTask && stopArmed && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-auto h-8 border-red-300 text-red-600 hover:bg-red-50 hover:text-red-700 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
+                onClick={() => handleStop(currentTask.id)}
+                disabled={stopping}
+              >
+                <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
+                {stopping ? '正在停止…' : '停止生成'}
+              </Button>
+            )}
+          </div>
+          <div className="px-3 pb-2 sm:px-4">
+            <StepBar steps={steps} currentStep={taskStatus} />
+          </div>
+        </div>
+      )}
+      {hasVersions && status === 'failed' && (
+        <div className="shrink-0 border-b border-red-200/80 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-200 sm:px-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>新版本生成失败，当前显示历史版本：{currentTask?.message || '请稍后重试'}</span>
+            <Button variant="outline" size="sm" className="h-7" onClick={handleRetryWithModelFill}>
+              重试
+            </Button>
+          </div>
+        </div>
+      )}
+      {hasVersions && status === 'stopped' && (
+        <div className="shrink-0 border-b border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground sm:px-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>已停止生成，当前显示历史版本</span>
+            <Button variant="outline" size="sm" className="h-7" onClick={handleRetryWithModelFill}>
+              重新生成
+            </Button>
+          </div>
+        </div>
+      )}
       <MarkdownHeader
         currentTask={currentTask}
         isMultiVersion={isMultiVersion}
@@ -892,12 +1052,20 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       {viewMode === 'map' ? (
         <div className="flex w-full flex-1 overflow-hidden bg-card">
           <div className={'w-full'}>
-            <MarkmapEditor
-              value={selectedContent}
-              onChange={() => {}}
-              height="100%" // 根据需求可以设定百分比或固定高度
-              title={currentTask?.audioMeta?.title || '思维导图'}
-            />
+            <Suspense
+              fallback={
+                <div className="text-muted-foreground flex h-full items-center justify-center text-sm">
+                  正在加载导图…
+                </div>
+              }
+            >
+              <MarkmapEditor
+                value={selectedContent}
+                onChange={() => {}}
+                height="100%" // 根据需求可以设定百分比或固定高度
+                title={currentTask?.audioMeta?.title || '思维导图'}
+              />
+            </Suspense>
           </div>
         </div>
       ) : (
@@ -990,6 +1158,44 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
               </>
               )}
             </>
+          ) : currentTask?.contentError ? (
+            <div className="flex h-full w-full items-center justify-center">
+              <div className="flex w-[300px] flex-col items-center text-center">
+                <Error />
+                <p className="mb-3 text-sm text-muted-foreground">{currentTask.contentError}</p>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void ensureTaskContent(currentTask.id, { force: true })}
+                >
+                  重新加载笔记
+                </Button>
+              </div>
+            </div>
+          ) : currentTask && (currentTask.contentLoading || taskHasBody) ? (
+            // 正文正在路上：不能再显示「输入视频链接」空态——用户会以为点开失败。
+            <div className="flex h-full w-full items-center justify-center">
+              <div className="flex w-[300px] flex-col items-center text-center">
+                <Loading />
+                <p className="mb-2 text-muted-foreground">正在加载笔记正文…</p>
+                <p className="text-xs text-muted-foreground">
+                  正文优先传输，截图会在阅读时按需加载
+                </p>
+              </div>
+            </div>
+          ) : currentTask ? (
+            <div className="flex h-full w-full items-center justify-center">
+              <div className="flex w-[300px] flex-col items-center text-center">
+                <p className="mb-3 text-sm text-muted-foreground">这篇笔记暂无正文</p>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => void ensureTaskContent(currentTask.id, { force: true })}
+                >
+                  重新加载笔记
+                </Button>
+              </div>
+            </div>
           ) : (
             <div className="flex h-full w-full items-center justify-center">
               <div className="w-[300px] flex-col justify-items-center">

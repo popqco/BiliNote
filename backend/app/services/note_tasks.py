@@ -21,6 +21,7 @@ from app.enmus.task_status_enums import TaskStatus
 from app.paths import NOTE_OUTPUT_DIR
 from app.services import task_state
 from app.services.note import NoteGenerator
+from app.services.note_versions import archive_previous_result
 from app.services.task_serial_executor import task_serial_executor, video_task_locks
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.services.video_meta import fetch_video_meta
@@ -67,10 +68,14 @@ class NoteTaskService:
         root = Path(output_dir) if output_dir is not None else self.output_dir
         os.makedirs(root, exist_ok=True)
         target = root / f"{task_id}.json"
+        payload = asdict(note)
+        # 同视频重新生成会复用 task_id 并覆盖这个文件；先把上一版成功结果归档，
+        # 否则生成中/重启后历史版本就永久丢了（2026-10-25 用户反馈）。
+        archive_previous_result(task_id, root, str(payload.get("markdown") or ""))
         # 原子写：进程被杀/磁盘抖动时不留半截 JSON（读出来就是「已完成但没内容」）
         tmp = target.with_name(target.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(asdict(note), f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, target)
@@ -172,6 +177,7 @@ class NoteTaskService:
         video_understanding: bool = False,
         video_interval=0,
         grid_size: Optional[List] = None,
+        screenshot_density: Optional[str] = None,
         task_id: Optional[str] = None,
         prefetched_transcript: Optional[dict] = None,
         schedule=None,
@@ -331,6 +337,7 @@ class NoteTaskService:
                     "video_understanding": bool(video_understanding),
                     "video_interval": video_interval,
                     "grid_size": list(grid_size or []),
+                    "screenshot_density": screenshot_density,
                 },
             },
             root=root,
@@ -351,6 +358,7 @@ class NoteTaskService:
             model_name, provider_id, formats, style, extras, video_understanding,
             video_interval, grid_size, video_id,
             output_dir=root,
+            screenshot_density=screenshot_density,
         )
         return SubmitResult(task_id=task_id)
 
@@ -371,6 +379,7 @@ class NoteTaskService:
         video_interval=0,
         grid_size: Optional[List] = None,
         video_id: Optional[str] = None,
+        screenshot_density: Optional[str] = None,
         output_dir: Optional[Path] = None,
     ) -> None:
         """执行一次笔记任务；所有失败都收敛进状态文件，不向上抛 HTTP 异常。"""
@@ -416,6 +425,7 @@ class NoteTaskService:
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
+                screenshot_density=screenshot_density,
                 run=run,
             )
 

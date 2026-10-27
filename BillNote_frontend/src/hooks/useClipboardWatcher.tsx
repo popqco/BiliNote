@@ -87,6 +87,9 @@ export function extractVideoUrl(text: string): { url: string; platform: string }
   const urlMatch = src.match(/https?:\/\/[^\s"'<>]+/i)
   if (urlMatch) {
     const url = urlMatch[0].replace(/[.,;!?)\]]+$/, '')
+    // 微信：公众号文章 / 视频号分享链接（2026-10-24）
+    if (/mp\.weixin\.qq\.com\/s/i.test(url)) return { url, platform: 'wechat_article' }
+    if (/weixin\.qq\.com\/sph\//i.test(url)) return { url, platform: 'wechat_channels' }
     if (/bilibili\.com|b23\.tv/i.test(url)) return { url, platform: 'bilibili' }
     if (/youtube\.com|youtu\.be/i.test(url)) return { url, platform: 'youtube' }
     if (/douyin\.com/i.test(url)) return { url, platform: 'douyin' }

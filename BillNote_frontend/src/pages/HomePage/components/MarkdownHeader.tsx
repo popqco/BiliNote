@@ -103,30 +103,38 @@ export function MarkdownHeader({
       .replace(/\//g, '-')
   }
 
+  const formatVersionLabel = (v?: VersionNote) => {
+    const d = v?.created_at ? new Date(v.created_at) : null
+    if (d && !isNaN(d.getTime())) {
+      const mm = String(d.getMonth() + 1).padStart(2, '0')
+      const dd = String(d.getDate()).padStart(2, '0')
+      const hh = String(d.getHours()).padStart(2, '0')
+      const mi = String(d.getMinutes()).padStart(2, '0')
+      return `${mm}-${dd} ${hh}:${mi}`
+    }
+    return v?.ver_id ? v.ver_id.slice(-6) : ''
+  }
+  const versions = (Array.isArray(currentTask?.markdown) ? currentTask.markdown : []) as VersionNote[]
+  const currentVer = versions.find(v => v.ver_id === currentVerId)
+
   return (
     <div className="sticky top-0 z-10 flex flex-col gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur-sm sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-3 sm:px-4">
       {/* 左侧区域：版本 + 标签 + 创建时间（手机上允许换行，徽章过长截断） */}
       <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-3">
-        {isMultiVersion && (
+        {isMultiVersion && versions.length > 1 && (
           <Select value={currentVerId} onValueChange={setCurrentVerId}>
-            <SelectTrigger className="h-8 w-[160px] text-sm">
+            <SelectTrigger className="h-8 w-[170px] text-sm sm:w-[220px]">
               <div className="flex items-center">
-                {(() => {
-                  const idx = currentTask?.markdown.findIndex(v => v.ver_id === currentVerId)
-                  return idx !== -1 ? `版本（${currentVerId.slice(-6)}）` : ''
-                })()}
+                {currentVer ? `版本 ${formatVersionLabel(currentVer)}` : ''}
               </div>
             </SelectTrigger>
 
             <SelectContent>
-              {(currentTask?.markdown || []).map((v, idx) => {
-                const shortId = v.ver_id.slice(-6)
-                return (
-                  <SelectItem key={v.ver_id} value={v.ver_id}>
-                    {`版本（${shortId}）`}
-                  </SelectItem>
-                )
-              })}
+              {versions.map((v) => (
+                <SelectItem key={v.ver_id} value={v.ver_id}>
+                  {`${formatVersionLabel(v)}${v.model_name ? ` · ${v.model_name}` : ''}`}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         )}

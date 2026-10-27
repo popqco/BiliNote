@@ -9,6 +9,7 @@
 2. 兜底：yt-dlp 元数据模式（extract_info(download=False)）。
 任何失败都静默返回 None——元信息拿不到不能影响主流程。
 """
+import time
 from typing import Optional
 
 from app.services.cookie_manager import CookieConfigManager
@@ -24,28 +25,44 @@ def _bilibili_api_meta(bvid: str) -> Optional[dict]:
     cookie = CookieConfigManager().get("bilibili") or ""
     if cookie:
         headers["Cookie"] = cookie
-    try:
-        resp = bilibili_session().get(
-            "https://api.bilibili.com/x/web-interface/view",
-            params={"bvid": bvid},
-            headers=headers,
-            timeout=6,
-        )
-        data = resp.json()
-    except Exception as e:
-        logger.warning(f"video_meta API 请求失败: {e}")
+    # 2026-10-24 实拍：任务提交时 DNS 短暂不可用（getaddrinfo failed），一次
+    # 失败就把 audio_meta 写成全 null 并落进 _audio.json；重试时复用缓存，
+    # 标题/封面永远补不回来（历史里出现「未命名笔记」）。元信息只有几百字节，
+    # 对瞬时网络错误做短退避重试，仍失败再交给 yt-dlp 兜底。
+    for attempt in range(3):
+        try:
+            resp = bilibili_session().get(
+                "https://api.bilibili.com/x/web-interface/view",
+                params={"bvid": bvid},
+                headers=headers,
+                timeout=6,
+            )
+            data = resp.json()
+        except Exception as e:  # DNS / 连接 / 读超时
+            if attempt < 2:
+                logger.info(f"video_meta API 请求失败（第 {attempt + 1} 次），重试: {e}")
+                time.sleep(0.8 * (attempt + 1))
+                continue
+            logger.warning(f"video_meta API 请求失败（已重试 {attempt + 1} 次）: {e}")
+            return None
+        if data.get("code") != 0:
+            logger.warning(f"video_meta API 返回错误: code={data.get('code')}, msg={data.get('message')}")
+            return None
+        d = data.get("data") or {}
+        meta = {
+            "video_id": d.get("bvid") or bvid,
+            "title": d.get("title"),
+            "cover_url": d.get("pic"),
+            "duration": d.get("duration"),
+            "platform": "bilibili",
+        }
+        if meta.get("title"):
+            return meta
+        # 接口 200 但页面被删/地区限制时 data 为空：别把空壳缓存下来，
+        # 让 fetch_video_meta 继续走 yt-dlp 兜底。
+        logger.warning(f"video_meta API 未返回标题（bvid={bvid}）")
         return None
-    if data.get("code") != 0:
-        logger.warning(f"video_meta API 返回错误: code={data.get('code')}, msg={data.get('message')}")
-        return None
-    d = data.get("data") or {}
-    return {
-        "video_id": d.get("bvid") or bvid,
-        "title": d.get("title"),
-        "cover_url": d.get("pic"),
-        "duration": d.get("duration"),
-        "platform": "bilibili",
-    }
+    return None
 
 
 def _ytdlp_meta(url: str, platform: str) -> Optional[dict]:
@@ -116,6 +133,13 @@ def fetch_video_meta(url: str, platform: str = "bilibili") -> Optional[dict]:
         if meta and meta.get("title"):
             return meta
         return None
+    if platform == "wechat_article":
+        from app.downloaders.wechat_common import fetch_wechat_article_meta
+        return fetch_wechat_article_meta(url)
+    if platform == "wechat_channels":
+        # 匿名预览接口即可拿标题/作者/封面（播放地址仍需元宝登录态）。
+        from app.downloaders.wechat_common import fetch_wechat_channels_meta
+        return fetch_wechat_channels_meta(url)
     return _ytdlp_meta(url, platform)
 
 

@@ -2,6 +2,8 @@ from app.downloaders.bilibili_downloader import BilibiliDownloader
 from app.downloaders.douyin_downloader import DouyinDownloader
 from app.downloaders.kuaishou_downloader import KuaiShouDownloader
 from app.downloaders.local_downloader import LocalDownloader
+from app.downloaders.wechat_article_downloader import WechatArticleDownloader
+from app.downloaders.wechat_channels_downloader import WechatChannelsDownloader
 from app.downloaders.xiaohongshu_downloader import XiaohongshuDownloader
 from app.downloaders.youtube_downloader import YoutubeDownloader
 
@@ -14,5 +16,7 @@ SUPPORT_PLATFORM_MAP = {
     'kuaishou': KuaiShouDownloader,
     'douyin': DouyinDownloader,
     'xiaohongshu': XiaohongshuDownloader,
+    'wechat_article': WechatArticleDownloader,
+    'wechat_channels': WechatChannelsDownloader,
     'local': LocalDownloader,
 }

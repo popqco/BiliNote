@@ -14,6 +14,7 @@
 7. 非 JPEG 原图（png）媒体类型正确。
 """
 
+import asyncio
 import pathlib
 import sys
 import tempfile
@@ -54,7 +55,7 @@ class ImgThumbTestBase(unittest.TestCase):
         self._tmp.cleanup()
 
     def call(self, url, w=1600):
-        return note_router.img_thumb(url, w)
+        return asyncio.run(note_router.img_thumb(url, w))
 
     def cached_files(self):
         if not self.cache.is_dir():
@@ -68,7 +69,7 @@ class ResizeAndCacheTests(ImgThumbTestBase):
         r = self.call("/static/screenshots/big.jpg", 1600)
 
         self.assertEqual(r.media_type, "image/jpeg")
-        self.assertIn("max-age=86400", str(r.headers))
+        self.assertIn("immutable", str(r.headers))
         with Image.open(r.path) as im:
             self.assertEqual((im.width, im.height), (1600, 900))
         self.assertEqual(len(self.cached_files()), 1, "缩略应落盘到缓存目录")
@@ -117,8 +118,10 @@ class UrlResolutionTests(ImgThumbTestBase):
         r_rel = self.call("/static/screenshots/a.jpg", 1600)
         r_abs = self.call("http://127.0.0.1:8483/static/screenshots/a.jpg", 1600)
         r_local = self.call("http://localhost:8483/static/screenshots/a.jpg", 1600)
+        # 远端手机经 Tailscale IP 打开时，MarkdownViewer 可能拼出 Worker 绝对地址
+        r_tail = self.call("http://100.67.206.88:8483/static/screenshots/a.jpg", 1600)
 
-        for r in (r_rel, r_abs, r_local):
+        for r in (r_rel, r_abs, r_local, r_tail):
             self.assertEqual(pathlib.Path(r.path), self.shots / "a.jpg")
 
     def test_missing_file_is_404(self):

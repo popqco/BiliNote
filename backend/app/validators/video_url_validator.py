@@ -11,6 +11,8 @@ SUPPORTED_PLATFORMS = {
     "kuaishou": "kuaishou",
     "xiaohongshu": "xiaohongshu",
     "xhslink": "xhslink",
+    "wechat_article": r"(https?://)?mp\.weixin\.qq\.com/s",
+    "wechat_channels": r"(https?://)?(weixin\.qq\.com/sph/|channels\.weixin\.qq\.com/mobile/sf/)",
 }
 
 

@@ -158,7 +158,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+
+
+@app.middleware("http")
+async def _long_cache_static(request, call_next):
+    """带内容指纹的静态资源给一年 immutable 缓存。
+
+    远端手机每次打开都要重新走 Tailscale 拉 JS/截图；这些文件名带 hash
+    （/assets/index-<hash>.js）或 uuid（/static/screenshots/<uuid>.jpg），
+    内容不会原地变。浏览器命中缓存后不再发请求，Tailscale 抖动也影响不到。
+    index.html 仍由 frontend_dist 设 no-store，升级后能拿到新分包引用。
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if (
+        response.status_code == 200
+        and (path.startswith("/assets/") or path.startswith("/static/screenshots/"))
+    ):
+        response.headers.setdefault(
+            "Cache-Control", "public, max-age=31536000, immutable"
+        )
+    return response
+
+
 register_exception_handlers(app)
 app.mount(static_path, StaticFiles(directory=static_dir), name="static")
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")

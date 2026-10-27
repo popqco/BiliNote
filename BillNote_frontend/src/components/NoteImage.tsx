@@ -5,8 +5,12 @@ import {
   subscribeScreenshotExportMode,
 } from '@/utils/screenshotLoadPolicy'
 
-/** 装载/卸载带：可视区外 ±BAND px 内挂真 src，超出即卸载 */
-const BAND = '2500px 0px 2500px 0px'
+/** 装载/卸载带：可视区外 ±BAND px 内挂真 src，超出即卸载。
+ *  手机缩小到 ±1200px：一屏能带的截图少一半，首屏不会一次抢几十个
+ *  连接；滚过的图命中后端 immutable 缓存，回来挂载是毫秒级。 */
+const NARROW_VIEWPORT =
+  typeof window !== 'undefined' && typeof window.innerWidth === 'number' && window.innerWidth < 768
+const BAND = NARROW_VIEWPORT ? '1200px 0px 1200px 0px' : '2500px 0px 2500px 0px'
 
 /** 首帧兜底比例：16:9 */
 const DEFAULT_DIMS = { w: 1600, h: 900 }
@@ -190,6 +194,8 @@ export default function NoteImage({
         // 迟迟量不出来，首次打开时反而会在滚动中突然整篇改比例。
         loading="eager"
         decoding="async"
+        // 截图是阅读的次要数据：让正文/状态请求先走，别让一屏图片占满连接。
+        fetchPriority="low"
         // 缩略端点不可用（旧后端/缓存损坏）时回退原图：宁慢勿裂。
         // 用 ref 直接改 src（不触发 React 重渲染），避免与挂/卸逻辑打架
         onError={e => {

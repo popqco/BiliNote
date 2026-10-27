@@ -16,4 +16,7 @@ class GPTSource:
     _format: Optional[list] = None
     video_img_urls:  Optional[list] = None
     checkpoint_key: Optional[str] = None
+    # 截图密度（2026-10-27）：秒/张 + 视频时长，用于给每批 prompt 算硬配额。
+    screenshot_interval: Optional[int] = None
+    duration: Optional[float] = None
 

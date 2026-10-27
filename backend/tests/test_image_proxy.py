@@ -20,6 +20,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import app.routers.note as note_router  # noqa: E402
+from PIL import Image as PILImage  # noqa: E402  (收集期捕获真 PIL，避免 fake 包污染)
 
 
 class _FakeResp:
@@ -73,8 +74,8 @@ class ImageProxyTestBase(unittest.TestCase):
             p.stop()
         self._tmp.cleanup()
 
-    def call(self, url):
-        return asyncio.run(note_router.image_proxy(self.request, url))
+    def call(self, url, w=0):
+        return asyncio.run(note_router.image_proxy(self.request, url, w))
 
 
 class NormalizeUrlTests(unittest.TestCase):
@@ -189,6 +190,34 @@ class ImageProxyFetchTests(ImageProxyTestBase):
 
         self.assertEqual(getattr(r, "status_code", 200), 200)
         self.assertEqual(r.body, b"\xff\xd8\xff\xe0jpeg-bytes")
+
+
+class CoverResizeTests(ImageProxyTestBase):
+    def _jpeg(self, width=640, height=360):
+        import io
+
+        buf = io.BytesIO()
+        PILImage.new("RGB", (width, height), (10, 20, 30)).save(buf, format="JPEG")
+        return buf.getvalue()
+
+    def test_width_resizes_and_caches_per_width(self):
+        calls, kwargs_log = [], []
+        script = [_FakeResp(content=self._jpeg()), _FakeResp(content=self._jpeg())]
+        with patch.object(
+            note_router.httpx, "AsyncClient", _fake_client_factory(script, calls, kwargs_log)
+        ):
+            r1 = self.call("http://i0.hdslb.com/bfs/archive/cover.jpg", w=320)
+            r2 = self.call("http://i0.hdslb.com/bfs/archive/cover.jpg", w=320)
+            r3 = self.call("http://i0.hdslb.com/bfs/archive/cover.jpg", w=160)
+
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        assert len(calls) == 2, "同宽度第二次必须命中缓存；换宽度才重新取/缩放"
+        with PILImage.open(r1.path) as im:
+            assert im.width == 320
+        with PILImage.open(r3.path) as im:
+            assert im.width == 160
+        assert len(list(self.cache_dir.glob("*.jpg"))) == 2
 
 
 if __name__ == "__main__":

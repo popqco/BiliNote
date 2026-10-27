@@ -67,8 +67,19 @@ from app.utils.note_helper import (
 from app.utils.note_quality import NoteContentError, ensure_note_content
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
-from app.utils.screenshot_marker import extract_screenshot_timestamps, strip_screenshot_markers
+from app.utils.screenshot_marker import (
+    iter_screenshot_markers,
+    strip_screenshot_markers,
+)
+from app.utils.screenshot_policy import (
+    DEFAULT_MAX_COUNT,
+    NearDuplicateFilter,
+    dhash,
+    resolve_interval,
+    select_markers,
+)
 from app.utils.status_code import StatusCode
+from app.utils.url_parser import extract_video_id
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import VideoReader
 
@@ -137,6 +148,11 @@ class NoteGenerator:
     # 安全地走 _cancel_requested()，不需要每个调用方都先赋值。
     _run: Optional[TaskRun] = None
 
+    # 截图密度（2026-10-27）：由 generate() 按「请求里的密度档位 > 全局配置」解析。
+    # 类级默认值让测试/直调实例无需先跑 generate() 也能安全使用。
+    screenshot_interval: int = 90
+    screenshot_max_count: int = DEFAULT_MAX_COUNT
+
     def __init__(self):
         from app.services.transcriber_config_manager import TranscriberConfigManager
         config_manager = TranscriberConfigManager()
@@ -195,6 +211,7 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        screenshot_density: Optional[str] = None,
         run: Optional[TaskRun] = None,
     ) -> NoteResult | None:
         """
@@ -217,10 +234,28 @@ class NoteGenerator:
         :param video_understanding: 是否需要视频拼图理解（生成缩略图）
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
+        :param screenshot_density: 原片截图密度档位（sparse/normal/rich），
+                                   不传时用全局配置 screenshot_interval
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
         if grid_size is None:
             grid_size = []
+
+        # 截图密度：请求档位 > 全局配置。sparse/normal/rich → 180/90/45 秒/张。
+        try:
+            _task_cfg = TaskConfigManager()
+            self.screenshot_interval = resolve_interval(
+                screenshot_density, _task_cfg.get("screenshot_interval")
+            )
+            self.screenshot_max_count = _task_cfg.get("screenshot_max_count")
+        except Exception as exc:  # 配置读失败不许拖垮生成
+            logger.warning(f"读取截图密度配置失败，使用默认值：{exc}")
+            self.screenshot_interval = resolve_interval(screenshot_density)
+            self.screenshot_max_count = DEFAULT_MAX_COUNT
+        logger.info(
+            f"截图密度：每 {self.screenshot_interval}s 最多 1 张，单篇上限 "
+            f"{self.screenshot_max_count} 张（档位={screenshot_density or '全局配置'}）"
+        )
 
         # 绑定本次执行的 run：register_run 会作废同 task_id 的旧 run（重试场景），
         # 并把「提交后立刻点了停止」的墓碑转成本 run 的取消信号
@@ -388,7 +423,11 @@ class NoteGenerator:
 
             # 5. 保存记录到数据库
             self._update_status(task_id, TaskStatus.SAVING)
-            self._save_metadata(video_id=audio_meta.video_id, platform=platform, task_id=task_id)
+            self._save_metadata(
+                video_id=audio_meta.video_id or extract_video_id(str(video_url), platform),
+                platform=platform,
+                task_id=task_id,
+            )
 
             # 6. 完成
             self._update_status(task_id, TaskStatus.SUCCESS)
@@ -664,6 +703,24 @@ class NoteGenerator:
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
                 cached_audio = AudioDownloadResult(**data)
+                # 旧缓存里标题/封面为空（抓元信息时 DNS/网络瞬时失败），重试会
+                # 原样复用这份坏缓存，历史上表现为「未命名笔记」永远修不好。
+                # 这里补一次轻量元信息并回写；失败则保留原值，不影响主流程。
+                if platform != "local" and (not cached_audio.title or not cached_audio.cover_url):
+                    try:
+                        meta = fetch_video_meta(str(video_url), platform)
+                        if meta and meta.get("title"):
+                            cached_audio.title = meta.get("title")
+                            cached_audio.cover_url = meta.get("cover_url") or cached_audio.cover_url
+                            cached_audio.duration = meta.get("duration") or cached_audio.duration
+                            cached_audio.video_id = meta.get("video_id") or cached_audio.video_id
+                            audio_cache_file.write_text(
+                                json.dumps(asdict(cached_audio), ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
+                            logger.info(f"已补全音频缓存中缺失的元信息: {cached_audio.title}")
+                    except Exception as e:
+                        logger.warning(f"补全音频缓存元信息失败（保留原值）：{e}")
                 # 缓存命中也补齐视频帧：视频理解开着且本地视频文件还在时重新抽帧。
                 # 缓存里没有可用视频（旧缓存来自未开视频理解的运行，或视频文件已
                 # 被清理）时**不再静默降级纯文本**——本次请求明确要了视频理解，
@@ -847,10 +904,28 @@ class NoteGenerator:
                 file_path=None, title=None, duration=0, cover_url=None,
                 platform=platform, video_id=None, raw_info={}, video_path=None,
             )
-        audio_cache_file.write_text(
-            json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        logger.info(f"元信息提取完成 ({audio_cache_file})")
+        # 至少把链接里的视频 ID 留住：数据库去重/自动化「已有成功笔记」判断
+        # 依赖它。2026-10-24 实拍：元信息抓取失败时 video_id=None 落库，同一视频
+        # 会被自动化反复重跑。
+        if not audio.video_id:
+            try:
+                audio.video_id = extract_video_id(str(video_url), platform)
+            except Exception:
+                pass
+        if audio.title:
+            audio_cache_file.write_text(
+                json.dumps(asdict(audio), ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            logger.info(f"元信息提取完成 ({audio_cache_file})")
+        else:
+            # 不把「全 null」写进缓存：否则以后重试会直接复用坏缓存，标题/
+            # 封面永远补不回来。下次重试重新抓一次元信息（只有几百字节）。
+            try:
+                if audio_cache_file.exists():
+                    audio_cache_file.unlink()
+            except OSError:
+                pass
+            logger.warning("元信息不完整，跳过缓存写入，下次重试会重新抓取")
         return audio
 
 
@@ -1068,7 +1143,7 @@ class NoteGenerator:
             for seg in getattr(transcript, "segments", [])
         )
 
-        def build_source(imgs: List[str], shot: bool) -> GPTSource:
+        def build_source(imgs: List[str], shot: bool, fmt: Optional[List[str]] = None) -> GPTSource:
             return GPTSource(
                 title=audio_meta.title,
                 segment=transcript.segments,
@@ -1076,10 +1151,12 @@ class NoteGenerator:
                 screenshot=shot,
                 video_img_urls=imgs,
                 link=link,
-                _format=formats,
+                _format=formats if fmt is None else fmt,
                 style=style,
                 extras=extras,
                 checkpoint_key=task_id,
+                screenshot_interval=self.screenshot_interval,
+                duration=float(getattr(audio_meta, "duration", 0) or 0),
             )
 
         attempts: List[Tuple[str, Optional[List[str]], bool]] = [("full", video_img_urls, screenshot)]
@@ -1142,7 +1219,15 @@ class NoteGenerator:
                     message=f"正在调用模型总结（{strategy_labels.get(strategy, strategy)}），长视频可能需要几分钟",
                 )
             try:
-                markdown = gpt.summarize(build_source(imgs or [], shot))
+                # 纯文本兜底不再要求截图标记：此时没有可参考的拼图，模型只能
+                # 凭转写猜时间戳，生成的图与正文对不上（旧实现会把 guessed
+                # ts 直接丢给 ffmpeg）。
+                fallback_fmt = (
+                    [f for f in formats if f != "screenshot"]
+                    if strategy == "text_only"
+                    else None
+                )
+                markdown = gpt.summarize(build_source(imgs or [], shot, fallback_fmt))
                 # 上游对敏感内容可能返回 HTTP 200 + 「抱歉，这个问题未找到相关
                 # 结果。」（2026-10-21 实拍）。不校验就会把空壳笔记标成成功。
                 # 拒答属于内容层面的确定性失败，换更小的请求重发同一段内容
@@ -1229,7 +1314,9 @@ class NoteGenerator:
         if "screenshot" in formats:
             if video_path:
                 try:
-                    markdown = self._insert_screenshots(markdown, video_path)
+                    markdown = self._insert_screenshots(
+                        markdown, video_path, duration=getattr(audio_meta, "duration", 0)
+                    )
                 except Exception as exc:
                     logger.warning("截图插入失败，跳过该步骤")
             else:
@@ -1247,33 +1334,83 @@ class NoteGenerator:
 
         return cleanup_marker_residue(markdown)
 
-    def _insert_screenshots(self, markdown: str, video_path: Path) -> str | None | Any:
-        """
-        扫描 Markdown 文本中所有 Screenshot 标记，并替换为实际生成的截图链接。
+    def _insert_screenshots(
+        self,
+        markdown: str,
+        video_path: Path,
+        duration: Optional[float] = None,
+    ) -> str:
+        """按密度策略筛选 Screenshot 标记，生成截图并替换为图片链接。
 
-        :param markdown: 含有 *Screenshot-mm:ss 或 Screenshot-[mm:ss] 标记的 Markdown 文本
-        :param video_path: 本地视频文件路径
-        :return: 替换后的 Markdown 字符串
+        2026-10-27：旧实现「一个标记 = 一次 ffmpeg = 一张图」，实测单篇最多
+        790 张（图片语法占正文 64%）。现在先用 screenshot_policy 做确定性
+        筛选（同一时间戳去重/最小间隔/小节配额/全篇上限），被筛掉的标记直接
+        清空、根本不调 ffmpeg；生成后再用 8×8 dHash 丢弃相邻的同一画面。
         """
-        matches: List[Tuple[str, int]] = extract_screenshot_timestamps(markdown)
+        markers = iter_screenshot_markers(markdown)
+        if not markers:
+            return markdown
+
+        pick = select_markers(
+            markdown,
+            markers,
+            duration=duration,
+            interval=self.screenshot_interval,
+            max_count=self.screenshot_max_count,
+        )
+        keep_starts = {m.start for m in pick.keep}
+        near_dup = NearDuplicateFilter()
+
+        replacements: List[Tuple[int, int, str]] = []
+        generated = 0
         failed = 0
-        for idx, (marker, ts) in enumerate(matches):
+        duplicate = 0
+
+        for marker in markers:
+            if marker.start not in keep_starts:
+                replacements.append((marker.start, marker.end, ""))
+                continue
             try:
-                img_path = generate_screenshot(str(video_path), str(IMAGE_OUTPUT_DIR), ts, idx)
-                filename = Path(img_path).name
-                # 构建前端可访问的 URL，例如 /static/screenshots/{filename}
-                img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
-                markdown = markdown.replace(marker, f"![]({img_url})", 1)
+                img_path = generate_screenshot(
+                    str(video_path), str(IMAGE_OUTPUT_DIR), marker.ts, generated
+                )
             except Exception as exc:
-                # 单张截图失败不再毁掉整篇笔记（旧行为 return None 会让上游
-                # 把整个 markdown 置空，笔记直接"生成成功"却空白）。改为：
-                # 记日志 + 把标记从正文里摘掉（留着一行 *Screenshot-[mm:ss]
-                # 是纯噪音），继续处理其余标记。
+                # 单张失败不毁整篇：记日志 + 摘掉该标记，继续处理其余标记。
                 failed += 1
-                logger.warning(f"生成截图失败，已移除该标记 (timestamp={ts})：{exc}")
-                markdown = markdown.replace(marker, "", 1)
-        if failed:
-            logger.warning(f"截图插入完成，{failed}/{len(matches)} 张失败被跳过")
+                logger.warning(
+                    f"生成截图失败，已移除该标记 (timestamp={marker.ts})：{exc}"
+                )
+                replacements.append((marker.start, marker.end, ""))
+                continue
+
+            digest = dhash(img_path)
+            if digest is not None and near_dup.is_duplicate(marker.ts, digest):
+                duplicate += 1
+                try:
+                    Path(img_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                replacements.append((marker.start, marker.end, ""))
+                continue
+
+            generated += 1
+            filename = Path(img_path).name
+            img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
+            # alt 存时间：前端据此渲染「▶ 12:20」跳转徽章，不必新增字段。
+            label = f"{marker.ts // 60}:{marker.ts % 60:02d}"
+            replacements.append((marker.start, marker.end, f"![{label}]({img_url})"))
+
+        # 从后往前按字符位置替换：重复标记也不会像 str.replace(…, 1) 那样错位。
+        for start, end, text in sorted(replacements, key=lambda r: r[0], reverse=True):
+            markdown = markdown[:start] + text + markdown[end:]
+
+        dropped = sum(pick.dropped.values())
+        if dropped or duplicate or failed:
+            logger.info(
+                f"截图密度策略：标记 {len(markers)} → 生成 {generated} 张"
+                f"（预算筛掉 {dropped}、相邻重复 {duplicate}、失败 {failed}）"
+                f" 明细={pick.dropped}"
+            )
         return markdown
 
     def _save_metadata(self, video_id: str, platform: str, task_id: str) -> None:
@@ -1285,6 +1422,11 @@ class NoteGenerator:
         :param task_id: 任务 ID
         """
         try:
+            if not video_id:
+                # 元信息彻底失败时宁可不写这条记录，也不要写 video_id=NULL
+                # 的脏行（自动化按 video_id 查已有笔记会永远查不到而重跑）。
+                logger.warning(f"缺少 video_id，跳过数据库任务记录 (platform={platform}, task_id={task_id})")
+                return
             insert_video_task(video_id=video_id, platform=platform, task_id=task_id)
             logger.info(f"已保存任务记录到数据库 (video_id={video_id}, platform={platform}, task_id={task_id})")
         except Exception as e:
