@@ -55,6 +55,7 @@ def test_task_config_defaults_without_file(tmp_path, monkeypatch):
     monkeypatch.delenv("SUMMARIZE_BATCH_CONCURRENCY", raising=False)
     monkeypatch.delenv("SCREENSHOT_INTERVAL", raising=False)
     monkeypatch.delenv("SCREENSHOT_MAX_COUNT", raising=False)
+    monkeypatch.delenv("SCREENSHOT_PLANNER", raising=False)
     mgr = TaskConfigManager(filepath=str(tmp_path / "task_config.json"))
     cfg = mgr.get_config()
     assert cfg == {
@@ -64,6 +65,8 @@ def test_task_config_defaults_without_file(tmp_path, monkeypatch):
         "summarize_batch_concurrency": 2,
         "screenshot_interval": 90,
         "screenshot_max_count": 60,
+        # 2026-10-28 Phase-1：截图编排默认自适应
+        "screenshot_planner": "adaptive",
     }
     # 读不落盘：文件缺失时环境变量/默认值照常工作
     assert not (tmp_path / "task_config.json").exists()

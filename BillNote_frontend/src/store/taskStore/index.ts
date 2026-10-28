@@ -95,6 +95,8 @@ export interface Task {
     video_understanding?: boolean
     video_interval?: number
     grid_size?: [number, number]
+    /** 原片截图密度选择（2026-10-27 新增；老任务缺失） */
+    screenshot_density?: 'global' | 'sparse' | 'normal' | 'rich'
     task_id?: string
   }
 }

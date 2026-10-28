@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select.tsx'
 import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
-import { get_task_config, save_task_config, type TaskConfig } from '@/services/taskConfig.ts'
+import { get_task_config, save_task_config, type ScreenshotPlanner, type TaskConfig } from '@/services/taskConfig.ts'
 import {
   get_screenshot_stats,
   slim_screenshots,
@@ -35,7 +35,15 @@ import {
  * 预算即时生效（每个任务启动时读取），并发数热切换不打断在途任务。
  */
 // 每个数值字段的 UI 上下限（后端还有更宽的夹取兜底）
-const TASK_CFG_LIMITS: Record<keyof TaskConfig, [number, number]> = {
+type NumericTaskKey =
+  | 'max_workers'
+  | 'frame_budget'
+  | 'image_budget'
+  | 'summarize_batch_concurrency'
+  | 'screenshot_interval'
+  | 'screenshot_max_count'
+
+const TASK_CFG_LIMITS: Record<NumericTaskKey, [number, number]> = {
   max_workers: [1, 8],
   frame_budget: [100, 200000],
   image_budget: [10, 50000],
@@ -45,7 +53,7 @@ const TASK_CFG_LIMITS: Record<keyof TaskConfig, [number, number]> = {
 }
 
 const TASK_CFG_META: Array<{
-  key: keyof TaskConfig
+  key: NumericTaskKey
   label: string
   desc: string
   suffix: string
@@ -76,8 +84,8 @@ const TASK_CFG_META: Array<{
   },
   {
     key: 'screenshot_interval',
-    label: '截图平均间隔',
-    desc: '原片截图平均每多少秒最多 1 张（越小越密）。生成时同时约束模型配额与后处理，超出的标记直接丢弃，不再逐帧截图。',
+    label: '截图预算间隔',
+    desc: '自适应编排下只用来换算目标张数（≈ 时长 ÷ 间隔，再受单篇上限约束）：密集段多截、口播段少截，不再均匀切分。切到旧版固定间隔后，它恢复为「平均每多少秒最多 1 张」。',
     suffix: '秒',
   },
   {
@@ -106,7 +114,9 @@ const General = () => {
   const [shotStats, setShotStats] = useState<ScreenshotStats | null>(null)
   const [shotStatsLoading, setShotStatsLoading] = useState(false)
   const [slimBusy, setSlimBusy] = useState(false)
-  const [slimMin, setSlimMin] = useState('100')
+  // 默认处理“全部超限笔记”：库内最大张数可能已经低于 100（2026-10-28 实测
+  // 最大 99），默认 ≥100 会变成空操作，用户点完以为已清理干净。
+  const [slimMin, setSlimMin] = useState('0')
   const [slimPreview, setSlimPreview] = useState<SlimResult | null>(null)
   const [slimConfirm, setSlimConfirm] = useState(false)
   const [slimDone, setSlimDone] = useState<SlimResult | null>(null)
@@ -146,7 +156,7 @@ const General = () => {
 
   // 数字输入失焦时提交：与「服务器基线」比较，范围内且真的变了才发请求，
   // 非法值回滚到基线（而不是把脏本地值原样写回）
-  const commitTaskCfgNumber = (key: keyof TaskConfig, raw: string) => {
+  const commitTaskCfgNumber = (key: NumericTaskKey, raw: string) => {
     const base = savedRef.current
     if (!base) return
     const [lo, hi] = TASK_CFG_LIMITS[key]
@@ -366,6 +376,33 @@ const General = () => {
           2026-10-10 定版的激进档（4800 帧 / 1000 张拼图），免费额度紧张时可调回旧档
           （如 2400/500）。
         </div>
+        <div className="mt-3 flex items-center justify-between gap-4">
+          <div className="text-sm">
+            截图编排
+            <div className="text-muted-foreground text-xs">
+              自适应：按画面变化、停留时长、清晰度与转写密度打分，把预算分给信息密集的
+              段落（口播/过场段自然少截），5 分钟粒度保留覆盖下限。影子对比：仍按旧版
+              出图，只在日志里记录两种方案差异，适合先观察一段时间。旧版固定间隔：完全
+              沿用均匀抽稀。
+            </div>
+          </div>
+          <Select
+            value={taskCfg?.screenshot_planner ?? 'adaptive'}
+            onValueChange={v => {
+              void commitTaskCfg({ screenshot_planner: v as ScreenshotPlanner })
+            }}
+            disabled={!taskCfg}
+          >
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="adaptive">自适应（推荐）</SelectItem>
+              <SelectItem value="shadow">影子对比（只记日志）</SelectItem>
+              <SelectItem value="legacy">旧版固定间隔</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         {TASK_CFG_META.map(item => (
           <div key={item.key} className="mt-3 flex items-center justify-between gap-4">
             <div className="text-sm">
@@ -397,17 +434,22 @@ const General = () => {
       <div className="border-border mt-4 max-w-3xl rounded-lg border p-4">
         <div className="text-sm font-medium">原片截图维护</div>
         <div className="text-muted-foreground mt-1 text-xs">
-          检查现有笔记的截图数量，并按当前密度（每 {shotStats?.interval ?? 90} 秒最多 1 张、
-          单篇上限 {shotStats?.max_count ?? 60} 张）一次性瘦身。执行前会把旧正文自动归档为一个版本，
-          可在笔记右上角的版本下拉里切回；只改正文引用，不删除图片文件。
+          检查现有笔记的截图数量，并按每篇生成时的密度（旧笔记回退到当前全局：
+          每 {shotStats?.interval ?? 90} 秒最多 1 张、单篇上限 {shotStats?.max_count ?? 60} 张）
+          一次性瘦身，并顺带清理上一轮瘦身留下的空 bullet / 冒号残行（不动图片）。
+          执行前会把旧正文自动归档为一个版本，可在笔记右上角的版本下拉里切回；
+          只改正文引用，不删除图片文件。
         </div>
 
         {shotStats ? (
-          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-5">
+          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-6">
             <div>笔记 {shotStats.notes}</div>
             <div>带图 {shotStats.notes_with_shots}</div>
             <div>截图 {shotStats.images.toLocaleString()}</div>
             <div>超限 {shotStats.over_limit}</div>
+            <div className={shotStats.notes_with_residue > 0 ? 'text-amber-600' : undefined}>
+              残渣 {shotStats.notes_with_residue}
+            </div>
             <div>磁盘 {(shotStats.disk.bytes / 1024 ** 3).toFixed(1)} GB</div>
           </div>
         ) : (
@@ -430,10 +472,10 @@ const General = () => {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="0">全部超限笔记（推荐）</SelectItem>
               <SelectItem value="50">仅 ≥50 张</SelectItem>
               <SelectItem value="100">仅 ≥100 张</SelectItem>
               <SelectItem value="200">仅 ≥200 张</SelectItem>
-              <SelectItem value="0">全部超限笔记</SelectItem>
             </SelectContent>
           </Select>
           <Button
@@ -470,8 +512,12 @@ const General = () => {
             预览：影响 {slimPreview.notes_scanned} 篇中的 {slimPreview.notes_changed} 篇，
             {slimPreview.images_before.toLocaleString()} →{' '}
             {slimPreview.images_after.toLocaleString()} 张
+            {slimPreview.residue_cleaned > 0 &&
+              `；另清理 ${slimPreview.residue_cleaned} 篇历史瘦身残渣（空 bullet/冒号行，不动图片）`}
             {slimPreview.skipped_active > 0 &&
               `（${slimPreview.skipped_active} 篇生成中已跳过）`}
+            {slimPreview.skipped_archive > 0 &&
+              `（${slimPreview.skipped_archive} 篇归档失败已跳过）`}
             {slimPreview.details.slice(0, 5).map(item => (
               <div key={item.task_id} className="mt-1 truncate">
                 · {item.title || item.task_id.slice(0, 8)}：{item.before} → {item.after}
@@ -483,7 +529,11 @@ const General = () => {
           <div className="text-muted-foreground mt-3 text-xs">
             已完成：{slimDone.notes_changed} 篇，
             {slimDone.images_before.toLocaleString()} →{' '}
-            {slimDone.images_after.toLocaleString()} 张。
+            {slimDone.images_after.toLocaleString()} 张
+            {slimDone.residue_cleaned > 0 &&
+              `；另清理 ${slimDone.residue_cleaned} 篇历史残渣`}
+            {slimDone.skipped_archive > 0 &&
+              `；${slimDone.skipped_archive} 篇归档失败已跳过`}。
           </div>
         )}
       </div>

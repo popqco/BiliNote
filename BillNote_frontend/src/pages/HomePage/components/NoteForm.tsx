@@ -80,7 +80,11 @@ const formSchema = z
       .default([2, 2])
       .optional(),
     // 原片截图密度：控制模型与后处理的截图预算（2026-10-27）
-    screenshot_density: z.enum(['sparse', 'normal', 'rich']).default('normal').optional(),
+    // global = 跟随「设置→通用」的 screenshot_interval（2026-10-28 修正默认值覆盖全局）
+    screenshot_density: z
+      .enum(['global', 'sparse', 'normal', 'rich'])
+      .default('global')
+      .optional(),
   })
   .superRefine(({ video_url, platform }, ctx) => {
     if (platform === 'local') {
@@ -348,7 +352,7 @@ const NoteForm = () => {
       video_understanding: lastOptions?.video_understanding ?? false,
       video_interval: lastOptions?.video_interval ?? 6,
       grid_size: lastOptions?.grid_size ?? [2, 2],
-      screenshot_density: lastOptions?.screenshot_density ?? 'normal',
+      screenshot_density: lastOptions?.screenshot_density ?? 'global',
       format: lastOptions?.format ?? [],
     },
   })
@@ -425,7 +429,7 @@ const NoteForm = () => {
       video_interval: formData.video_interval ?? last?.video_interval ?? 6,
       grid_size: formData.grid_size ?? last?.grid_size ?? [2, 2],
       screenshot_density:
-        (formData as any).screenshot_density ?? last?.screenshot_density ?? 'normal',
+        (formData as any).screenshot_density ?? last?.screenshot_density ?? 'global',
       format: formData.format ?? last?.format ?? [],
     })
   }, [
@@ -985,7 +989,7 @@ const NoteForm = () => {
                     <FormLabel>截图密度</FormLabel>
                     <Select
                       disabled={!videoUnderstandingEnabled || !screenshotFormatEnabled}
-                      value={field.value || 'normal'}
+                      value={field.value || 'global'}
                       onValueChange={field.onChange}
                     >
                       <FormControl>

@@ -150,6 +150,22 @@ def archive_previous_result(
         return False
 
 
+def is_archived(task_id: str, root: Path, content: str) -> bool:
+    """指定正文是否已经在 `<task_id>_versions.json` 里。
+
+    维护类写操作（截图瘦身）改的是用户数据，必须先确认旧正文真的归档成功；
+    `archive_previous_result` 内部吞异常返回 False，调用方不能只看返回值。
+    """
+    markdown = str(content or "").strip()
+    if not markdown:
+        return False
+    key = _content_key(markdown)
+    return any(
+        _content_key(str(item.get("content") or "")) == key
+        for item in _load_archived(Path(root), task_id)
+    )
+
+
 def list_task_versions(task_id: str, root: Path) -> List[Dict[str, Any]]:
     """返回该任务的所有可读版本：归档版本 + 当前结果 + 同视频旧任务结果。
 

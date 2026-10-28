@@ -67,10 +67,14 @@ from app.utils.note_helper import (
 from app.utils.note_quality import NoteContentError, ensure_note_content
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
-from app.utils.screenshot_marker import (
-    iter_screenshot_markers,
-    strip_screenshot_markers,
+from app.utils.screenshot_cleanup import (
+    cleanup_residue,
+    marker_removal_spans,
+    merge_spans,
+    strip_markers_with_captions,
 )
+from app.utils.screenshot_marker import ScreenshotMarker, iter_screenshot_markers
+from app.utils.screenshot_planner import PlannedShot, plan_shots
 from app.utils.screenshot_policy import (
     DEFAULT_MAX_COUNT,
     NearDuplicateFilter,
@@ -152,6 +156,10 @@ class NoteGenerator:
     # 类级默认值让测试/直调实例无需先跑 generate() 也能安全使用。
     screenshot_interval: int = 90
     screenshot_max_count: int = DEFAULT_MAX_COUNT
+    screenshot_density: str = "global"
+    # 截图编排方式（2026-10-28 Phase-1）：adaptive 按信息密度分配预算 /
+    # shadow 照旧出图只记日志 / legacy 旧版固定间隔。类级默认值同上。
+    screenshot_planner_mode: str = "adaptive"
 
     def __init__(self):
         from app.services.transcriber_config_manager import TranscriberConfigManager
@@ -234,27 +242,32 @@ class NoteGenerator:
         :param video_understanding: 是否需要视频拼图理解（生成缩略图）
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
-        :param screenshot_density: 原片截图密度档位（sparse/normal/rich），
-                                   不传时用全局配置 screenshot_interval
+        :param screenshot_density: 原片截图密度档位（sparse/normal/rich/global），
+                                   global 或不传时用全局配置 screenshot_interval
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
         if grid_size is None:
             grid_size = []
 
-        # 截图密度：请求档位 > 全局配置。sparse/normal/rich → 180/90/45 秒/张。
+        # 截图密度：请求档位 > 全局配置。sparse/normal/rich → 180/90/45 秒/张；
+        # global（表单默认）显式回退到全局配置，不再用 normal 悄悄覆盖。
+        self.screenshot_density = (screenshot_density or "global").strip().lower()
         try:
             _task_cfg = TaskConfigManager()
             self.screenshot_interval = resolve_interval(
-                screenshot_density, _task_cfg.get("screenshot_interval")
+                self.screenshot_density, _task_cfg.get("screenshot_interval")
             )
             self.screenshot_max_count = _task_cfg.get("screenshot_max_count")
+            self.screenshot_planner_mode = _task_cfg.get_planner_mode()
         except Exception as exc:  # 配置读失败不许拖垮生成
             logger.warning(f"读取截图密度配置失败，使用默认值：{exc}")
-            self.screenshot_interval = resolve_interval(screenshot_density)
+            self.screenshot_interval = resolve_interval(self.screenshot_density)
             self.screenshot_max_count = DEFAULT_MAX_COUNT
+            self.screenshot_planner_mode = "legacy"
         logger.info(
-            f"截图密度：每 {self.screenshot_interval}s 最多 1 张，单篇上限 "
-            f"{self.screenshot_max_count} 张（档位={screenshot_density or '全局配置'}）"
+            f"截图密度：每 {self.screenshot_interval}s 换算 1 张，单篇上限 "
+            f"{self.screenshot_max_count} 张（档位={self.screenshot_density}，"
+            f"编排={self.screenshot_planner_mode}）"
         )
 
         # 绑定本次执行的 run：register_run 会作废同 task_id 的旧 run（重试场景），
@@ -407,6 +420,8 @@ class NoteGenerator:
                     formats=_format,
                     audio_meta=audio_meta,
                     platform=platform,
+                    task_id=task_id,
+                    transcript=transcript,
                 )
 
             markdown = prepend_source_link(markdown, str(video_url))
@@ -439,6 +454,9 @@ class NoteGenerator:
                 model_name=model_name,
                 provider_id=provider_id,
                 style=style,
+                # 每篇实际生效的密度：存量瘦身按篇计算，不再一律套全局 90s
+                screenshot_density=self.screenshot_density,
+                screenshot_interval=self.screenshot_interval,
             )
 
         except TaskCancelled:
@@ -1300,6 +1318,8 @@ class NoteGenerator:
         formats: List[str],
         audio_meta: AudioDownloadResult,
         platform: str,
+        task_id: Optional[str] = None,
+        transcript: Optional[TranscriptResult] = None,
     ) -> str:
         """
         对生成的 Markdown 做后期处理：插入截图和/或插入链接。
@@ -1309,13 +1329,19 @@ class NoteGenerator:
         :param formats: 包含 'link' 或 'screenshot' 的列表
         :param audio_meta: AudioDownloadResult 元信息，用于链接替换
         :param platform: 平台标识，用于链接替换
+        :param task_id: 任务 ID（自适应截图编排读取该任务的采样帧）
+        :param transcript: 转写结果（自适应编排的文本密度特征）
         :return: 处理后的 Markdown 字符串
         """
         if "screenshot" in formats:
             if video_path:
                 try:
                     markdown = self._insert_screenshots(
-                        markdown, video_path, duration=getattr(audio_meta, "duration", 0)
+                        markdown,
+                        video_path,
+                        duration=getattr(audio_meta, "duration", 0),
+                        task_id=task_id,
+                        transcript=transcript,
                     )
                 except Exception as exc:
                     logger.warning("截图插入失败，跳过该步骤")
@@ -1323,8 +1349,9 @@ class NoteGenerator:
                 logger.warning("已选截图格式但没有可用的本地视频（视频理解被降级），移除未兑现的截图标记")
             # 兜底清扫：无论插入是整段跳过还是个别失败，Screenshot 标记一律不许
             # 留在正文（2026-10-13 用户实锤：抽帧没跑成时 6 行 *Screenshot-[mm:ss]
-            # 原样出现在笔记里且一张图都没有）
-            markdown = strip_screenshot_markers(markdown)
+            # 原样出现在笔记里且一张图都没有）。图注也一起清，否则降级路径会
+            # 留下成片的「图注：…」孤儿行。
+            markdown = strip_markers_with_captions(markdown)
 
         if "link" in formats:
             try:
@@ -1339,79 +1366,167 @@ class NoteGenerator:
         markdown: str,
         video_path: Path,
         duration: Optional[float] = None,
+        task_id: Optional[str] = None,
+        transcript: Optional[TranscriptResult] = None,
     ) -> str:
-        """按密度策略筛选 Screenshot 标记，生成截图并替换为图片链接。
+        """按截图编排策略筛选 Screenshot 标记，生成截图并替换为图片链接。
 
         2026-10-27：旧实现「一个标记 = 一次 ffmpeg = 一张图」，实测单篇最多
-        790 张（图片语法占正文 64%）。现在先用 screenshot_policy 做确定性
-        筛选（同一时间戳去重/最小间隔/小节配额/全篇上限），被筛掉的标记直接
+        790 张（图片语法占正文 64%）。现在先做确定性筛选，被筛掉的标记直接
         清空、根本不调 ffmpeg；生成后再用 8×8 dHash 丢弃相邻的同一画面。
+
+        2026-10-28 Phase-1：``screenshot_planner_mode=adaptive`` 时改用
+        ``screenshot_planner.plan_shots``——按画面变化/停留/清晰度/转写密度
+        给每个标记打分，再按 30s 块的信息量分配预算（5 分钟桶有覆盖下限），
+        替代旧版「按小节长度配额 + 等距抽稀」。``shadow`` 只记日志、仍用旧
+        结果出图；``legacy`` 完全保持旧行为。planner 抛错时静默回退旧版。
         """
         markers = iter_screenshot_markers(markdown)
         if not markers:
             return markdown
 
-        pick = select_markers(
+        legacy = select_markers(
             markdown,
             markers,
             duration=duration,
             interval=self.screenshot_interval,
             max_count=self.screenshot_max_count,
         )
-        keep_starts = {m.start for m in pick.keep}
+
+        mode = getattr(self, "screenshot_planner_mode", "legacy")
+        plan = None
+        if mode in ("adaptive", "shadow") and task_id:
+            try:
+                frame_dir, _ = self._task_scratch_dirs(task_id)
+                plan = plan_shots(
+                    markdown,
+                    markers,
+                    frame_dir=frame_dir,
+                    frame_interval=self._last_frame_interval or 6,
+                    segments=getattr(transcript, "segments", None),
+                    duration=duration,
+                    interval=self.screenshot_interval,
+                    max_count=self.screenshot_max_count,
+                )
+            except Exception as exc:
+                logger.warning(f"自适应截图编排失败，回退固定间隔策略：{exc}")
+                plan = None
+        if plan is not None:
+            self._log_screenshot_plan(plan, legacy, mode)
+
+        use_plan = mode == "adaptive" and plan is not None
+        if use_plan:
+            shots_by_anchor = plan.shots_by_anchor()
+            keep_starts = set(shots_by_anchor)
+            dropped = sum(plan.dropped.values())
+            dropped_detail = plan.dropped
+        else:
+            shots_by_anchor = {
+                m.start: [PlannedShot(m.ts, m.ts, m.start, m.end, 0.0)]
+                for m in legacy.keep
+            }
+            keep_starts = set(shots_by_anchor)
+            dropped = sum(legacy.dropped.values())
+            dropped_detail = legacy.dropped
+
         near_dup = NearDuplicateFilter()
 
         replacements: List[Tuple[int, int, str]] = []
+        removals: List[Tuple[int, int]] = []
         generated = 0
         failed = 0
         duplicate = 0
 
+        # 实际会保留下来的标记：初始 keep 集合里，生成失败/相邻重复的会被移除。
+        # 共享图注只属于“最终活下来”的图；全部失败时仍要连图注一起删。
+        effective_keep = set(keep_starts)
+
+        def drop_marker(marker: ScreenshotMarker) -> None:
+            # 连同紧随其后的「图注：…」一起删：只删 marker 会把图注留成
+            # 无图的孤儿行（2026-10-28 review 实测长视频成片都是这种行）。
+            # keep_starts 让同一行还有保留标记时，共享图注不被误删。
+            effective_keep.discard(marker.start)
+            removals.extend(
+                marker_removal_spans(
+                    markdown, marker, keep_starts=effective_keep
+                )
+            )
+
         for marker in markers:
-            if marker.start not in keep_starts:
-                replacements.append((marker.start, marker.end, ""))
-                continue
-            try:
-                img_path = generate_screenshot(
-                    str(video_path), str(IMAGE_OUTPUT_DIR), marker.ts, generated
-                )
-            except Exception as exc:
-                # 单张失败不毁整篇：记日志 + 摘掉该标记，继续处理其余标记。
-                failed += 1
-                logger.warning(
-                    f"生成截图失败，已移除该标记 (timestamp={marker.ts})：{exc}"
-                )
-                replacements.append((marker.start, marker.end, ""))
+            shots = shots_by_anchor.get(marker.start) or []
+            if not shots:
+                drop_marker(marker)
                 continue
 
-            digest = dhash(img_path)
-            if digest is not None and near_dup.is_duplicate(marker.ts, digest):
-                duplicate += 1
+            images: List[str] = []
+            for shot in shots:
                 try:
-                    Path(img_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
-                replacements.append((marker.start, marker.end, ""))
-                continue
+                    img_path = generate_screenshot(
+                        str(video_path), str(IMAGE_OUTPUT_DIR), shot.ts, generated
+                    )
+                except Exception as exc:
+                    # 单张失败不毁整篇：记日志 + 摘掉该标记，继续处理其余标记。
+                    failed += 1
+                    logger.warning(
+                        f"生成截图失败，已移除该标记 (timestamp={shot.ts})：{exc}"
+                    )
+                    continue
 
-            generated += 1
-            filename = Path(img_path).name
-            img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
-            # alt 存时间：前端据此渲染「▶ 12:20」跳转徽章，不必新增字段。
-            label = f"{marker.ts // 60}:{marker.ts % 60:02d}"
-            replacements.append((marker.start, marker.end, f"![{label}]({img_url})"))
+                digest = dhash(img_path)
+                if digest is not None and near_dup.is_duplicate(shot.ts, digest):
+                    duplicate += 1
+                    try:
+                        Path(img_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    continue
+
+                generated += 1
+                filename = Path(img_path).name
+                img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
+                # alt 存时间：前端据此渲染「▶ 12:20」跳转徽章，不必新增字段。
+                label = f"{shot.ts // 60}:{shot.ts % 60:02d}"
+                images.append(f"![{label}]({img_url})")
+
+            if not images:
+                drop_marker(marker)
+                continue
+            # 一个标记理论上只对应一张；plan 允许同锚点多张时按行拼接
+            replacements.append((marker.start, marker.end, "\n".join(images)))
+
+        # 同一行两个标记共享一行图注时会产生重复删除区间；先合并再删，
+        # 否则第二次删除会落在已经位移的文本上（截断正文）。
+        for start, end in merge_spans(removals):
+            replacements.append((start, end, ""))
 
         # 从后往前按字符位置替换：重复标记也不会像 str.replace(…, 1) 那样错位。
         for start, end, text in sorted(replacements, key=lambda r: r[0], reverse=True):
             markdown = markdown[:start] + text + markdown[end:]
+        # 丢弃的标记整行删掉后会留下连续空行/空 bullet；其余标记仍保留图注。
+        markdown = cleanup_residue(markdown)
 
-        dropped = sum(pick.dropped.values())
         if dropped or duplicate or failed:
             logger.info(
-                f"截图密度策略：标记 {len(markers)} → 生成 {generated} 张"
+                f"截图密度策略（{'自适应' if use_plan else '固定间隔'}）："
+                f"标记 {len(markers)} → 生成 {generated} 张"
                 f"（预算筛掉 {dropped}、相邻重复 {duplicate}、失败 {failed}）"
-                f" 明细={pick.dropped}"
+                f" 明细={dropped_detail}"
             )
         return markdown
+
+    @staticmethod
+    def _log_screenshot_plan(plan, legacy, mode: str) -> None:
+        """记录自适应编排结果；shadow 模式下重点看新旧差异。"""
+        legacy_ts = [m.ts for m in legacy.keep]
+        plan_ts = [s.anchor_ts for s in plan.shots]
+        overlap = len(set(legacy_ts) & set(plan_ts))
+        stats = " ".join(f"{key}={value:.0f}" for key, value in plan.stats.items())
+        logger.info(
+            f"截图编排({'影子对比' if mode == 'shadow' else '自适应'}）："
+            f"旧版 {len(legacy_ts)} 张 {legacy_ts[:8]}；"
+            f"新版 {len(plan_ts)} 张 {plan_ts[:8]}；重合 {overlap}；"
+            f"{stats}；丢弃={plan.dropped}"
+        )
 
     def _save_metadata(self, video_id: str, platform: str, task_id: str) -> None:
         """

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -21,10 +20,11 @@ from pydantic import BaseModel
 
 from app.paths import NOTE_OUTPUT_DIR
 from app.services import task_state
-from app.services.note_versions import archive_previous_result
+from app.services.note_versions import archive_previous_result, is_archived
 from app.services.task_config_manager import TaskConfigManager
 from app.utils.logger import get_logger
 from app.utils.response import ResponseWrapper as R
+from app.utils.screenshot_cleanup import cleanup_residue, has_residue, remove_image_refs
 from app.utils.screenshot_policy import (
     NEAR_DUP_HAMMING,
     dhash,
@@ -51,12 +51,17 @@ _MAX_DETAILS = 50
 class SlimRequest(BaseModel):
     task_ids: Optional[list[str]] = None
     dry_run: bool = True
+    # 全局回退间隔：只影响“跟随全局”/没有 per-note density 的旧笔记；
+    # 显式选了 sparse/normal/rich 的笔记仍按自己的预设，不被这里强制覆盖。
     interval: Optional[int] = None
     max_count: Optional[int] = None
     # 只处理引用数不低于该值的笔记（0 = 所有超上限的）
     min_images: int = 0
     # 显式点名某篇时，即使没超上限也做一次相邻去重
     include_under_limit: bool = False
+    # 顺带清理历史瘦身留下的空 bullet / 冒号残行（2026-10-28）。
+    # 独立于图片数上限：已瘦身到上限以下的笔记也需要清。
+    clean_residue: bool = True
 
 
 def _note_files():
@@ -98,8 +103,29 @@ def _limits(interval: Optional[int], max_count: Optional[int]) -> tuple[int, int
     return resolved_interval, resolved_max
 
 
+def _note_interval(data: dict, fallback: int) -> int:
+    """每篇笔记生成时的实际截图间隔。
+
+    - 显式选了 sparse/normal/rich：按该预设，不被全局改动影响；
+    - 选了 global：跟随**当前**全局值（这才是「跟随全局」的语义）；
+    - 旧结果没有 density：用当时快照的 screenshot_interval，再退回全局。
+    """
+    density = str(data.get("screenshot_density") or "").strip().lower()
+    if density in ("sparse", "normal", "rich"):
+        return resolve_interval(density, fallback)
+    if density == "global":
+        return fallback
+    try:
+        value = int(data.get("screenshot_interval"))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
+
+
 def _cap_for(data: dict, interval: int, max_count: int) -> int:
-    cap, _, _ = effective_limits(_duration(data), interval, max_count)
+    cap, _, _ = effective_limits(
+        _duration(data), _note_interval(data, interval), max_count
+    )
     return cap
 
 
@@ -112,11 +138,14 @@ def _screenshot_file(url: str) -> Optional[Path]:
 
 
 def _drop_refs(markdown: str, refs) -> str:
-    """按位置从后往前摘掉图片引用；顺带收掉因此产生的连续空行。"""
-    out = markdown
-    for ref in sorted(refs, key=lambda r: r.start, reverse=True):
-        out = out[: ref.start] + out[ref.end :]
-    return re.sub(r"\n{3,}", "\n\n", out)
+    """摘掉图片引用，并清理因此产生的空 bullet / 冒号残行。
+
+    2026-10-28 实测：只按区间删图会让 `- ![](url)：说明` 变成 `- ：说明`、
+    `![](url)` 变成空 bullet；这些残渣在 118 篇已瘦身笔记里留下 257 条
+    冒号行和 411 条空 bullet（归档的瘦身前版本里是 0）。清理规则与前端
+    「隐藏截图」的 stripScreenshotImages 对齐。
+    """
+    return remove_image_refs(markdown, [(ref.start, ref.end) for ref in refs])
 
 
 def _write_note(path: Path, data: dict, markdown: str) -> None:
@@ -160,6 +189,7 @@ def screenshot_stats():
     with_shots = 0
     total_images = 0
     over_limit = 0
+    residue_notes = 0
     oversized: list[dict] = []
 
     for path in _note_files():
@@ -168,6 +198,8 @@ def screenshot_stats():
         if not isinstance(markdown, str) or not markdown:
             continue
         notes += 1
+        if has_residue(markdown):
+            residue_notes += 1
         refs = iter_image_refs(markdown)
         if not refs:
             continue
@@ -196,6 +228,7 @@ def screenshot_stats():
             "notes_with_shots": with_shots,
             "images": total_images,
             "over_limit": over_limit,
+            "notes_with_residue": residue_notes,
             "interval": interval,
             "max_count": max_count,
             "oversized": oversized[:10],
@@ -219,7 +252,9 @@ def screenshot_slim(data: SlimRequest):
     changed = 0
     images_before = 0
     images_after = 0
-    skipped_active = 0
+    skipped_active_ids: set[str] = set()
+    skipped_archive = 0
+    residue_cleaned = 0
 
     for path in _note_files():
         task_id = path.stem
@@ -240,7 +275,7 @@ def screenshot_slim(data: SlimRequest):
         if len(refs) <= cap and not (explicit and data.include_under_limit):
             continue
         if task_state.is_task_active(task_id):
-            skipped_active += 1
+            skipped_active_ids.add(task_id)
             continue
 
         kept = select_image_refs(markdown, refs, cap) if len(refs) > cap else list(refs)
@@ -268,6 +303,14 @@ def screenshot_slim(data: SlimRequest):
         if not data.dry_run:
             try:
                 archive_previous_result(task_id, Path(NOTE_OUTPUT_DIR), new_markdown)
+                # archive_previous_result 内部吞异常，只看返回值会误判；
+                # 旧正文没进 versions 就绝不覆盖（否则用户失去回退能力）。
+                if not is_archived(task_id, Path(NOTE_OUTPUT_DIR), markdown):
+                    logger.warning(
+                        f"旧正文未归档成功，跳过瘦身 (task_id={task_id})"
+                    )
+                    skipped_archive += 1
+                    continue
                 _write_note(path, doc, new_markdown)
             except Exception as exc:
                 logger.warning(f"截图瘦身写回失败 (task_id={task_id}): {exc}")
@@ -286,11 +329,56 @@ def screenshot_slim(data: SlimRequest):
             }
         )
 
+    # 第二遍：已瘦到上限以下的旧笔记不会被上面的循环处理，但上一轮瘦身
+    # 留下的 `- ：说明` / 空 bullet 还在。这里只做“残渣清理”，不动图片。
+    if data.clean_residue:
+        image_changed_ids = {item["task_id"] for item in details}
+        for path in _note_files():
+            task_id = path.stem
+            if targets and task_id not in targets:
+                continue
+            if task_id in image_changed_ids:
+                continue
+            doc = _read_note(path)
+            markdown = doc.get("markdown")
+            if not isinstance(markdown, str) or not markdown:
+                continue
+            # 尊重同一个 min_images 过滤条件：调用方说「只处理 ≥N 张」时，
+            # 不能顺手重写其它笔记（即使是只清残渣）。
+            refs = iter_image_refs(markdown)
+            if data.min_images and len(refs) < int(data.min_images):
+                continue
+            if not has_residue(markdown):
+                continue
+            if task_state.is_task_active(task_id):
+                skipped_active_ids.add(task_id)
+                continue
+            cleaned = cleanup_residue(markdown)
+            if cleaned == markdown:
+                continue
+            if not data.dry_run:
+                try:
+                    archive_previous_result(task_id, Path(NOTE_OUTPUT_DIR), cleaned)
+                    if not is_archived(task_id, Path(NOTE_OUTPUT_DIR), markdown):
+                        logger.warning(
+                            f"旧正文未归档成功，跳过残渣清理 (task_id={task_id})"
+                        )
+                        skipped_archive += 1
+                        continue
+                    _write_note(path, doc, cleaned)
+                except Exception as exc:
+                    logger.warning(
+                        f"残渣清理写回失败 (task_id={task_id}): {exc}"
+                    )
+                    continue
+            residue_cleaned += 1
+
     details.sort(key=lambda item: -item["dropped"])
     logger.info(
         f"截图瘦身{'演练' if data.dry_run else '完成'}：扫描 {scanned} 篇，"
         f"影响 {changed} 篇，{images_before} → {images_after} 张；"
-        f"跳过生成中 {skipped_active} 篇"
+        f"清理残渣 {residue_cleaned} 篇；跳过生成中 {len(skipped_active_ids)} 篇，"
+        f"归档失败 {skipped_archive} 篇"
     )
     return R.success(
         {
@@ -301,7 +389,9 @@ def screenshot_slim(data: SlimRequest):
             "notes_changed": changed,
             "images_before": images_before,
             "images_after": images_after,
-            "skipped_active": skipped_active,
+            "residue_cleaned": residue_cleaned,
+            "skipped_active": len(skipped_active_ids),
+            "skipped_archive": skipped_archive,
             "details": details[:_MAX_DETAILS],
         }
     )

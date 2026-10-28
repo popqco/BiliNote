@@ -6,6 +6,7 @@ from pathlib import Path
 from app.services import task_state
 from app.services.note_versions import (
     archive_previous_result,
+    is_archived,
     list_task_versions,
 )
 
@@ -43,6 +44,16 @@ def test_archive_previous_result_and_list(tmp_path):
     assert "old markdown" in contents
     # 新版时间更新，排在前面
     assert contents[0] == "new markdown"
+
+
+def test_is_archived_only_checks_versions_file(tmp_path):
+    tid = "task-a"
+    _write_result(tmp_path, tid, "current")
+    # 当前结果不算归档
+    assert is_archived(tid, tmp_path, "current") is False
+    assert archive_previous_result(tid, tmp_path, "new") is True
+    assert is_archived(tid, tmp_path, "current") is True
+    assert is_archived(tid, tmp_path, "missing") is False
 
 
 def test_list_versions_includes_same_video_old_task(tmp_path):

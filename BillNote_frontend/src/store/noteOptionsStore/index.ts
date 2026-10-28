@@ -11,7 +11,7 @@ import { persist } from 'zustand/middleware'
  *
  * 只存「设置」不存「内容」：视频链接、平台、备注不进这里。
  */
-export type ScreenshotDensity = 'sparse' | 'normal' | 'rich'
+export type ScreenshotDensity = 'global' | 'sparse' | 'normal' | 'rich'
 
 export interface LastNoteOptions {
   model_name: string
@@ -21,7 +21,7 @@ export interface LastNoteOptions {
   video_understanding: boolean
   video_interval: number
   grid_size: [number, number]
-  /** 原片截图密度：sparse 精简 / normal 标准 / rich 丰富 */
+  /** 原片截图密度：global 跟随全局 / sparse 精简 / normal 标准 / rich 丰富 */
   screenshot_density: ScreenshotDensity
 }
 
@@ -38,6 +38,16 @@ export const useNoteOptionsStore = create<NoteOptionsState>()(
     }),
     {
       name: 'last-note-options', // localStorage key
+      version: 1,
+      // v0 的默认值是 normal，会把手动生成的截图间隔永远钉在 90s、压过
+      // 「设置→通用」的 screenshot_interval（2026-10-28 review）。升级时把
+      // 这个旧默认迁到 global；显式选过 sparse/rich 的用户不受影响。
+      migrate: (persisted: any, version: number) => {
+        if (version === 0 && persisted?.last?.screenshot_density === 'normal') {
+          persisted.last.screenshot_density = 'global'
+        }
+        return persisted
+      },
     }
   )
 )
@@ -54,11 +64,12 @@ export function pickLastNoteOptions(v: {
   screenshot_density?: string
 }): LastNoteOptions {
   const density: ScreenshotDensity =
+    v.screenshot_density === 'global' ||
     v.screenshot_density === 'sparse' ||
     v.screenshot_density === 'rich' ||
     v.screenshot_density === 'normal'
       ? v.screenshot_density
-      : 'normal'
+      : 'global'
   return {
     model_name: v.model_name || '',
     style: v.style || 'minimal',

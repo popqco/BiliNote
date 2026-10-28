@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from app.utils.screenshot_marker import ScreenshotMarker
+from app.utils.screenshot_cleanup import CAPTION_LINE_RE
+from app.utils.screenshot_marker import SCREENSHOT_MARKER_PATTERN, ScreenshotMarker
 
 # 在模块导入时抓住真 PIL：部分测试会在收集期把 sys.modules["PIL"] 换成桩
 # （test_video_reader_dedupe），运行期再 import 会拿到没有 open() 的假模块。
@@ -47,7 +48,11 @@ NEAR_DUP_HAMMING = 4
 NEAR_DUP_WINDOW_SEC = 30
 
 _H2_RE = re.compile(r"(?m)^##[ \t]+\S")
-_IMAGE_REF_RE = re.compile(r"!\[([^\]]*)\]\((/static/screenshots/[^)]+)\)")
+# 只匹配单行图片引用：维护瘦身按行号定位，跨行的 alt/URL 会让行号假设失真
+_IMAGE_REF_RE = re.compile(r"!\[([^\]\n]*)\]\((/static/screenshots/[^)\n]+)\)")
+# 小节权重只看“真正的内容”：图片语法、截图标记、图注都是排版噪音。
+# 否则图越多的小节长度越长，反而拿到越多配额（2026-10-28 实测：
+# 等正文时 200 图的小节拿 28 张、2 图的小节只拿 2 张）。
 
 
 @dataclass(frozen=True)
@@ -73,7 +78,11 @@ class PickResult:
 
 
 def resolve_interval(density: Optional[str] = None, fallback: int = DEFAULT_INTERVAL) -> int:
-    """密度档位 → 秒/张；未知档位回退到 fallback。"""
+    """密度档位 → 秒/张；``global``/未知档位回退到 fallback。
+
+    ``global`` 是 2026-10-28 新增的显式档位：表单默认跟随「设置→通用」的
+    screenshot_interval，避免默认 ``normal`` 把全局值永远覆盖掉。
+    """
     key = (density or "").strip().lower()
     if key in DENSITY_INTERVALS:
         return DENSITY_INTERVALS[key]
@@ -105,7 +114,7 @@ def effective_limits(
     return cap, min_gap, interval
 
 
-def _section_spans(markdown: str) -> List[Tuple[int, int]]:
+def section_spans(markdown: str) -> List[Tuple[int, int]]:
     """按 `## ` 二级标题切段，返回 [(start, end)]（含首个标题前的前言段）。"""
     starts = [m.start() for m in _H2_RE.finditer(markdown or "")]
     if not starts:
@@ -117,6 +126,15 @@ def _section_spans(markdown: str) -> List[Tuple[int, int]]:
         end = starts[i + 1] if i + 1 < len(starts) else len(markdown)
         spans.append((start, end))
     return spans
+
+
+def _visible_length(text: str) -> int:
+    """小节里“非图片/非标记/非图注”的字符数，用作配额权重。"""
+    cleaned = _IMAGE_REF_RE.sub("", text or "")
+    cleaned = re.sub(SCREENSHOT_MARKER_PATTERN, "", cleaned)
+    cleaned = CAPTION_LINE_RE.sub("", cleaned)
+    # 空白不参与权重；否则模型多写空行也会影响配额
+    return len(re.sub(r"\s+", "", cleaned))
 
 
 def _even_pick(items: Sequence, k: int) -> List:
@@ -142,7 +160,7 @@ def _apply_section_quota(markdown: str, items: Sequence, cap: int, start_of) -> 
     返回 (保留项, 因小节配额丢弃的数量)。`start_of(item)` 给出该项在 markdown
     里的字符位置。
     """
-    spans = _section_spans(markdown)
+    spans = section_spans(markdown)
     if not spans or not items:
         return list(items), 0
     span_starts = [s for s, _ in spans]
@@ -151,13 +169,16 @@ def _apply_section_quota(markdown: str, items: Sequence, cap: int, start_of) -> 
         idx = bisect.bisect_right(span_starts, start_of(item)) - 1
         buckets[max(0, idx)].append(item)
 
-    total_len = sum(max(1, end - start) for start, end in spans)
+    weights = [_visible_length(markdown[start:end]) for start, end in spans]
+    if not any(weights):
+        weights = [max(1, end - start) for start, end in spans]
+    total_len = sum(max(1, weight) for weight in weights)
     kept: List = []
     dropped = 0
-    for (start, end), bucket in zip(spans, buckets):
+    for weight, bucket in zip(weights, buckets):
         if not bucket:
             continue
-        quota = max(1, round(cap * max(1, end - start) / total_len))
+        quota = max(1, round(cap * max(1, weight) / total_len))
         if len(bucket) <= quota:
             kept.extend(bucket)
         else:

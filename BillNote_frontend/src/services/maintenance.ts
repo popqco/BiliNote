@@ -15,6 +15,8 @@ export interface ScreenshotStats {
   notes_with_shots: number
   images: number
   over_limit: number
+  /** 正文里有空 bullet / 冒号残行的笔记数（上一轮瘦身遗留） */
+  notes_with_residue: number
   interval: number
   max_count: number
   oversized: ScreenshotOversized[]
@@ -39,7 +41,11 @@ export interface SlimResult {
   notes_changed: number
   images_before: number
   images_after: number
+  /** 只清残渣（不删图）的旧笔记篇数 */
+  residue_cleaned: number
   skipped_active: number
+  /** 旧正文归档失败而放弃写回的篇数（fail-closed） */
+  skipped_archive: number
   details: SlimDetail[]
 }
 
@@ -52,5 +58,6 @@ export const slim_screenshots = async (payload: {
   task_ids?: string[]
   interval?: number
   max_count?: number
+  clean_residue?: boolean
 }): Promise<SlimResult> =>
   await request.post('/maintenance/screenshot_slim', payload, { timeout: 600000 })

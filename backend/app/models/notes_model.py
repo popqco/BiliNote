@@ -26,3 +26,7 @@ class NoteResult:
     video_understanding: Optional[bool] = None
     video_interval: Optional[int] = None
     grid_size: Optional[list] = None
+    # 本篇实际生效的原片截图密度（2026-10-28）：存量瘦身按篇计算，
+    # 免得用户为某篇选「丰富」以后又被全局 90s 裁掉。
+    screenshot_density: Optional[str] = None
+    screenshot_interval: Optional[int] = None

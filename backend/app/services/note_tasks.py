@@ -246,7 +246,12 @@ class NoteTaskService:
                     args=(tid, it["video_url"], "bilibili", quality, link,
                           screenshot, model_name, provider_id, formats, style,
                           extras, video_understanding, video_interval, grid_size, bv),
-                    kwargs={"output_dir": root},
+                    kwargs={
+                        "output_dir": root,
+                        # 稍后再看批量导入也要沿用表单选的截图密度；
+                        # 之前漏传会让整批任务静默走全局配置。
+                        "screenshot_density": screenshot_density,
+                    },
                     name=f"batch-{tid[:8]}",
                     daemon=True,
                 ).start()
