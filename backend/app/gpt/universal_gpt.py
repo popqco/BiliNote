@@ -6,6 +6,7 @@ import math
 import os
 import hashlib
 import json
+import random
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,7 @@ from pathlib import Path
 from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK, MERGE_PROMPT
 from app.gpt.utils import fix_markdown
 from app.gpt.request_chunker import RequestChunker
+from app.gpt.llm_limiter import llm_gate
 from app.exceptions.task_cancel import TaskCancelled
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
@@ -354,7 +356,6 @@ class UniversalGPT(GPT):
         )
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
-        stream = self.client.chat.completions.create(**kwargs)
         parts: list[str] = []
         finish_reason = None
         # 两道闸，单位秒，可用环境变量覆盖：
@@ -365,43 +366,52 @@ class UniversalGPT(GPT):
         total_limit = float(os.getenv("OPENAI_STREAM_DEADLINE_SECONDS", "900") or 900)
         started_at = time.monotonic()
         last_activity_at = started_at
-        for chunk in stream:
-            # 流式期间逐增量检查取消：长思考/长输出期间点「停止生成」也近乎即时生效
-            self._raise_if_cancelled()
-            now = time.monotonic()
-            if stall_limit is None:
-                # 首个增量到达时才解析：此时协议路由已定（可能刚发生过换协议），
-                # 按实际链路取静默预算——思考期不可见的 responses 链路要宽得多。
-                stall_limit = self._resolve_stall_limit()
-            if now - last_activity_at > stall_limit:
-                raise CompletionStalled(
-                    f"上游 {stall_limit:.0f}s 没有任何增量（静默超时，model={self.model}）"
-                )
-            if now - started_at > total_limit:
-                raise CompletionStalled(
-                    f"单次调用超过 {total_limit:.0f}s 上限（model={self.model}）"
-                )
-            if not getattr(chunk, "choices", None):
-                continue
-            choice = chunk.choices[0]
-            if getattr(choice, "finish_reason", None):
-                finish_reason = choice.finish_reason
-            delta = choice.delta
-            text = getattr(delta, "content", None)
-            if text:
-                parts.append(text)
-            # 任何一段增量都算「上游还活着」，包括推理模型先吐的 reasoning_content。
-            # 只认 content 会把「正在思考」误判成假死：space-bunny-free 这类模型在长
-            # 提示上先流几分钟推理才给正文，2h53m 视频的 full 策略就是这样被 120s
-            # 闸门掐掉的（2026-10-01 实测，日志里只留下一句 CompletionStalled）。
-            # keepalive（协议适配层透传的结构性事件，2026-10-17）同理算活跃。
-            if (
-                text
-                or getattr(delta, "reasoning_content", None)
-                or getattr(delta, "reasoning", None)
-                or getattr(delta, "keepalive", False)
-            ):
-                last_activity_at = now
+        # 全局闸门（2026-10-28）：先等熔断冷却窗口，再抢一个跨任务并发位。
+        # 8 个任务 × 4 批同时打网关会把一次抖动放大成雪崩，这里把总并发钉在
+        # LLM_MAX_CONCURRENCY（默认 8）以内，排队的批次点停止也能立刻退出。
+        llm_gate.wait_cooldown(self._raise_if_cancelled)
+        llm_gate.acquire(self._raise_if_cancelled)
+        try:
+            stream = self.client.chat.completions.create(**kwargs)
+            for chunk in stream:
+                # 流式期间逐增量检查取消：长思考/长输出期间点「停止生成」也近乎即时生效
+                self._raise_if_cancelled()
+                now = time.monotonic()
+                if stall_limit is None:
+                    # 首个增量到达时才解析：此时协议路由已定（可能刚发生过换协议），
+                    # 按实际链路取静默预算——思考期不可见的 responses 链路要宽得多。
+                    stall_limit = self._resolve_stall_limit()
+                if now - last_activity_at > stall_limit:
+                    raise CompletionStalled(
+                        f"上游 {stall_limit:.0f}s 没有任何增量（静默超时，model={self.model}）"
+                    )
+                if now - started_at > total_limit:
+                    raise CompletionStalled(
+                        f"单次调用超过 {total_limit:.0f}s 上限（model={self.model}）"
+                    )
+                if not getattr(chunk, "choices", None):
+                    continue
+                choice = chunk.choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                text = getattr(delta, "content", None)
+                if text:
+                    parts.append(text)
+                # 任何一段增量都算「上游还活着」，包括推理模型先吐的 reasoning_content。
+                # 只认 content 会把「正在思考」误判成假死：space-bunny-free 这类模型在长
+                # 提示上先流几分钟推理才给正文，2h53m 视频的 full 策略就是这样被 120s
+                # 闸门掐掉的（2026-10-01 实测，日志里只留下一句 CompletionStalled）。
+                # keepalive（协议适配层透传的结构性事件，2026-10-17）同理算活跃。
+                if (
+                    text
+                    or getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                    or getattr(delta, "keepalive", False)
+                ):
+                    last_activity_at = now
+        finally:
+            llm_gate.release()
         content = "".join(parts)
         if not content.strip():
             raise EmptyCompletionError(
@@ -412,12 +422,29 @@ class UniversalGPT(GPT):
             choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
         )
 
+    def _sleep_cancellable(self, seconds: float) -> None:
+        """退避睡眠期间保持可取消（0.2s 粒度），点停止不用等退避睡满。"""
+        slept = 0.0
+        while slept < seconds:
+            self._raise_if_cancelled()
+            step = min(0.2, seconds - slept)
+            time.sleep(step)
+            slept += step
+
     def _chat_completion_create(self, messages: list):
         last_exc = None
+        # 单批静默超时重发次数（2026-10-28）：原先 CompletionStalled 直接上抛给
+        # 降级阶梯，而阶梯换策略会重建拼图 → checkpoint 签名变化 → 旧断点被删 →
+        # 全部批次从头再跑一遍。23 批的任务里第 23 批抖一下，代价是 23 批重发 4 次。
+        # 这里先原地重发这一批一次（连接是新的），失败两次才升级到阶梯。
+        stall_retries = max(0, int(os.getenv("OPENAI_STALL_RETRIES", "1") or 0))
+        stalls_used = 0
         for attempt in range(self._max_retry_attempts):
             self._raise_if_cancelled()
             try:
-                return self._do_create(messages)
+                result = self._do_create(messages)
+                llm_gate.note_success()
+                return result
             except TaskCancelled:
                 # 用户停止：不许被卷进「可重试错误」的退避重试
                 raise
@@ -429,25 +456,42 @@ class UniversalGPT(GPT):
                 if attempt >= limit - 1:
                     raise
                 logger.warning(f"[universal_gpt] {exc}，重试 ({attempt + 1}/{limit})")
-                time.sleep(self._retry_base_backoff * (2 ** attempt))
+                self._sleep_cancellable(self._jitter(self._retry_base_backoff * (2 ** attempt)))
             except Exception as exc:
                 last_exc = exc
-                # 假死超时不在这里重试：同一个大请求再发一次大概率还是挂，
-                # 直接抛给上层的降级阶梯换成更小的请求（ADR-0003）。
+                retryable = self._is_retryable_error(exc)
+                # 静默超时本身不是「可重试 token」命中的错误，但它同样说明上游
+                # 此刻不健康，必须计入熔断（否则冷却永远不会因为假死而打开）。
+                if retryable or isinstance(exc, CompletionStalled):
+                    llm_gate.note_failure()
                 if isinstance(exc, CompletionStalled):
+                    if stalls_used >= stall_retries:
+                        raise
+                    stalls_used += 1
+                    delay = self._jitter(self._retry_base_backoff * (2 ** stalls_used))
+                    logger.warning(
+                        f"[universal_gpt] 单批静默超时，{delay:.1f}s 后重发该批 "
+                        f"({stalls_used}/{stall_retries})：{str(exc)[:120]}"
+                    )
+                    self._sleep_cancellable(delay)
+                    continue
+                if attempt == self._max_retry_attempts - 1 or not retryable:
                     raise
-                if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):
-                    raise
-                sleep_seconds = self._retry_base_backoff * (2 ** attempt)
+                sleep_seconds = self._jitter(self._retry_base_backoff * (2 ** attempt))
                 logger.warning(
                     f"[universal_gpt] 调用失败（{type(exc).__name__}: {str(exc)[:200]}），"
                     f"{sleep_seconds:.1f}s 后重试 ({attempt + 1}/{self._max_retry_attempts})"
                 )
-                time.sleep(sleep_seconds)
+                self._sleep_cancellable(sleep_seconds)
 
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("chat completion failed without exception")
+
+    @staticmethod
+    def _jitter(seconds: float) -> float:
+        """退避叠加 0.8–1.4 抖动：否则 32 个批次同一拍重试，同时醒来再打一次。"""
+        return max(0.0, seconds * random.uniform(0.8, 1.4))
 
     def _merge_partials(self, partials: list, checkpoint_key: str | None, source_signature: str | None) -> str:
         def build_messages(texts, *_args, **_kwargs):
