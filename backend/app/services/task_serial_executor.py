@@ -95,12 +95,19 @@ class VideoTaskLocks:
 
 # 转写信号量（2026-10-11 分离）：本地 whisper 吃 GPU/显存，全局只允许一个实例；
 # 在线引擎（Groq 等）等网络不受此限，放开到 TRANSCRIBE_ONLINE_CONCURRENCY
-# （默认 2）——在线转写本可并发，之前被全局锁死是提速点之一（见 ADR-0001）。
+# （默认 3）——在线转写本可并发，之前被全局锁死是提速点之一（见 ADR-0001）。
 # 下载与 LLM 总结阶段不受影响，可与转写重叠。
-LOCAL_TRANSCRIBER_TYPES = {"whisper", "mlx_whisper"}
+#
+# 2026-10-28：类名集合此前写成下划线形式（whisper / mlx_whisper），而实际枚举值
+# 是连字符（fast-whisper / mlx-whisper），交集为空 → 本地 whisper 的「全局只允许
+# 一个」保护形同虚设，两个线程会同时对着同一个 WhisperModel 推理。两种写法都收。
+LOCAL_TRANSCRIBER_TYPES = {
+    "whisper", "mlx_whisper",
+    "fast-whisper", "mlx-whisper", "faster-whisper",
+}
 local_transcribe_semaphore = threading.Semaphore(1)
 online_transcribe_semaphore = threading.Semaphore(
-    max(1, int(os.getenv("TRANSCRIBE_ONLINE_CONCURRENCY", "2") or 2))
+    max(1, int(os.getenv("TRANSCRIBE_ONLINE_CONCURRENCY", "3") or 3))
 )
 # 向后兼容导出（旧的 note.py 引用点语义 = 本地信号量）
 transcribe_semaphore = local_transcribe_semaphore

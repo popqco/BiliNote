@@ -188,12 +188,20 @@ class NoteGenerator:
         if self._cancel_requested():
             raise TaskCancelled()
 
-    def _acquire_cancellable(self, sem, timeout: float = 1.0) -> None:
+    def _acquire_cancellable(self, sem, timeout: float = 1.0, on_wait=None) -> None:
         """带取消检查的信号量获取。
 
         排队等 GPU 转写信号量时也要能停：直接 `with sem:` 会在前一个任务
         跑完前一直阻塞，用户点了停止也只能干等（2026-10-16 需求场景）。
+        on_wait：确认需要排队时回调一次（用于把「等转写位」写进状态消息）。
         """
+        if sem.acquire(blocking=False):
+            return
+        if on_wait:
+            try:
+                on_wait()
+            except Exception:
+                pass
         while True:
             self._check_cancelled()
             if sem.acquire(timeout=timeout):
@@ -698,6 +706,11 @@ class NoteGenerator:
         task_id = task_id or audio_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
 
+        def _on_frame_progress(done: int, total: int) -> None:
+            # 抽帧占「下载中」的大头（长视频整段解码要几十秒到几分钟），不写进度
+            # 的话前端只剩一个静态「下载中」，用户会以为卡死。
+            self._update_status(task_id, status_phase, message=f"抽帧中 {done}/{total}")
+
         frame_interval = video_interval if video_interval and video_interval > 0 else 6
         need_video = bool(screenshot or video_understanding)
 
@@ -756,6 +769,7 @@ class NoteGenerator:
                             grid_dir=grid_dir,
                             max_frames=_frame_budget(),
                             cancel_check=self._cancel_requested,
+                            progress_cb=_on_frame_progress,
                         ).run()
                         return cached_audio
                     logger.info(
@@ -807,6 +821,7 @@ class NoteGenerator:
                         grid_dir=grid_dir,
                         max_frames=_frame_budget(),
                         cancel_check=self._cancel_requested,
+                        progress_cb=_on_frame_progress,
                     ).run()
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
@@ -1059,7 +1074,14 @@ class NoteGenerator:
                 if getattr(self, "transcriber_type", "") in LOCAL_TRANSCRIBER_TYPES
                 else online_transcribe_semaphore
             )
-            self._acquire_cancellable(_sem)
+            self._acquire_cancellable(
+                _sem,
+                on_wait=lambda: self._update_status(
+                    task_id, status_phase,
+                    message="等待转写位（在线转写并发已满）",
+                ),
+            )
+            self._update_status(task_id, status_phase, message="转写中")
             try:
                 transcript: TranscriptResult | None = None
                 if use_segmented:
