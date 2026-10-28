@@ -74,12 +74,15 @@ from app.utils.screenshot_cleanup import (
     strip_markers_with_captions,
 )
 from app.utils.screenshot_marker import ScreenshotMarker, iter_screenshot_markers
-from app.utils.screenshot_planner import PlannedShot, plan_shots
+from app.utils.screenshot_planner import (
+    ADAPTIVE_INTERVAL,
+    ADAPTIVE_MAX_COUNT,
+    PlannedShot,
+    plan_shots,
+)
 from app.utils.screenshot_policy import (
-    DEFAULT_MAX_COUNT,
     NearDuplicateFilter,
     dhash,
-    resolve_interval,
     select_markers,
 )
 from app.utils.status_code import StatusCode
@@ -152,14 +155,11 @@ class NoteGenerator:
     # 安全地走 _cancel_requested()，不需要每个调用方都先赋值。
     _run: Optional[TaskRun] = None
 
-    # 截图密度（2026-10-27）：由 generate() 按「请求里的密度档位 > 全局配置」解析。
-    # 类级默认值让测试/直调实例无需先跑 generate() 也能安全使用。
-    screenshot_interval: int = 90
-    screenshot_max_count: int = DEFAULT_MAX_COUNT
-    screenshot_density: str = "global"
-    # 截图编排方式（2026-10-28 Phase-1）：adaptive 按信息密度分配预算 /
-    # shadow 照旧出图只记日志 / legacy 旧版固定间隔。类级默认值同上。
-    screenshot_planner_mode: str = "adaptive"
+    # 原片截图（2026-10-28 用户定版）：完全由自适应编排决定，不暴露任何
+    # 间隔/上限/模式开关。这里只是 prompt 配额与维护快照用的内部基准。
+    screenshot_interval: int = ADAPTIVE_INTERVAL
+    screenshot_max_count: int = ADAPTIVE_MAX_COUNT
+    screenshot_density: str = "adaptive"
 
     def __init__(self):
         from app.services.transcriber_config_manager import TranscriberConfigManager
@@ -219,7 +219,6 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
-        screenshot_density: Optional[str] = None,
         run: Optional[TaskRun] = None,
     ) -> NoteResult | None:
         """
@@ -242,32 +241,20 @@ class NoteGenerator:
         :param video_understanding: 是否需要视频拼图理解（生成缩略图）
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
-        :param screenshot_density: 原片截图密度档位（sparse/normal/rich/global），
-                                   global 或不传时用全局配置 screenshot_interval
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
         if grid_size is None:
             grid_size = []
 
-        # 截图密度：请求档位 > 全局配置。sparse/normal/rich → 180/90/45 秒/张；
-        # global（表单默认）显式回退到全局配置，不再用 normal 悄悄覆盖。
-        self.screenshot_density = (screenshot_density or "global").strip().lower()
-        try:
-            _task_cfg = TaskConfigManager()
-            self.screenshot_interval = resolve_interval(
-                self.screenshot_density, _task_cfg.get("screenshot_interval")
-            )
-            self.screenshot_max_count = _task_cfg.get("screenshot_max_count")
-            self.screenshot_planner_mode = _task_cfg.get_planner_mode()
-        except Exception as exc:  # 配置读失败不许拖垮生成
-            logger.warning(f"读取截图密度配置失败，使用默认值：{exc}")
-            self.screenshot_interval = resolve_interval(self.screenshot_density)
-            self.screenshot_max_count = DEFAULT_MAX_COUNT
-            self.screenshot_planner_mode = "legacy"
+        # 原片截图（2026-10-28 用户定版）：全部交给自适应编排，不再读取
+        # screenshot_interval / screenshot_max_count / 模式等配置，也没有
+        # 表单密度档位。这里的固定值只用于 prompt 配额与 NoteResult 快照。
+        self.screenshot_density = "adaptive"
+        self.screenshot_interval = ADAPTIVE_INTERVAL
+        self.screenshot_max_count = ADAPTIVE_MAX_COUNT
         logger.info(
-            f"截图密度：每 {self.screenshot_interval}s 换算 1 张，单篇上限 "
-            f"{self.screenshot_max_count} 张（档位={self.screenshot_density}，"
-            f"编排={self.screenshot_planner_mode}）"
+            f"截图编排：自适应（内部基准每 {ADAPTIVE_INTERVAL}s 换算 1 张，"
+            f"单篇上限 {ADAPTIVE_MAX_COUNT} 张）"
         )
 
         # 绑定本次执行的 run：register_run 会作废同 task_id 的旧 run（重试场景），
@@ -1369,33 +1356,23 @@ class NoteGenerator:
         task_id: Optional[str] = None,
         transcript: Optional[TranscriptResult] = None,
     ) -> str:
-        """按截图编排策略筛选 Screenshot 标记，生成截图并替换为图片链接。
+        """按自适应编排筛选 Screenshot 标记，生成截图并替换为图片链接。
 
         2026-10-27：旧实现「一个标记 = 一次 ffmpeg = 一张图」，实测单篇最多
         790 张（图片语法占正文 64%）。现在先做确定性筛选，被筛掉的标记直接
         清空、根本不调 ffmpeg；生成后再用 8×8 dHash 丢弃相邻的同一画面。
 
-        2026-10-28 Phase-1：``screenshot_planner_mode=adaptive`` 时改用
-        ``screenshot_planner.plan_shots``——按画面变化/停留/清晰度/转写密度
-        给每个标记打分，再按 30s 块的信息量分配预算（5 分钟桶有覆盖下限），
-        替代旧版「按小节长度配额 + 等距抽稀」。``shadow`` 只记日志、仍用旧
-        结果出图；``legacy`` 完全保持旧行为。planner 抛错时静默回退旧版。
+        2026-10-28 Phase-1：``screenshot_planner.plan_shots`` 按画面变化/停留/
+        清晰度/转写密度给每个标记打分，再按 30s 块的信息量分配预算（5 分钟桶
+        有覆盖下限）。用户不再有任何截图开关；planner 抛错时静默回退旧版
+        间隔抽稀，保证生成不中断。
         """
         markers = iter_screenshot_markers(markdown)
         if not markers:
             return markdown
 
-        legacy = select_markers(
-            markdown,
-            markers,
-            duration=duration,
-            interval=self.screenshot_interval,
-            max_count=self.screenshot_max_count,
-        )
-
-        mode = getattr(self, "screenshot_planner_mode", "legacy")
         plan = None
-        if mode in ("adaptive", "shadow") and task_id:
+        if task_id:
             try:
                 frame_dir, _ = self._task_scratch_dirs(task_id)
                 plan = plan_shots(
@@ -1405,29 +1382,32 @@ class NoteGenerator:
                     frame_interval=self._last_frame_interval or 6,
                     segments=getattr(transcript, "segments", None),
                     duration=duration,
-                    interval=self.screenshot_interval,
-                    max_count=self.screenshot_max_count,
                 )
             except Exception as exc:
                 logger.warning(f"自适应截图编排失败，回退固定间隔策略：{exc}")
                 plan = None
-        if plan is not None:
-            self._log_screenshot_plan(plan, legacy, mode)
 
-        use_plan = mode == "adaptive" and plan is not None
-        if use_plan:
+        if plan is not None:
+            self._log_screenshot_plan(plan)
             shots_by_anchor = plan.shots_by_anchor()
-            keep_starts = set(shots_by_anchor)
-            dropped = sum(plan.dropped.values())
             dropped_detail = plan.dropped
         else:
+            # 兜底：没有 task_id（直调）或 planner 异常时用旧版确定性抽稀。
+            legacy = select_markers(
+                markdown,
+                markers,
+                duration=duration,
+                interval=self.screenshot_interval,
+                max_count=self.screenshot_max_count,
+            )
             shots_by_anchor = {
                 m.start: [PlannedShot(m.ts, m.ts, m.start, m.end, 0.0)]
                 for m in legacy.keep
             }
-            keep_starts = set(shots_by_anchor)
-            dropped = sum(legacy.dropped.values())
             dropped_detail = legacy.dropped
+
+        keep_starts = set(shots_by_anchor)
+        dropped = sum(dropped_detail.values())
 
         near_dup = NearDuplicateFilter()
 
@@ -1507,7 +1487,7 @@ class NoteGenerator:
 
         if dropped or duplicate or failed:
             logger.info(
-                f"截图密度策略（{'自适应' if use_plan else '固定间隔'}）："
+                f"截图编排（{'自适应' if plan is not None else '固定间隔兜底'}）："
                 f"标记 {len(markers)} → 生成 {generated} 张"
                 f"（预算筛掉 {dropped}、相邻重复 {duplicate}、失败 {failed}）"
                 f" 明细={dropped_detail}"
@@ -1515,17 +1495,12 @@ class NoteGenerator:
         return markdown
 
     @staticmethod
-    def _log_screenshot_plan(plan, legacy, mode: str) -> None:
-        """记录自适应编排结果；shadow 模式下重点看新旧差异。"""
-        legacy_ts = [m.ts for m in legacy.keep]
-        plan_ts = [s.anchor_ts for s in plan.shots]
-        overlap = len(set(legacy_ts) & set(plan_ts))
+    def _log_screenshot_plan(plan) -> None:
+        """记录自适应编排结果（标记数/预算/覆盖/吸附）。"""
         stats = " ".join(f"{key}={value:.0f}" for key, value in plan.stats.items())
         logger.info(
-            f"截图编排({'影子对比' if mode == 'shadow' else '自适应'}）："
-            f"旧版 {len(legacy_ts)} 张 {legacy_ts[:8]}；"
-            f"新版 {len(plan_ts)} 张 {plan_ts[:8]}；重合 {overlap}；"
-            f"{stats}；丢弃={plan.dropped}"
+            f"截图编排(自适应)：候选 {len(plan.shots)} 张；{stats}；"
+            f"丢弃={plan.dropped}"
         )
 
     def _save_metadata(self, video_id: str, platform: str, task_id: str) -> None:

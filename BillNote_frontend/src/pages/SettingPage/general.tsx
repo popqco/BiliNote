@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select.tsx'
 import { useSystemStore, type SmoothScrollTier } from '@/store/configStore'
-import { get_task_config, save_task_config, type ScreenshotPlanner, type TaskConfig } from '@/services/taskConfig.ts'
+import { get_task_config, save_task_config, type TaskConfig } from '@/services/taskConfig.ts'
 import {
   get_screenshot_stats,
   slim_screenshots,
@@ -40,16 +40,12 @@ type NumericTaskKey =
   | 'frame_budget'
   | 'image_budget'
   | 'summarize_batch_concurrency'
-  | 'screenshot_interval'
-  | 'screenshot_max_count'
 
 const TASK_CFG_LIMITS: Record<NumericTaskKey, [number, number]> = {
   max_workers: [1, 8],
   frame_budget: [100, 200000],
   image_budget: [10, 50000],
   summarize_batch_concurrency: [1, 4],
-  screenshot_interval: [20, 900],
-  screenshot_max_count: [3, 200],
 }
 
 const TASK_CFG_META: Array<{
@@ -81,18 +77,6 @@ const TASK_CFG_META: Array<{
     label: '分批总结并发',
     desc: '长视频分批总结时同时发几批。调大提速明显，但上游并发限流时会多失败重试；1 = 旧的逐批串行。',
     suffix: '批',
-  },
-  {
-    key: 'screenshot_interval',
-    label: '截图预算间隔',
-    desc: '自适应编排下只用来换算目标张数（≈ 时长 ÷ 间隔，再受单篇上限约束）：密集段多截、口播段少截，不再均匀切分。切到旧版固定间隔后，它恢复为「平均每多少秒最多 1 张」。',
-    suffix: '秒',
-  },
-  {
-    key: 'screenshot_max_count',
-    label: '单篇截图上限',
-    desc: '一篇笔记最多保留多少张原片截图（还会受视频时长约束）。默认 60；调小更清爽，调大保留更多画面细节。',
-    suffix: '张',
   },
 ]
 const General = () => {
@@ -374,34 +358,7 @@ const General = () => {
         <div className="text-muted-foreground mt-1 text-xs">
           全局生效（手动生成、批量导入、自动化共用），失焦自动保存。预算默认是
           2026-10-10 定版的激进档（4800 帧 / 1000 张拼图），免费额度紧张时可调回旧档
-          （如 2400/500）。
-        </div>
-        <div className="mt-3 flex items-center justify-between gap-4">
-          <div className="text-sm">
-            截图编排
-            <div className="text-muted-foreground text-xs">
-              自适应：按画面变化、停留时长、清晰度与转写密度打分，把预算分给信息密集的
-              段落（口播/过场段自然少截），5 分钟粒度保留覆盖下限。影子对比：仍按旧版
-              出图，只在日志里记录两种方案差异，适合先观察一段时间。旧版固定间隔：完全
-              沿用均匀抽稀。
-            </div>
-          </div>
-          <Select
-            value={taskCfg?.screenshot_planner ?? 'adaptive'}
-            onValueChange={v => {
-              void commitTaskCfg({ screenshot_planner: v as ScreenshotPlanner })
-            }}
-            disabled={!taskCfg}
-          >
-            <SelectTrigger className="w-44">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="adaptive">自适应（推荐）</SelectItem>
-              <SelectItem value="shadow">影子对比（只记日志）</SelectItem>
-              <SelectItem value="legacy">旧版固定间隔</SelectItem>
-            </SelectContent>
-          </Select>
+          （如 2400/500）。原片截图完全由自适应编排决定，没有额外开关。
         </div>
         {TASK_CFG_META.map(item => (
           <div key={item.key} className="mt-3 flex items-center justify-between gap-4">
@@ -434,11 +391,12 @@ const General = () => {
       <div className="border-border mt-4 max-w-3xl rounded-lg border p-4">
         <div className="text-sm font-medium">原片截图维护</div>
         <div className="text-muted-foreground mt-1 text-xs">
-          检查现有笔记的截图数量，并按每篇生成时的密度（旧笔记回退到当前全局：
-          每 {shotStats?.interval ?? 90} 秒最多 1 张、单篇上限 {shotStats?.max_count ?? 60} 张）
-          一次性瘦身，并顺带清理上一轮瘦身留下的空 bullet / 冒号残行（不动图片）。
-          执行前会把旧正文自动归档为一个版本，可在笔记右上角的版本下拉里切回；
-          只改正文引用，不删除图片文件。
+          检查现有笔记的截图数量：新笔记完全由自适应编排决定张数，这里只对存量
+          笔记按生成时的间隔快照（没有快照则按每 {shotStats?.interval ?? 90} 秒
+          换算 1 张、单篇上限 {shotStats?.max_count ?? 60} 张）一次性瘦身，并顺带
+          清理上一轮瘦身留下的空 bullet / 冒号残行（不动图片）。执行前会把旧正文
+          自动归档为一个版本，可在笔记右上角的版本下拉里切回；只改正文引用，
+          不删除图片文件。
         </div>
 
         {shotStats ? (

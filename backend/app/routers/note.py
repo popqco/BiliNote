@@ -74,8 +74,6 @@ class VideoRequest(BaseModel):
     video_understanding: Optional[bool] = False
     video_interval: Optional[int] = 0
     grid_size: Optional[list] = []
-    # 原片截图密度（2026-10-27）：sparse/normal/rich；不传走全局配置。
-    screenshot_density: Optional[str] = None
     # 客户端（如浏览器插件）已经在用户浏览器里抓到字幕，直接传给后端复用，
     # 跳过 download_subtitles 和音频转写。形如：
     #   {"language": "zh", "full_text": "...", "segments": [{"start","end","text"}, ...]}
@@ -245,7 +243,6 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             video_understanding=data.video_understanding,
             video_interval=data.video_interval,
             grid_size=data.grid_size,
-            screenshot_density=data.screenshot_density,
             task_id=data.task_id,
             prefetched_transcript=data.prefetched_transcript,
             schedule=background_tasks.add_task,

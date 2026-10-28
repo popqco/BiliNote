@@ -16,9 +16,9 @@ Phase-1 不让 LLM 数张数：模型仍然只写 `*Screenshot-[mm:ss]*` 语义�
 2. 文本特征：转写窗口内的语速、数字/英文/公式符号密度、2-gram 主题新颖度。
 3. 打分：V（变化+新颖度）/ L（边缘+停留）/ T（文本）/ M（语义标记）/
    Q（画质）加权。标记是候选，不是结论——低分标记可被预算筛掉。
-4. 预算：总张数仍按「时长 / 平均间隔」换算（screenshot_interval 从「出图
-   间隔」降级为「预算换算器」），再按 30s 块的信息量分配；5 分钟桶保留
-   覆盖下限，避免安静但重要的段落被完全跳过。
+4. 预算：总张数按内部基准「时长 / 90s」换算（不再有用户可调的间隔/上限），
+   再按 30s 块的信息量分配；5 分钟桶保留覆盖下限，避免安静但重要的段落被
+   完全跳过。
 5. 选择：分数优先 + 最小间隔 + 每分钟/每小节上限；时间戳只在 ±2s 内吸附到
    更清晰的采样帧，不做大幅位移（避免图片与正文位置语义错位）。
 
@@ -53,6 +53,10 @@ except Exception:  # pragma: no cover - 依赖环境
     _np = None
 
 FRAME_DEFAULT_INTERVAL = 6
+# 2026-10-28 用户定版：截图完全由自适应编排决定，不再暴露间隔/上限/模式
+# 任何开关。内部预算 = 每 10 分钟约 6 张（90s/张），单篇硬上限 60 张。
+ADAPTIVE_INTERVAL = 90
+ADAPTIVE_MAX_COUNT = 60
 # 覆盖下限的时间桶：每桶尽量至少 1 张
 BUCKET_SEC = 300
 # 预算分配的密度块：块内候选分数求和作为「信息量」
@@ -563,8 +567,8 @@ def plan_shots(
     frame_interval: int = FRAME_DEFAULT_INTERVAL,
     segments: Optional[Sequence] = None,
     duration: Optional[float] = None,
-    interval: int = 90,
-    max_count: int = 60,
+    interval: int = ADAPTIVE_INTERVAL,
+    max_count: int = ADAPTIVE_MAX_COUNT,
 ) -> PlanResult:
     """在 LLM 标记之上做自适应选择，返回每张图的锚点与时间戳。
 

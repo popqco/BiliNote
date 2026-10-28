@@ -1,21 +1,19 @@
 """生成性能与预算配置管理。
 
 落盘 config/task_config.json（与 automation.json/proxy.json 同目录约定），
-控制四类全局参数：
+控制三类全局参数：
 - 并行：max_workers（同时生成的笔记数，改动热生效）；
 - 视频理解预算：frame_budget（单任务抽帧总数上限）/ image_budget（喂给模型的
   拼图数量上限），见 note._adapt_frame_budget；
-- 总结：summarize_batch_concurrency（分批总结时的并发批次数）；
-- 原片截图密度：screenshot_interval（平均每多少秒最多 1 张，自适应模式下
-  作为预算换算器）/ screenshot_max_count（单篇上限）/ screenshot_planner
-  （adaptive 自适应 / shadow 影子对比 / legacy 旧版固定间隔），见
-  note._insert_screenshots、utils/screenshot_planner.py。
+- 总结：summarize_batch_concurrency（分批总结时的并发批次数）。
+
+原片截图（2026-10-28 用户定版）完全由 utils/screenshot_planner 自适应决定，
+不再有任何间隔/上限/模式配置项——本文件只保留上面三类数值。
 
 取值优先级：配置文件 > 环境变量 > 内置默认。默认 4800/1000 是 2026-10-11
 用户定版的激进档（旧档 2400/500）；环境变量保留作部署侧逃生口——一旦在 UI
 保存过一次，这些键都会落盘，环境变量随即失效。
 """
-import os
 from typing import Any, Dict
 
 from app.config.json_store import JsonFileStore, resolve_int
@@ -28,9 +26,7 @@ DEFAULT_CONFIG: Dict[str, int] = {
     "max_workers": 2,                  # 同时生成的笔记数（TASK_MAX_WORKERS 可在文件外覆盖）
     "frame_budget": 4800,              # 单任务抽帧总数上限（旧档 2400）
     "image_budget": 1000,              # 喂给模型的拼图数量上限（旧档 500）
-    "summarize_batch_concurrency": 2,  # 分批总结的并发批次数
-    "screenshot_interval": 90,         # 原片截图平均间隔（秒）；越小越密
-    "screenshot_max_count": 60,        # 单篇原片截图上限
+    "summarize_batch_concurrency": 2,  # 分批总结时的并发批次数
 }
 
 # key -> (环境变量名, 下限, 上限)
@@ -39,19 +35,6 @@ _LIMITS: Dict[str, tuple] = {
     "frame_budget": ("FRAME_BUDGET", 100, 200_000),
     "image_budget": ("IMAGE_BUDGET", 10, 50_000),
     "summarize_batch_concurrency": ("SUMMARIZE_BATCH_CONCURRENCY", 1, 8),
-    "screenshot_interval": ("SCREENSHOT_INTERVAL", 20, 900),
-    "screenshot_max_count": ("SCREENSHOT_MAX_COUNT", 3, 200),
-}
-
-# 枚举型配置：key -> (默认值, 允许值, 环境变量名)
-_ENUMS: Dict[str, tuple] = {
-    # 截图编排方式：adaptive=按信息密度分配（Phase-1 默认），
-    # shadow=照旧出图但日志记录新旧差异（观察期），legacy=旧版固定间隔抽稀。
-    "screenshot_planner": (
-        "adaptive",
-        ("legacy", "shadow", "adaptive"),
-        "SCREENSHOT_PLANNER",
-    ),
 }
 
 
@@ -64,42 +47,30 @@ def _clamp(key: str, value: Any) -> int:
     return max(lo, min(hi, n))
 
 
-def _resolve_enum(key: str, file_value: Any) -> str:
-    default, allowed, env_name = _ENUMS[key]
-    raw = file_value if file_value is not None else os.getenv(env_name)
-    value = str(raw).strip().lower() if raw is not None else default
-    return value if value in allowed else default
-
-
 class TaskConfigManager:
     def __init__(self, filepath: str = str(CONFIG_DIR / "task_config.json")):
         self._store = JsonFileStore(filepath)
 
     def get(self, key: str) -> int:
-        """单个数值参数的生效值：文件 > 环境变量 > 默认，越界自动夹取。"""
+        """单个参数的生效值：文件 > 环境变量 > 默认，越界自动夹取。"""
         if key not in DEFAULT_CONFIG:
             raise KeyError(key)
         env_name, lo, hi = _LIMITS[key]
         return resolve_int(self._store.read().get(key), env_name, DEFAULT_CONFIG[key], lo, hi)
 
-    def get_planner_mode(self) -> str:
-        """截图编排方式（adaptive/shadow/legacy），非法值回退 adaptive。"""
-        return _resolve_enum("screenshot_planner", self._store.read().get("screenshot_planner"))
+    def get_config(self) -> Dict[str, int]:
+        return {k: self.get(k) for k in DEFAULT_CONFIG}
 
-    def get_config(self) -> Dict[str, Any]:
-        cfg: Dict[str, Any] = {k: self.get(k) for k in DEFAULT_CONFIG}
-        cfg["screenshot_planner"] = self.get_planner_mode()
-        return cfg
+    def update_config(self, patch: Dict[str, Any]) -> Dict[str, int]:
+        """只接受已知键，逐键夹取后落盘；返回保存后的生效配置。
 
-    def update_config(self, patch: Dict[str, Any]) -> Dict[str, Any]:
-        """只接受已知键，数值夹取/枚举校验后落盘；返回保存后的生效配置。"""
-        current = self._store.read()
+        同时丢弃历史遗留键（如已下线的 screenshot_interval/max_count/planner），
+        避免旧配置文件继续携带无效开关。
+        """
+        current = {k: v for k, v in self._store.read().items() if k in DEFAULT_CONFIG}
         for k in DEFAULT_CONFIG:
             if k in (patch or {}):
                 current[k] = _clamp(k, patch[k])
-        for k in _ENUMS:
-            if k in (patch or {}):
-                current[k] = _resolve_enum(k, patch[k])
         self._store.write(current)
         logger.info(f"生成性能与预算配置已更新: {self.get_config()}")
         return self.get_config()

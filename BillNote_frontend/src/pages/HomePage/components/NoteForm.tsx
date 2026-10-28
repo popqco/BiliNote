@@ -46,7 +46,7 @@ import {
 } from '@/components/ui/select.tsx'
 import { Input } from '@/components/ui/input.tsx'
 import { Textarea } from '@/components/ui/textarea.tsx' // ExtrasPresetBlock 内备注框用（方案 C 下拉附着）
-import { noteStyles, noteFormats, videoPlatforms, screenshotDensities } from '@/constant/note.ts'
+import { noteStyles, noteFormats, videoPlatforms } from '@/constant/note.ts'
 import { fetchModels } from '@/services/model.ts'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
@@ -78,12 +78,6 @@ const formSchema = z
     grid_size: z
       .tuple([z.coerce.number().min(1).max(10), z.coerce.number().min(1).max(10)])
       .default([2, 2])
-      .optional(),
-    // 原片截图密度：控制模型与后处理的截图预算（2026-10-27）
-    // global = 跟随「设置→通用」的 screenshot_interval（2026-10-28 修正默认值覆盖全局）
-    screenshot_density: z
-      .enum(['global', 'sparse', 'normal', 'rich'])
-      .default('global')
       .optional(),
   })
   .superRefine(({ video_url, platform }, ctx) => {
@@ -352,7 +346,6 @@ const NoteForm = () => {
       video_understanding: lastOptions?.video_understanding ?? false,
       video_interval: lastOptions?.video_interval ?? 6,
       grid_size: lastOptions?.grid_size ?? [2, 2],
-      screenshot_density: lastOptions?.screenshot_density ?? 'global',
       format: lastOptions?.format ?? [],
     },
   })
@@ -361,9 +354,6 @@ const NoteForm = () => {
   /* ---- 派生状态（只 watch 一次，提高性能） ---- */
   const platform = useWatch({ control: form.control, name: 'platform' }) as string
   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
-  // 截图密度只在勾了「原片截图」格式时才有意义（否则后端不会插一张图）
-  const selectedFormats = useWatch({ control: form.control, name: 'format' }) as string[] | undefined
-  const screenshotFormatEnabled = !!selectedFormats?.includes('screenshot')
   const editing = currentTask && currentTask.id
 
   const goModelAdd = () => {
@@ -428,8 +418,6 @@ const NoteForm = () => {
         formData.video_understanding ?? last?.video_understanding ?? false,
       video_interval: formData.video_interval ?? last?.video_interval ?? 6,
       grid_size: formData.grid_size ?? last?.grid_size ?? [2, 2],
-      screenshot_density:
-        (formData as any).screenshot_density ?? last?.screenshot_density ?? 'global',
       format: formData.format ?? last?.format ?? [],
     })
   }, [
@@ -976,35 +964,6 @@ const NoteForm = () => {
                         className="w-16"
                       />
                     </div>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              {/* 截图密度：给模型和后处理一个明确的截图预算 */}
-              <FormField
-                control={form.control}
-                name="screenshot_density"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>截图密度</FormLabel>
-                    <Select
-                      disabled={!videoUnderstandingEnabled || !screenshotFormatEnabled}
-                      value={field.value || 'global'}
-                      onValueChange={field.onChange}
-                    >
-                      <FormControl>
-                        <SelectTrigger className="w-full min-w-0">
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        {screenshotDensities.map(item => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
                     <FormMessage />
                   </FormItem>
                 )}

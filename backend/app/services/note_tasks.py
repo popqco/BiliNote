@@ -177,7 +177,6 @@ class NoteTaskService:
         video_understanding: bool = False,
         video_interval=0,
         grid_size: Optional[List] = None,
-        screenshot_density: Optional[str] = None,
         task_id: Optional[str] = None,
         prefetched_transcript: Optional[dict] = None,
         schedule=None,
@@ -246,12 +245,7 @@ class NoteTaskService:
                     args=(tid, it["video_url"], "bilibili", quality, link,
                           screenshot, model_name, provider_id, formats, style,
                           extras, video_understanding, video_interval, grid_size, bv),
-                    kwargs={
-                        "output_dir": root,
-                        # 稍后再看批量导入也要沿用表单选的截图密度；
-                        # 之前漏传会让整批任务静默走全局配置。
-                        "screenshot_density": screenshot_density,
-                    },
+                    kwargs={"output_dir": root},
                     name=f"batch-{tid[:8]}",
                     daemon=True,
                 ).start()
@@ -342,7 +336,6 @@ class NoteTaskService:
                     "video_understanding": bool(video_understanding),
                     "video_interval": video_interval,
                     "grid_size": list(grid_size or []),
-                    "screenshot_density": screenshot_density,
                 },
             },
             root=root,
@@ -363,7 +356,6 @@ class NoteTaskService:
             model_name, provider_id, formats, style, extras, video_understanding,
             video_interval, grid_size, video_id,
             output_dir=root,
-            screenshot_density=screenshot_density,
         )
         return SubmitResult(task_id=task_id)
 
@@ -384,7 +376,6 @@ class NoteTaskService:
         video_interval=0,
         grid_size: Optional[List] = None,
         video_id: Optional[str] = None,
-        screenshot_density: Optional[str] = None,
         output_dir: Optional[Path] = None,
     ) -> None:
         """执行一次笔记任务；所有失败都收敛进状态文件，不向上抛 HTTP 异常。"""
@@ -430,7 +421,6 @@ class NoteTaskService:
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
-                screenshot_density=screenshot_density,
                 run=run,
             )
 

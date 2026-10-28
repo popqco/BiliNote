@@ -21,10 +21,10 @@ from pydantic import BaseModel
 from app.paths import NOTE_OUTPUT_DIR
 from app.services import task_state
 from app.services.note_versions import archive_previous_result, is_archived
-from app.services.task_config_manager import TaskConfigManager
 from app.utils.logger import get_logger
 from app.utils.response import ResponseWrapper as R
 from app.utils.screenshot_cleanup import cleanup_residue, has_residue, remove_image_refs
+from app.utils.screenshot_planner import ADAPTIVE_INTERVAL, ADAPTIVE_MAX_COUNT
 from app.utils.screenshot_policy import (
     NEAR_DUP_HAMMING,
     dhash,
@@ -51,8 +51,8 @@ _MAX_DETAILS = 50
 class SlimRequest(BaseModel):
     task_ids: Optional[list[str]] = None
     dry_run: bool = True
-    # 全局回退间隔：只影响“跟随全局”/没有 per-note density 的旧笔记；
-    # 显式选了 sparse/normal/rich 的笔记仍按自己的预设，不被这里强制覆盖。
+    # 内部基准间隔：只影响没有 per-note 快照/预设的旧笔记。新笔记由自适应
+    # 编排决定张数，这两项不再出现在设置界面。
     interval: Optional[int] = None
     max_count: Optional[int] = None
     # 只处理引用数不低于该值的笔记（0 = 所有超上限的）
@@ -97,24 +97,32 @@ def _title(data: dict) -> str:
 
 
 def _limits(interval: Optional[int], max_count: Optional[int]) -> tuple[int, int]:
-    cfg = TaskConfigManager()
-    resolved_interval = resolve_interval(None, interval or cfg.get("screenshot_interval"))
-    resolved_max = int(max_count or cfg.get("screenshot_max_count"))
-    return resolved_interval, resolved_max
+    """维护基准：显式参数 > 自适应内部基准（90s / 60 张）。
+
+    原片截图已无用户可调配置（2026-10-28 定版），这里只是存量笔记的
+    估算口径；每篇仍优先用自己的生成快照。
+    """
+    try:
+        resolved_interval = int(interval or ADAPTIVE_INTERVAL)
+    except (TypeError, ValueError):
+        resolved_interval = ADAPTIVE_INTERVAL
+    try:
+        resolved_max = int(max_count or ADAPTIVE_MAX_COUNT)
+    except (TypeError, ValueError):
+        resolved_max = ADAPTIVE_MAX_COUNT
+    return max(1, resolved_interval), max(1, resolved_max)
 
 
 def _note_interval(data: dict, fallback: int) -> int:
     """每篇笔记生成时的实际截图间隔。
 
-    - 显式选了 sparse/normal/rich：按该预设，不被全局改动影响；
-    - 选了 global：跟随**当前**全局值（这才是「跟随全局」的语义）；
-    - 旧结果没有 density：用当时快照的 screenshot_interval，再退回全局。
+    - 显式选了 sparse/normal/rich 的旧笔记：按该预设；
+    - 其余（global/adaptive/没有 density）：用结果里的 screenshot_interval
+      快照（这才是当时真正生效的值）；没有快照才退回内部基准。
     """
     density = str(data.get("screenshot_density") or "").strip().lower()
     if density in ("sparse", "normal", "rich"):
         return resolve_interval(density, fallback)
-    if density == "global":
-        return fallback
     try:
         value = int(data.get("screenshot_interval"))
     except (TypeError, ValueError):

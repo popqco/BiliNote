@@ -14,8 +14,6 @@ export const generateNote = async (data: {
   video_understanding?: boolean
   video_interval?: number
   grid_size: Array<number>
-  /** 原片截图密度：global 跟随全局 / sparse 精简 / normal 标准 / rich 丰富 */
-  screenshot_density?: 'global' | 'sparse' | 'normal' | 'rich'
 }) => {
   try {
     console.log('generateNote', data)

@@ -1,18 +1,22 @@
 """存量截图维护的密度语义（2026-10-28）。
 
 不直接跑会重写用户数据的端点，只测纯函数：
-- global → 跟随当前全局间隔；sparse/normal/rich → 按该预设；
-- 旧结果没有 density → 用当时快照的 screenshot_interval。
+- sparse/normal/rich（旧笔记）→ 按该预设；
+- global/adaptive/没有 density → 用结果里的 screenshot_interval 快照；
+- 都没有才用内部自适应基准（90s / 60 张）。
 """
 from app.routers.maintenance import _cap_for, _note_interval
 
 
 def test_note_interval_semantics():
-    # global 跟随当前全局（fallback）
+    # global/adaptive 不再跟“当前全局”，用生成时的快照
     assert _note_interval(
         {"screenshot_density": "global", "screenshot_interval": 30}, 90
-    ) == 90
-    # 显式预设不被全局改动影响
+    ) == 30
+    assert _note_interval(
+        {"screenshot_density": "adaptive", "screenshot_interval": 120}, 90
+    ) == 120
+    # 显式预设的旧笔记仍按预设
     assert _note_interval(
         {"screenshot_density": "sparse", "screenshot_interval": 30}, 90
     ) == 180

@@ -264,12 +264,13 @@ Phase-2 可选：把 top 20 候选（时间戳 + 一句转写 + 缩略图）给 
 
 ### Phase-1（已实现，2026-10-28）
 
-落地位置：`backend/app/utils/screenshot_planner.py` + `note._insert_screenshots`；
-配置在「设置→通用→生成性能与预算→截图编排」：
+落地位置：`backend/app/utils/screenshot_planner.py` + `note._insert_screenshots`。
 
-- `adaptive`（默认）：按信息密度分配预算；
-- `shadow`：仍按旧版出图，只在日志记录新旧时间戳差异；
-- `legacy`：完全沿用旧版固定间隔抽稀。
+**2026-10-28 用户定版：不保留任何截图开关。** 表单里的「截图密度」、设置里的
+「截图编排 / 截图预算间隔 / 单篇截图上限」全部移除；生成时一律走自适应编排，
+内部基准为「每 90 秒换算 1 张、单篇上限 60 张」（`ADAPTIVE_INTERVAL` /
+`ADAPTIVE_MAX_COUNT`），仅供预算换算与维护快照，用户不可调。planner 异常时
+静默回退旧版间隔抽稀，保证生成不中断。
 
 实现要点（相对上文方案的取舍）：
 

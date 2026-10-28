@@ -21,7 +21,6 @@ except Exception:  # pragma: no cover - 无 PIL 环境
     _RealImageDraw = None
 
 from app.services import note as note_mod
-from app.services.task_config_manager import TaskConfigManager
 from app.utils import screenshot_planner as sp
 from app.utils.screenshot_marker import iter_screenshot_markers
 from app.utils.screenshot_policy import section_spans, select_markers
@@ -189,7 +188,7 @@ def test_snap_only_within_two_seconds(monkeypatch, tmp_path):
 # ---------------------------------------------------------------- note 接入
 
 
-def _generator(monkeypatch, tmp_path, mode="adaptive"):
+def _generator(monkeypatch, tmp_path):
     created = []
 
     def fake_shot(video, outdir, ts, idx):
@@ -208,7 +207,6 @@ def _generator(monkeypatch, tmp_path, mode="adaptive"):
     gen = note_mod.NoteGenerator.__new__(note_mod.NoteGenerator)
     gen.screenshot_interval = 90
     gen.screenshot_max_count = 12
-    gen.screenshot_planner_mode = mode
     gen._last_frame_interval = 6
     return gen, created
 
@@ -223,7 +221,7 @@ def _write_frames(tmp_path, task_id, timestamps):
 def test_insert_screenshots_adaptive_keeps_plan(monkeypatch, tmp_path):
     if _RealPILImage is None:
         pytest.skip("环境没有 PIL")
-    gen, created = _generator(monkeypatch, tmp_path, mode="adaptive")
+    gen, created = _generator(monkeypatch, tmp_path)
     _write_frames(tmp_path, "task1", [0, 6, 12, 18])
     md = _markdown([10, 300, 600, 900])
 
@@ -235,21 +233,8 @@ def test_insert_screenshots_adaptive_keeps_plan(monkeypatch, tmp_path):
     assert len(created) == 4
 
 
-def test_shadow_mode_still_uses_legacy_selection(monkeypatch, tmp_path):
-    if _RealPILImage is None:
-        pytest.skip("环境没有 PIL")
-    gen, _ = _generator(monkeypatch, tmp_path, mode="shadow")
-    md = _markdown([10, 20, 300, 600])
-    markers = iter_screenshot_markers(md)
-    legacy = select_markers(md, markers, duration=1000, interval=90, max_count=12)
-
-    out = gen._insert_screenshots(md, Path("dummy.mp4"), duration=1000, task_id="task1")
-
-    assert out.count("![") == len(legacy.keep)
-
-
 def test_planner_error_falls_back_to_legacy(monkeypatch, tmp_path):
-    gen, _ = _generator(monkeypatch, tmp_path, mode="adaptive")
+    gen, _ = _generator(monkeypatch, tmp_path)
     md = _markdown([10, 20, 300, 600])
     markers = iter_screenshot_markers(md)
     legacy = select_markers(md, markers, duration=1000, interval=90, max_count=12)
@@ -263,22 +248,3 @@ def test_planner_error_falls_back_to_legacy(monkeypatch, tmp_path):
 
     assert out.count("![") == len(legacy.keep)
     assert "Screenshot-" not in out
-
-
-# ---------------------------------------------------------------- 配置
-
-
-def test_task_config_planner_mode(tmp_path):
-    path = str(tmp_path / "task_config.json")
-    mgr = TaskConfigManager(path)
-    assert mgr.get_planner_mode() == "adaptive"
-    assert mgr.get_config()["screenshot_planner"] == "adaptive"
-
-    cfg = mgr.update_config({"screenshot_planner": "shadow"})
-    assert cfg["screenshot_planner"] == "shadow"
-    assert TaskConfigManager(path).get_planner_mode() == "shadow"
-
-    # 非法值回退默认，不影响数值键
-    cfg = mgr.update_config({"screenshot_planner": "bogus", "screenshot_interval": 120})
-    assert cfg["screenshot_planner"] == "adaptive"
-    assert cfg["screenshot_interval"] == 120
