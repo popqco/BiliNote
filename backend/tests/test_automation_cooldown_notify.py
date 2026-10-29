@@ -56,6 +56,11 @@ def sched_env(tmp_path, monkeypatch):
     # 去重查询不碰真实 DB / note_results（单测只关心冷却与节流逻辑）
     monkeypatch.setattr(sched, "get_task_by_video", lambda bv, pf: None)
     monkeypatch.setattr(sched, "find_active_task_by_video", lambda vid: None)
+    # 忽略名单（删除墓碑）也钉到 tmp：否则会读写仓库/安装目录的真实 config
+    from app.services.automation_ignore import AutomationIgnoreStore
+
+    ignore = AutomationIgnoreStore(tmp_path / "automation_ignore.json")
+    monkeypatch.setattr(sched, "automation_ignore_store", lambda: ignore)
     return sched.AutomationScheduler(), tmp_path
 
 

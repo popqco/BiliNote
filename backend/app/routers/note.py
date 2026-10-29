@@ -177,6 +177,35 @@ def cancel_task(data: RecordRequest):
     return R.success({"cancelled": True, "task_id": task_id, "live": False})
 
 
+def _deletion_identity(task_id: str, fallback_video_id: str = "", fallback_platform: str = "") -> dict:
+    """删除前记下视频身份：状态文件 → 结果文件 → 请求参数兜底。
+
+    purge_task 之后状态/结果文件都没了，而「自动化忽略名单」需要 video_id —
+    先取身份，删完再落名单。
+    """
+    data = task_state.read_status(task_id, root=NOTE_OUTPUT_DIR) or {}
+    video_id = str(data.get("video_id") or "")
+    platform = str(data.get("platform") or "")
+    title = str((data.get("audio_meta") or {}).get("title") or "")
+    if not video_id or not title:
+        try:
+            result_path = NOTE_OUTPUT_DIR / f"{task_id}.json"
+            if result_path.exists():
+                payload = json.loads(result_path.read_text(encoding="utf-8"))
+                meta = payload.get("audio_meta") or {}
+                video_id = video_id or str(meta.get("video_id") or "")
+                platform = platform or str(meta.get("platform") or "")
+                title = title or str(meta.get("title") or "")
+        except Exception as e:
+            logger.warning(f"读取删除任务的结果文件失败 ({task_id}): {e}")
+    return {
+        "task_id": task_id,
+        "video_id": video_id or fallback_video_id or "",
+        "platform": platform or fallback_platform or "bilibili",
+        "title": title,
+    }
+
+
 @router.post('/delete_task')
 def delete_task(data: RecordRequest):
     """真正删除任务：状态文件 + 缓存 + 导出结果 + 向量索引。
@@ -206,12 +235,53 @@ def delete_task(data: RecordRequest):
             data={"active": True, "task_ids": running},
         )
 
+    # 删除前先记身份（purge 之后状态/结果文件都没了）
+    identities = [
+        _deletion_identity(
+            tid,
+            fallback_video_id=video_id,
+            fallback_platform=(data.platform or ""),
+        )
+        for tid in task_ids
+    ]
+
     total = 0
     for tid in task_ids:
         total += task_state.purge_task(tid, root=NOTE_OUTPUT_DIR).get("deleted", 0)
+        # 分类是独立元数据层：任务删掉后同步清赋值，避免孤儿映射堆积
+        try:
+            from app.services.note_categories import note_category_store
 
-    logger.info(f"删除任务完成：task_ids={task_ids}, 清理文件 {total} 个")
-    return R.success({"deleted": total, "task_ids": task_ids})
+            note_category_store().remove_task(tid)
+        except Exception as e:
+            logger.warning(f"清理任务分类赋值失败 ({tid}): {e}")
+
+    # 删除墓碑（2026-10-29 用户反馈「删了又被自动化生成」）：自动化去重只看
+    # video_tasks 与未完成任务状态文件，删除会把这两条证据一起抹掉，而稍后再看
+    # 列表不会移出视频 → 下一轮必然重提。落一条忽略记录挡住它；只影响自动化，
+    # 用户手动重新提交同一视频会在 submit 里自动解除。
+    ignored = []
+    try:
+        from app.services.automation_ignore import automation_ignore_store
+
+        store = automation_ignore_store()
+        for ident in identities:
+            if not ident["video_id"]:
+                continue
+            store.add(
+                ident["video_id"],
+                ident["platform"],
+                title=ident["title"],
+                task_id=ident["task_id"],
+            )
+            ignored.append({"video_id": ident["video_id"], "platform": ident["platform"]})
+    except Exception as e:
+        logger.warning(f"写入自动化忽略名单失败（不影响删除结果）: {e}")
+
+    logger.info(
+        f"删除任务完成：task_ids={task_ids}, 清理文件 {total} 个, 忽略 {len(ignored)} 个视频"
+    )
+    return R.success({"deleted": total, "task_ids": task_ids, "ignored": ignored})
 
 
 @router.post("/upload")
@@ -563,18 +633,65 @@ def get_video_meta(url: str, platform: str = "bilibili"):
     return R.success(meta or {"title": None})
 
 
+def _category_snapshot():
+    """分类层快照：分类表 + 任务赋值 + 指纹。
+
+    分类是独立 JSON 元数据，任何异常都退化成「全部未分类」——绝不能因为
+    分类文件损坏让笔记列表本身不可用。
+    """
+    try:
+        from app.services.note_categories import note_category_store
+
+        store = note_category_store()
+        cats = {
+            str(c.get("id")): c
+            for c in store.list_categories()
+            if isinstance(c, dict) and c.get("id")
+        }
+        return cats, store.assignments(), store.version()
+    except Exception as e:
+        logger.warning(f"读取笔记分类失败（按未分类处理）: {e}")
+        return {}, {}, ""
+
+
+def _decorate_categories(tasks: list) -> list:
+    """给 /tasks/recent 的每一行补 category / category_name（无分类时为 None）。"""
+    cats, assigns, _ver = _category_snapshot()
+    out = []
+    for t in tasks:
+        cid = assigns.get(str(t.get("task_id") or ""))
+        cat = cats.get(cid) if cid else None
+        out.append(
+            {
+                **t,
+                "category": cat["id"] if cat else None,
+                "category_name": cat.get("name") if cat else None,
+            }
+        )
+    return out
+
+
 @router.get("/tasks/recent")
 def get_recent_tasks(limit: int = 80, since: Optional[str] = None):
     """后端最近任务列表（扫描状态文件），供前端历史增量同步与自动化任务可见性。
 
     `since` 是上一次响应的 `version`：指纹未变时只回 `unchanged`，30s 轮询
     从约 45KB gzip 降到几百字节，也免掉整目录重新解析。
+
+    version 里拼上分类文件指纹：分类改名/归类在另一台设备（手机 Viewer）上
+    也要能通过下一次轮询同步过来，而不是等状态文件碰巧变化。
     """
     try:
         limit = max(1, min(int(limit), 300))
     except Exception:
         limit = 80
     version = task_state.recent_fingerprint(root=NOTE_OUTPUT_DIR)
+    try:
+        from app.services.note_categories import note_category_store
+
+        version = f"{version}:{note_category_store().version()}"
+    except Exception:
+        version = f"{version}:-"
     if since and since == version:
         return R.success({"tasks": [], "unchanged": True, "version": version})
 
@@ -582,13 +699,14 @@ def get_recent_tasks(limit: int = 80, since: Optional[str] = None):
     with _recent_cache_lock:
         cached = _recent_cache.get(key)
     if cached is None:
+        # 缓存只存原始任务概要；分类装饰放在缓存外，归类后立即生效
         cached = task_state.list_recent_tasks(limit=limit, root=NOTE_OUTPUT_DIR)
         with _recent_cache_lock:
             # 只留最近 16 个指纹快照，避免长期运行时随状态写入无限堆积
             if len(_recent_cache) >= 16:
                 _recent_cache.clear()
             _recent_cache[key] = cached
-    return R.success({"tasks": cached, "version": version})
+    return R.success({"tasks": _decorate_categories(cached), "version": version})
 
 
 # ---------------------------------------------------------------------------

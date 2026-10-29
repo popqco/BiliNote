@@ -21,6 +21,7 @@ from app.db.video_task_dao import get_task_by_video
 from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TaskStatus
 from app.services.automation_config_manager import AutomationConfigManager
+from app.services.automation_ignore import automation_ignore_store, ignore_key
 from app.services.note import NOTE_OUTPUT_DIR, TERMINAL_STATUSES, find_active_task_by_video
 from app.services.note_tasks import note_task_service
 from app.services import task_state
@@ -320,9 +321,23 @@ class AutomationScheduler:
         submitted: List[dict] = []
         skipped: List[dict] = []
 
+        # 删除墓碑：用户手动删过笔记的视频不再自动生成（automation_ignore）。
+        # 轮前读一次快照，不逐个视频读文件；损坏时退化为空名单，不影响本轮。
+        try:
+            ignored_keys = automation_ignore_store().keys()
+        except Exception as e:
+            logger.warning(f"读取自动化忽略名单失败（按空名单继续）: {e}")
+            ignored_keys = set()
+
         for it in items:
             bv = it.get("bvid")
             if not bv:
+                continue
+            if ignore_key(bv, "bilibili") in ignored_keys:
+                skipped.append({
+                    "bvid": bv,
+                    "reason": "已手动删除并加入忽略名单（可在 设置→自动化 移除）",
+                })
                 continue
             if get_task_by_video(bv, "bilibili"):
                 skipped.append({"bvid": bv, "reason": "已有成功笔记"})
@@ -430,6 +445,17 @@ class AutomationScheduler:
             },
             root=NOTE_OUTPUT_DIR,
         )
+
+        # 自动化默认分类（可选）：无人值守生成的笔记直接归入指定分类。
+        # 分类可能已被删除，assign 对不存在的分类是 no-op，不会阻塞提交。
+        category_id = str(gen.get("category_id") or "").strip()
+        if category_id:
+            try:
+                from app.services.note_categories import note_category_store
+
+                note_category_store().assign([task_id], category_id)
+            except Exception as e:
+                logger.warning(f"自动化默认分类写入失败 (task_id={task_id}): {e}")
 
         # 复用同一条执行路径（执行队列 / 同视频锁 / 向量索引），仅入口不同
         args = (

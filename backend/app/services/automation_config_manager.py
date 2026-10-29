@@ -33,6 +33,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "video_interval": 6,
         "grid_size": [2, 2],
         "extras": "",
+        # 可选：自动生成的笔记默认归入的分类 id（空 = 未分类）。
+        # 分类可能被删，自动化侧 assign 对不存在的分类是 no-op。
+        "category_id": "",
     },
     "notify": {
         "min_interval_minutes": 30,  # 两次通知的最小间隔（0 = 每轮都发），与扫描频率解耦

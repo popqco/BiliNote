@@ -492,23 +492,35 @@ def _get_note_or_raise(task_id: str) -> dict:
 
 
 @mcp.tool(structured_output=False)
-def list_notes(limit: int = 10, status: str = "all", compact: bool = True) -> str:
+def list_notes(
+    limit: int = 10,
+    status: str = "all",
+    compact: bool = True,
+    category: Optional[str] = None,
+) -> str:
     """浏览/发现笔记（按最近更新排序）。已知 task_id 时不要调用本工具。
 
     Args:
         limit: 最多返回条数（1-300，默认 10）。
         status: 过滤状态：all / SUCCESS / FAILED 或进行中状态（默认 all）。
         compact: 默认 True，省略视频链接，只保留标题/平台/状态/时间/task_id。
+        category: 只看某个分类（按分类名，或 "未分类"），不传 = 全部。
 
     Returns:
-        每行一条：标题、平台、状态、更新时间、task_id。
+        每行一条：标题、平台、状态、更新时间、task_id（有分类时附分类名）。
     """
     tasks = _recent_tasks(limit=300)
     if status and status != "all":
         tasks = [t for t in tasks if t.get("status") == status]
+    if category:
+        wanted = str(category).strip()
+        if wanted in ("未分类", "-", "none", "None"):
+            tasks = [t for t in tasks if not t.get("category_name")]
+        else:
+            tasks = [t for t in tasks if str(t.get("category_name") or "") == wanted]
     tasks = tasks[: max(1, min(limit, 300))]
     if not tasks:
-        return _ret("list_notes", "笔记库为空（或没有匹配状态的笔记）。")
+        return _ret("list_notes", "笔记库为空（或没有匹配的笔记）。")
 
     lines = []
     for t in tasks:
@@ -517,6 +529,8 @@ def list_notes(limit: int = 10, status: str = "all", compact: bool = True) -> st
             f"- {title} | {t.get('platform', '-')} | {t.get('status')} "
             f"| {_fmt_datetime(t.get('updated_at'))} | task_id=`{t.get('task_id')}`"
         )
+        if t.get("category_name"):
+            line += f" | 分类:{t['category_name']}"
         if not compact:
             line += f" | {t.get('video_url', '')}"
         lines.append(line)

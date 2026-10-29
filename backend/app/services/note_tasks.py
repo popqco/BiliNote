@@ -265,6 +265,16 @@ class NoteTaskService:
             logger.warning(f"拒绝 generate_note：缺少模型参数（video_id={video_id}）")
             raise NoteTaskError("请选择模型和提供者后再提交", code=400)
 
+        # 用户主动重新提交 = 收回「删除后不再自动生成」的意思（automation_ignore）。
+        # 只解除自动化忽略名单，手动/MCP 提交本身从不受它拦截。
+        if video_id:
+            try:
+                from app.services.automation_ignore import automation_ignore_store
+
+                automation_ignore_store().remove(video_id, platform)
+            except Exception as e:
+                logger.warning(f"解除自动化忽略名单失败 (video_id={video_id}): {e}")
+
         if task_id:
             # 重试去重：同一个 task 正在跑时再点「重新生成」会往队列塞副本并
             # 把状态改回 PENDING。内存命中先核磁盘终态，僵尸登记清掉后放行。

@@ -233,6 +233,45 @@ def automation_status():
     return R.success(data=state)
 
 
+@router.get("/automation_ignore")
+def automation_ignore_list():
+    """被用户删除过、因而不再自动生成的视频（删除墓碑）。"""
+    from app.services.automation_ignore import automation_ignore_store
+
+    items = automation_ignore_store().items()
+    return R.success(data={"items": items, "count": len(items)})
+
+
+class AutomationIgnoreRemoveRequest(BaseModel):
+    video_id: str
+    platform: Optional[str] = "bilibili"
+
+
+@router.post("/automation_ignore/remove")
+def automation_ignore_remove(data: AutomationIgnoreRemoveRequest):
+    """把某个视频从忽略名单拿掉：下一次检查轮会重新考虑它。"""
+    from app.services.automation_ignore import automation_ignore_store
+
+    try:
+        removed = automation_ignore_store().remove(data.video_id, data.platform or "bilibili")
+    except Exception as e:
+        return R.error(msg=f"移除失败：{e}", code=500)
+    if not removed:
+        return R.error(msg="该视频不在忽略名单中", code=404)
+    return R.success({"removed": True}, msg="已恢复自动生成")
+
+
+@router.post("/automation_ignore/clear")
+def automation_ignore_clear():
+    from app.services.automation_ignore import automation_ignore_store
+
+    try:
+        count = automation_ignore_store().clear()
+    except Exception as e:
+        return R.error(msg=f"清空失败：{e}", code=500)
+    return R.success({"cleared": count}, msg=f"已清空忽略名单（{count} 条）")
+
+
 @router.get("/automation/check_login")
 def automation_check_login():
     """快速校验 B 站 Cookie（拉一次稍后再看），供「运行一轮」前置检查与「测试连接」用。
