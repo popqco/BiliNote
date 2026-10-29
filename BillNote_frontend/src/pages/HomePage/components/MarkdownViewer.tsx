@@ -32,6 +32,7 @@ import { useTaskStore, ACTIVE_STATUSES } from '@/store/taskStore'
 import { useChatJumpStore, type SourceJumpTarget } from '@/store/chatStore'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
+import { NoteCategoryBadge } from '@/components/NoteCategoryMenu.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import { useSmoothScroll } from '@/hooks/useSmoothScroll'
 import { useStopArmed } from '@/hooks/useStopArmed'
@@ -1047,6 +1048,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         setViewMode={setViewMode}
         showScreenshots={hasScreenshots ? showScreenshots : undefined}
         onToggleShowScreenshots={hasScreenshots ? toggleShowScreenshots : undefined}
+        categorySlot={currentTask ? <NoteCategoryBadge taskId={currentTask.id} /> : undefined}
       />
 
       {viewMode === 'map' ? (

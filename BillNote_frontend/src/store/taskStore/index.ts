@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import { cancel_task, delete_task, generateNote, get_task_status, get_task_versions } from '@/services/note.ts'
+import { assign_note_category } from '@/services/categories.ts'
 import { beginForegroundTask, endForegroundTask } from '@/utils/backgroundPriority.ts'
 import { v4 as uuidv4 } from 'uuid'
 import toast from 'react-hot-toast'
@@ -72,6 +73,8 @@ export interface Task {
   queuePosition?: number
   /** 任务来源：manual=界面提交，auto=自动化检查轮创建 */
   origin?: string
+  /** 笔记分类 id（后端 note_categories.json 的 assignments；无 = 未分类） */
+  category?: string
   /**
    * 本次执行在本地被观察/发起的时刻（ms）。「停止生成」入口在刚启动后的
    * STOP_ARM_MS 内保持不可用——点「重新生成」后按钮位/面板会在毫秒级变成
@@ -140,6 +143,10 @@ interface TaskStore {
   /** 停止正在生成/排队中的任务（后端 /cancel_task）：状态落 CANCELLED，
    *  改完模型/参数可直接重新生成，不必干等整条流程跑完 */
   cancelTask: (id: string) => Promise<boolean>
+  /** 批量归类（乐观更新 + 失败回滚；categoryId=null 表示未分类） */
+  assignCategory: (ids: string[], categoryId: string | null) => Promise<boolean>
+  /** 分类被删除后：本地把该分类下的卡片显示为未分类（后端已断开关联） */
+  dropCategory: (categoryId: string) => void
 }
 
 /** 「进行中」状态集合（排队/执行中的全部阶段）：停止按钮的可见性、startedAt
@@ -237,6 +244,14 @@ export const mergeAudioMeta = (
   return base as AudioMeta
 }
 
+/** 刚在本机改过分类的任务（task_id → 时间戳）。
+ *
+ * 归类请求返回后，之前已经发出的 /tasks/recent 轮询可能带着旧分类落地，
+ * 把乐观更新冲掉（卡片闪回未分类、5 秒后再变回来）。窗口期内同步不覆盖分类。
+ */
+const categoryWriteGuard = new Map<string, number>()
+const CATEGORY_GUARD_MS = 10_000
+
 /** 结果文件里的生成参数快照键：只补本地缺失值，不覆盖用户提交时的选择 */
 const RESULT_FORM_KEYS = [
   'model_name',
@@ -271,6 +286,7 @@ const backendTaskToTask = (bt: any, result?: any, createdAt?: string): Task => {
     status: bt.status,
     message: bt.message || undefined,
     origin: bt.origin || 'manual',
+    category: bt.category || undefined,
     markdown: result?.markdown || '',
     transcript: result?.transcript || { full_text: '', language: '', raw: null, segments: [] },
     // 概要与结果文件合并：结果文件缺封面/标题时保留 /tasks/recent 的值
@@ -490,16 +506,28 @@ export const useTaskStore = create<TaskStore>()(
               video_id: (bt as any).video_id || t.audioMeta?.video_id || '',
               platform: (bt as any).platform || t.audioMeta?.platform || '',
             }
+            // 分类跟随后端，但刚在本机改过的（窗口期）不让旧轮询覆盖乐观更新
+            const guarded =
+              Date.now() - (categoryWriteGuard.get(t.id) || 0) < CATEGORY_GUARD_MS
+            const btCategory = (bt as any).category || undefined
+            const nextCategory = guarded ? t.category : btCategory
             // status/message 跟随后端终态走（失败原因等），正文/版本不碰
             if (
               meta.title === t.audioMeta?.title &&
               meta.cover_url === t.audioMeta?.cover_url &&
               (bt as any).status === t.status &&
-              ((bt as any).message || undefined) === t.message
+              ((bt as any).message || undefined) === t.message &&
+              nextCategory === t.category
             )
               return t
             touched = true
-            return { ...t, status: (bt as any).status ?? t.status, message: (bt as any).message || undefined, audioMeta: meta }
+            return {
+              ...t,
+              status: (bt as any).status ?? t.status,
+              message: (bt as any).message || undefined,
+              category: nextCategory,
+              audioMeta: meta,
+            }
           })
           const incoming: Task[] = []
           for (const bt of byId.values()) {
@@ -615,13 +643,18 @@ export const useTaskStore = create<TaskStore>()(
         // 只是空实现，卡片删掉 30 秒后又被 /tasks/recent 同步回来。
         if (task) {
           try {
-            await delete_task({
+            const res: any = await delete_task({
               task_id: task.id,
               video_id: task.audioMeta?.video_id,
               platform:
                 task.audioMeta?.platform || (task as any).platform || task.formData?.platform || 'bilibili',
             })
-            toast.success('已删除该笔记')
+            // 后端会把被删视频写进「自动化忽略名单」（不再自动重新生成），
+            // 当场告知用户，免得以为删完还会被自动化补回来
+            const ignored = Array.isArray(res?.ignored) ? res.ignored.length : 0
+            toast.success(
+              ignored > 0 ? '已删除该笔记（该视频不会再被自动化生成）' : '已删除该笔记',
+            )
           } catch (e: any) {
             // 删除失败（例如任务还在生成中）：把卡片放回去，别让用户以为删干净了
             set(state =>
@@ -679,6 +712,41 @@ export const useTaskStore = create<TaskStore>()(
           return false
         }
       },
+
+      assignCategory: async (ids, categoryId) => {
+        const unique = Array.from(new Set((ids || []).filter(Boolean)))
+        if (unique.length === 0) return false
+        const prev = new Map(get().tasks.map(t => [t.id, t.category]))
+        const now = Date.now()
+        unique.forEach(id => categoryWriteGuard.set(id, now))
+        set(state => ({
+          tasks: state.tasks.map(t =>
+            unique.includes(t.id) ? { ...t, category: categoryId || undefined } : t,
+          ),
+        }))
+        try {
+          await assign_note_category(unique, categoryId)
+          return true
+        } catch (e: any) {
+          set(state => ({
+            tasks: state.tasks.map(t =>
+              unique.includes(t.id) ? { ...t, category: prev.get(t.id) } : t,
+            ),
+          }))
+          unique.forEach(id => categoryWriteGuard.delete(id))
+          const msg = e?.msg || e?.detail || '归类失败'
+          toast.error(typeof msg === 'string' ? msg : '归类失败')
+          console.error('❌ 归类失败:', e)
+          return false
+        }
+      },
+
+      dropCategory: categoryId =>
+        set(state => ({
+          tasks: state.tasks.map(t =>
+            t.category === categoryId ? { ...t, category: undefined } : t,
+          ),
+        })),
 
       dropLocalTasks: ids => {
         const drop = new Set(ids)

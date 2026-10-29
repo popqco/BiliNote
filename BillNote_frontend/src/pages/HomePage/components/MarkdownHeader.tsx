@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { ReactNode, useEffect, useState } from 'react'
 import { Copy, Download, ChevronDown, FileText, FileDown, FileType2, Image, ImageOff, Share2, BrainCircuit, MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
@@ -44,6 +44,8 @@ interface NoteHeaderProps {
   /** 原片截图显隐（2026-10-05）：仅当笔记里带截图时才传，未传则不显示开关 */
   showScreenshots?: boolean
   onToggleShowScreenshots?: () => void
+  /** 笔记分类控件（阅读页顶部直接归类，由 MarkdownViewer 注入） */
+  categorySlot?: ReactNode
 }
 
 export function MarkdownHeader({
@@ -66,6 +68,7 @@ export function MarkdownHeader({
   setViewMode,
   showScreenshots,
   onToggleShowScreenshots,
+  categorySlot,
 }: NoteHeaderProps) {
   const [copied, setCopied] = useState(false)
 
@@ -145,6 +148,8 @@ export function MarkdownHeader({
         <Badge variant="secondary" className="bg-cyan-100 text-cyan-700 hover:bg-cyan-200 dark:bg-cyan-500/15 dark:text-cyan-300 dark:hover:bg-cyan-500/25">
           {styleName}
         </Badge>
+
+        {categorySlot}
 
         {createAt && (
           <div className="text-muted-foreground text-sm">创建时间: {formatDate(createAt)}</div>

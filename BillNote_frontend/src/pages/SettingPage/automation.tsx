@@ -22,7 +22,11 @@ import {
   run_automation_now,
   get_automation_status,
   check_automation_login,
+  get_automation_ignore,
+  remove_automation_ignore,
+  clear_automation_ignore,
 } from '@/services/automation.ts'
+import { useCategoryStore } from '@/store/categoryStore'
 
 /** 不可变地写入深层字段 */
 const setIn = (obj: any, path: string[], value: any) => {
@@ -61,15 +65,25 @@ const Automation = () => {
   const [cfg, setCfg] = useState<any>(null)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<any>(null)
+  // 删除墓碑清单（被手动删过笔记、不再自动生成的视频）
+  const [ignoreItems, setIgnoreItems] = useState<any[]>([])
   const { loadEnabledModels, modelList } = useModelStore()
+  const categories = useCategoryStore(s => s.categories)
+  const loadCategories = useCategoryStore(s => s.load)
 
   useEffect(() => {
     loadEnabledModels()
+    void loadCategories()
     get_automation_config().then(c => setCfg(c)).catch(() => {})
     refreshStatus()
+    refreshIgnore()
   }, [])
 
   const refreshStatus = () => get_automation_status().then(s => setStatus(s)).catch(() => {})
+  const refreshIgnore = () =>
+    get_automation_ignore()
+      .then((res: any) => setIgnoreItems(res?.items || []))
+      .catch(() => {})
 
   // 一轮可能跑几分钟（下载+转写+生成）：跑的过程中让面板自己刷新，
   // 用户能看到阶段/提交数变化，而不是盯着一个静止的「进行中」。
@@ -122,10 +136,34 @@ const Automation = () => {
     }
   }
 
-  /**
-   * 「立即运行一轮」：先校验 Cookie（失败当场给出原因，不再"点了没反应"），
-   * 触发后轮询 /automation/status，把本轮提交/跳过明细或失败原因回显出来。
-   */
+  /** 从忽略名单移除：这一轮之后自动化会重新考虑该视频 */
+  const onUnignore = async (item: any) => {
+    try {
+      await remove_automation_ignore(item.video_id, item.platform || 'bilibili')
+      toast.success('已恢复自动生成')
+    } catch (e: any) {
+      if (!isRemoteLocked(e)) console.error(e)
+    } finally {
+      refreshIgnore()
+    }
+  }
+
+  const onClearIgnore = async () => {
+    if (ignoreItems.length === 0) return
+    const ok = window.confirm(
+      `清空忽略名单（${ignoreItems.length} 条）？\n\n这些视频之后会被自动化重新考虑（可能重新生成笔记）。`,
+    )
+    if (!ok) return
+    try {
+      await clear_automation_ignore()
+      toast.success('已清空忽略名单')
+    } catch (e: any) {
+      if (!isRemoteLocked(e)) console.error(e)
+    } finally {
+      refreshIgnore()
+    }
+  }
+
   /**
    * 「立即运行一轮」：先校验 Cookie（失败当场给出原因，不再"点了没反应"），
    * 触发后轮询 /automation/status，把本轮提交/跳过明细或失败原因回显出来。
@@ -330,6 +368,27 @@ const Automation = () => {
             </SelectContent>
           </Select>
         </Row>
+        <Row
+          label="自动生成的笔记归入分类"
+          desc="可选：无人值守生成的笔记自动归类（分类在「生成历史」面板右上角齿轮里管理）"
+        >
+          <Select
+            value={gen.category_id || '__none__'}
+            onValueChange={v => upd(['gen', 'category_id'], v === '__none__' ? '' : v)}
+          >
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">不归类（未分类）</SelectItem>
+              {categories.map(c => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Row>
         <Row label="视频理解（抽帧辅助分析）">
           <Checkbox
             checked={!!gen.video_understanding}
@@ -446,6 +505,47 @@ const Automation = () => {
             <SendHorizonal className="mr-2 h-4 w-4" /> 发送测试通知
           </Button>
         </div>
+      </Section>
+
+      <Section
+        title="已忽略的视频"
+        desc="这些视频的笔记被你手动删除过，自动化不会再为它们生成笔记（视频仍在「稍后再看」里也没关系）。点「移除」恢复自动生成；直接在首页粘贴该视频链接重新生成也会自动解除。"
+      >
+        {ignoreItems.length === 0 ? (
+          <div className="text-muted-foreground text-sm">暂无（删除笔记后会自动出现在这里）</div>
+        ) : (
+          <>
+            <div className="flex flex-col gap-1">
+              {ignoreItems.map(item => (
+                <div
+                  key={item.key || `${item.platform}:${item.video_id}`}
+                  className="border-border flex items-center gap-2 rounded-md border px-2 py-1.5 text-sm"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {item.title || item.video_id}
+                  </span>
+                  <span className="text-muted-foreground shrink-0 text-xs">{item.video_id}</span>
+                  <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline">
+                    {item.ts ? new Date(item.ts * 1000).toLocaleDateString() : ''}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => void onUnignore(item)}
+                    disabled={busy}
+                  >
+                    移除
+                  </Button>
+                </div>
+              ))}
+            </div>
+            <div>
+              <Button variant="outline" onClick={() => void onClearIgnore()} disabled={busy}>
+                清空忽略名单
+              </Button>
+            </div>
+          </>
+        )}
       </Section>
 
       <Alert variant="warning" className="mt-6 text-sm">
