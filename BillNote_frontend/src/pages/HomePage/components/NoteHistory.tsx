@@ -2,10 +2,11 @@ import { useTaskStore, ACTIVE_STATUSES, type Task } from '@/store/taskStore'
 import { useCategoryStore } from '@/store/categoryStore'
 import { useStopArmed } from '@/hooks/useStopArmed'
 import { cn } from '@/lib/utils.ts'
-import { Settings2, Square, Tag, Trash } from 'lucide-react'
+import { Square, Tag, Trash } from 'lucide-react'
 import { Button } from '@/components/ui/button.tsx'
 import { Checkbox } from '@/components/ui/checkbox.tsx'
 import { NoteCategoryMenu } from '@/components/NoteCategoryMenu.tsx'
+import { NoteCategoryFilterMenu, type CategoryFilter } from '@/components/NoteCategoryFilterMenu.tsx'
 import { CategoryManageDialog } from '@/components/CategoryManageDialog.tsx'
 import Fuse from 'fuse.js'
 
@@ -17,7 +18,7 @@ import {
 } from '@/components/ui/tooltip.tsx'
 import LazyImage from "@/components/LazyImage.tsx";
 import { buildImageProxyUrl } from "@/utils/workerConnection.ts";
-import {FC, ReactNode, useState, useEffect, useMemo} from 'react'
+import { FC, useState, useEffect, useMemo } from 'react'
 
 interface NoteHistoryProps {
   onSelect: (taskId: string) => void
@@ -91,40 +92,17 @@ const CardStopButton: FC<{ task: Task }> = ({ task }) => {
   )
 }
 
-/** 分类筛选 chip（横向滚动一行，数量多了不挤爆窄面板） */
-const FilterChip: FC<{
-  active: boolean
-  color?: string
-  onClick: () => void
-  children: ReactNode
-}> = ({ active, color, onClick, children }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    className={cn(
-      'flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] whitespace-nowrap transition-colors',
-      active
-        ? 'border-primary bg-primary/10 text-primary'
-        : 'border-border text-muted-foreground hover:text-foreground',
-    )}
-  >
-    {color && (
-      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />
-    )}
-    {children}
-  </button>
-)
-
 const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
   const tasks = useTaskStore(state => state.tasks)
   const removeTask = useTaskStore(state => state.removeTask)
   const categories = useCategoryStore(state => state.categories)
   const loadCategories = useCategoryStore(state => state.load)
+  const assignCategory = useCategoryStore(state => state.assign)
 
   const [rawSearch, setRawSearch] = useState('')
   const [search, setSearch] = useState('')
   // 分类筛选：all=全部 / none=未分类 / <category id>
-  const [catFilter, setCatFilter] = useState<'all' | 'none' | string>('all')
+  const [catFilter, setCatFilter] = useState<CategoryFilter>('all')
   // 批量归类模式：200+ 存量笔记靠它一次归类，而不是点几百次
   const [bulk, setBulk] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -208,15 +186,29 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
     setSelected(new Set())
   }
 
+  /** 批量移到某个分类（null = 未分类）；成功后退出选择态，失败由 store 回滚并提示 */
+  const bulkAssign = async (categoryId: string | null) => {
+    if (selected.size === 0) return
+    const ok = await assignCategory(Array.from(selected), categoryId)
+    if (ok) exitBulk()
+  }
+
   return (
     <>
-      <div className="mb-2 flex items-center gap-2">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
         <input
             type="text"
             placeholder="搜索笔记标题..."
-            className="border-border bg-background focus:border-primary min-w-0 flex-1 rounded border px-3 py-1 text-sm outline-none"
+            className="border-border bg-background focus:border-primary min-w-[110px] flex-1 rounded border px-3 py-1 text-sm outline-none"
             value={rawSearch}
             onChange={e => setRawSearch(e.target.value)}
+        />
+        <NoteCategoryFilterMenu
+          value={catFilter}
+          total={tasks.length}
+          counts={counts}
+          onChange={setCatFilter}
+          onManage={() => setManageOpen(true)}
         />
         <Button
           type="button"
@@ -228,66 +220,52 @@ const NoteHistory: FC<NoteHistoryProps> = ({ onSelect, selectedId }) => {
         </Button>
       </div>
 
-      <div className="mb-2 flex items-center gap-1 overflow-x-auto pb-0.5">
-        <FilterChip active={catFilter === 'all'} onClick={() => setCatFilter('all')}>
-          全部 {tasks.length}
-        </FilterChip>
-        <FilterChip active={catFilter === 'none'} onClick={() => setCatFilter('none')}>
-          未分类 {counts.none}
-        </FilterChip>
-        {categories.map(cat => (
-          <FilterChip
-            key={cat.id}
-            color={cat.color}
-            active={catFilter === cat.id}
-            onClick={() => setCatFilter(cat.id)}
-          >
-            {cat.name} {counts.per.get(cat.id) || 0}
-          </FilterChip>
-        ))}
-        <button
-          type="button"
-          aria-label="管理分类"
-          title="管理分类"
-          onClick={() => setManageOpen(true)}
-          className="text-muted-foreground hover:text-foreground border-border ml-auto shrink-0 rounded-full border p-1"
-        >
-          <Settings2 className="h-3 w-3" />
-        </button>
-      </div>
-
       {bulk && (
-        <div className="border-border bg-muted/40 mb-2 flex flex-wrap items-center gap-2 rounded-md border px-2 py-1.5 text-[11px]">
-          <span className="text-muted-foreground">已选 {selected.size}</span>
+        <div className="border-border bg-popover mb-2 flex items-center gap-1.5 rounded-full border px-2 py-1.5">
+          <span className="text-muted-foreground shrink-0 text-[11px]">
+            已选 <b className="text-foreground font-medium">{selected.size}</b>
+          </span>
+          {selected.size > 0 ? (
+            <>
+              <span className="text-muted-foreground shrink-0 text-[11px]">移到</span>
+              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                {categories.map(cat => (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => void bulkAssign(cat.id)}
+                    className="shrink-0 rounded-full px-2 py-0.5 text-[10px] whitespace-nowrap transition-[filter] hover:brightness-110"
+                    style={{ background: `${cat.color}24`, color: cat.color }}
+                  >
+                    {cat.name}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => void bulkAssign(null)}
+                  className="bg-muted text-muted-foreground hover:text-foreground shrink-0 rounded-full px-2 py-0.5 text-[10px] whitespace-nowrap"
+                >
+                  未分类
+                </button>
+              </div>
+            </>
+          ) : (
+            <span className="text-muted-foreground min-w-0 flex-1 truncate text-[11px]">勾选笔记，或</span>
+          )}
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            className="h-6 px-2 text-[11px]"
+            className="h-6 shrink-0 px-1.5 text-[10px]"
             onClick={() => setSelected(new Set(filteredTasks.map(t => t.id)))}
           >
-            全选当前筛选（{filteredTasks.length}）
+            全选（{filteredTasks.length}）
           </Button>
-          <NoteCategoryMenu
-            taskIds={Array.from(selected)}
-            onManage={() => setManageOpen(true)}
-            onDone={exitBulk}
-          >
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-[11px]"
-              disabled={selected.size === 0}
-            >
-              加入分类
-            </Button>
-          </NoteCategoryMenu>
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            className="h-6 px-2 text-[11px]"
+            className="h-6 shrink-0 px-1.5 text-[10px]"
             onClick={exitBulk}
           >
             取消
